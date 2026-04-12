@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pytest-mes-core"
+version = "0.1.0"
+description = "Enterprise MES framework core for hardware testing. Strict typing, JSONL telemetry, and zero-leakage."
+authors = [{name = "Filip Milev"}]
+requires-python = ">=3.11"
+dependencies = [
+    "pytest>=8.0.0",
+    "pytest-html>=4.1.0",
+    "pytest-timeout>=2.3.0",
+    "pytest-dependency",
+    "pytest-repeat",
+    "pydantic>=2.7.0",
+    "fabric",
+    "pyserial>=3.5",
+    "python-can>=4.3.0",
+    "tenacity",
+    # --- Hardware & Instrument Drivers ---
+    "evdev>=1.7.0",
+    "pyvisa>=1.14.0",
+    "pyvisa-py>=0.7.1",
+    "gpiod>=2.1.3"
+]
+
+[project.entry-points.pytest11]
+# Magically injects the framework into any pytest run on the Host PC
+mes_core = "pytest_mes_core.plugin"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pytest_mes_core"]
+
+[tool.mypy]
+strict = true
