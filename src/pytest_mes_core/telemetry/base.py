@@ -1,9 +1,10 @@
+# src/pytest_mes_core/telemetry/base.py
 import time
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import Dict, Any, Protocol, Optional
 
-from pytest_mes_core.protocols import ValidatorResult
+from pytest_mes_core.protocols.base import ValidatorResult
 
 # ==========================================
 # DOMAIN EXCEPTIONS
@@ -32,21 +33,39 @@ class StationContext:
     """
     jig_id: str
     operator_id: str
-    dut_serial: str
-    firmware_version: str
+    # These two might be injected later in the test if the DUT is scanned mid-setup,
+    # but defining them here sets the structural contract.
+    dut_serial: str = "PENDING"
+    firmware_version: str = "UNKNOWN"
+
+    facility: Optional[str] = None
     environment: str = "production"
     run_id: str = field(default_factory=lambda: datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f"))
 
-@dataclass(frozen=True)
+
+@dataclass
 class TestRecord:
     """
     The Ultimate Telemetry Payload.
     Fuses the Factory Metadata with the physical hardware evaluation.
+    Not frozen, because the Pytest setup/call/teardown hooks mutate it.
     """
-    station_context: StationContext
+    # Required fields MUST go first in Python dataclasses
     test_name: str
-    result: ValidatorResult
+
+    # Optional fields with defaults follow
+    station_context: Optional[StationContext] = None
+    iteration: int = 1
+    passed: bool = False
+    duration_s: float = 0.0
+    error_message: Optional[str] = None
+    result: Optional[ValidatorResult] = None
+
+    # Fixed typo: 'field' instead of 'Field'
     timestamp_utc: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+    # Required to support our Automated Forensic Dumps feature!
+    context: Dict[str, Any] = field(default_factory=dict)
 
 
 # ==========================================

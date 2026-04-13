@@ -4,6 +4,7 @@ import json
 import time
 import logging
 import dataclasses
+from enum import Enum
 from pathlib import Path
 
 try:
@@ -11,7 +12,7 @@ try:
 except ImportError:
     fcntl = None  # Graceful fallback for developers testing on Windows PCs
 
-from pytest_mes_core.telemetry import (
+from pytest_mes_core.telemetry.base import (
     StationContext,
     TestRecord,
     TelemetryDeliveryError,
@@ -19,6 +20,34 @@ from pytest_mes_core.telemetry import (
 )
 
 logger = logging.getLogger("mes_core.telemetry.jsonl")
+
+class MesTelemetryEncoder(json.JSONEncoder):
+    """
+    Advanced JSON encoder that gracefully serializes Python-specific constructs
+    (Enums, bytes, generic Dataclasses) that often end up in the `context` dictionary.
+    """
+    def default(self, obj):
+        if isinstance(obj, Enum):
+            return obj.value
+        if isinstance(obj, bytes):
+            # Attempt UTF-8, fallback to hex string to prevent ugly "b'...'" strings
+            try:
+                return obj.decode('utf-8')
+            except UnicodeDecodeError:
+                return obj.hex()
+        if dataclasses.is_dataclass(obj):
+            return dataclasses.asdict(obj)
+        if hasattr(obj, "model_dump"): # Support Pydantic models
+            return obj.model_dump()
+
+        # Absolute fallback: cast to string, but strip out the memory addresses
+        # e.g., "<MyObject object at 0x7f8b...>" -> "MyObject"
+        str_val = str(obj)
+        if str_val.startswith("<") and " object at " in str_val:
+            return obj.__class__.__name__
+
+        return str_val
+
 
 class JsonlTelemetryExporter:
     """
@@ -52,11 +81,9 @@ class JsonlTelemetryExporter:
 
         # 1. Defensive Serialization Shield
         try:
-            # We use default=str to guarantee that weird objects (like raw bytes,
-            # Exceptions, or un-serializable classes in the context dictionary)
-            # are gracefully cast to strings rather than crashing the JSON parser.
             raw_dict = dataclasses.asdict(record)
-            payload_str = json.dumps(raw_dict, default=str) + "\n"
+            # Use our custom encoder to ensure clean, Grafana-ready JSON
+            payload_str = json.dumps(raw_dict, cls=MesTelemetryEncoder) + "\n"
         except Exception as e:
             logger.error(f"[Telemetry] Fatal JSON Serialization failure: {e}")
             raise TelemetrySerializationError(f"Failed to serialize record for {record.test_name}")
