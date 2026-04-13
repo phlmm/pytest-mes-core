@@ -80,5 +80,6 @@ class OpenOcdDaemonAdapter(BaseHostAdapter):
             except subprocess.TimeoutExpired:
                 logger.warning("[JTAG] OpenOCD refused to terminate. Executing SIGKILL.")
                 self._process.kill()
+                self._process.wait() # Reap the zombie
             finally:
                 self._process = None

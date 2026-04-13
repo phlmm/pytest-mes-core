@@ -21,34 +21,6 @@ from pytest_mes_core.telemetry.base import (
 
 logger = logging.getLogger("mes_core.telemetry.jsonl")
 
-class MesTelemetryEncoder(json.JSONEncoder):
-    """
-    Advanced JSON encoder that gracefully serializes Python-specific constructs
-    (Enums, bytes, generic Dataclasses) that often end up in the `context` dictionary.
-    """
-    def default(self, obj):
-        if isinstance(obj, Enum):
-            return obj.value
-        if isinstance(obj, bytes):
-            # Attempt UTF-8, fallback to hex string to prevent ugly "b'...'" strings
-            try:
-                return obj.decode('utf-8')
-            except UnicodeDecodeError:
-                return obj.hex()
-        if dataclasses.is_dataclass(obj):
-            return dataclasses.asdict(obj)
-        if hasattr(obj, "model_dump"): # Support Pydantic models
-            return obj.model_dump()
-
-        # Absolute fallback: cast to string, but strip out the memory addresses
-        # e.g., "<MyObject object at 0x7f8b...>" -> "MyObject"
-        str_val = str(obj)
-        if str_val.startswith("<") and " object at " in str_val:
-            return obj.__class__.__name__
-
-        return str_val
-
-
 class JsonlTelemetryExporter:
     """
     Local Disk Telemetry Sink (Grafana/Promtail compatible).
@@ -76,18 +48,15 @@ class JsonlTelemetryExporter:
 
     def emit_record(self, record: TestRecord) -> None:
         """Serializes and flushes a single payload to the active file."""
+        # 1 Defensive Serialization
         if not self.active_file:
             raise TelemetryDeliveryError("Attempted to emit record before starting session.")
-
-        # 1. Defensive Serialization Shield
         try:
-            raw_dict = dataclasses.asdict(record)
-            # Use our custom encoder to ensure clean, Grafana-ready JSON
-            payload_str = json.dumps(raw_dict, cls=MesTelemetryEncoder) + "\n"
+            # Pydantic natively handles Enums, bytes, and JSON encoding flawlessly
+            payload_str = record.model_dump_json(exclude_none=True) + "\n"
         except Exception as e:
             logger.error(f"[Telemetry] Fatal JSON Serialization failure: {e}")
             raise TelemetrySerializationError(f"Failed to serialize record for {record.test_name}")
-
         # 2. Atomic Physical Write
         try:
             self._atomic_append(self.active_file, payload_str)

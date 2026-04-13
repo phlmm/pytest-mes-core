@@ -58,7 +58,7 @@ class BlockDeviceValidator:
         # ==========================================
         # 3. PHYSICAL EXECUTION (Defeat the Cache)
         # ==========================================
-        cmd = f"dd if=/dev/zero of={test_file} bs=1M count={test_file_size_mb} conv=fdatasync"
+        cmd = f"dd if=/dev/urandom of={test_file} bs=1M count={test_file_size_mb} conv=fdatasync"
 
         try:
             # We strictly use safe_run to inherit transport agnosticism and socket protections

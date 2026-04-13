@@ -15,7 +15,19 @@ class FailoverTransport:
         self.fallback = fallback
         self.is_failed_over = False
 
-    def safe_run(self, cmd: str, timeout_s: float = 30.0, **kwargs) -> CommandResult:
+    @property
+    def is_connected(self) -> bool:
+        return self.fallback.is_connected if self.is_failed_over else self.primary.is_connected
+
+    def connect(self) -> None:
+        self.primary.connect()
+        self.fallback.connect()
+
+    def disconnect(self) -> None:
+        self.primary.disconnect()
+        self.fallback.disconnect()
+
+    def safe_run(self, cmd: str, timeout_s: float = 30.0, **kwargs: Any) -> CommandResult:
         # If we already failed over during this test, stay on the fallback
         if self.is_failed_over:
             return self.fallback.safe_run(cmd, timeout_s, **kwargs)

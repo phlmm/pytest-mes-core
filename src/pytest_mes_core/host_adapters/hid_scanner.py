@@ -2,26 +2,28 @@
 import os
 import select
 import logging
-from typing import Optional, Any, List
+from typing import Optional, Any, List, TYPE_CHECKING
 
 # ==========================================
 # CROSS-PLATFORM STATIC TYPING STUBS
 # ==========================================
 # Evdev is Linux-only. We use dummy stubs to satisfy strict Pylance/MyPy
 # type checkers when developing/linting on Windows or macOS.
+
+from typing import TYPE_CHECKING
+
 class _DummyInputDevice:
-    name: str
-    path: str
-    fd: int
-    def grab(self) -> None: pass
-    def ungrab(self) -> None: pass
-    def read_one(self) -> Any: pass
-    def read(self) -> Any: pass
-    def close(self) -> None: pass
+        name: str
+        path: str
+        fd: int
+        def grab(self) -> None: pass
+        def ungrab(self) -> None: pass
+        def read_one(self) -> Any: pass
+        def read(self) -> Any: pass
+        def close(self) -> None: pass
 
 class _DummyEcodes:
-    EV_KEY: int = 1
-
+        EV_KEY: int = 1
 try:
     from evdev import InputDevice, categorize, ecodes, list_devices
     HAS_EVDEV = True

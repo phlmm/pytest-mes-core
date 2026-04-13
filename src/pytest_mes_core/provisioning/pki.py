@@ -4,7 +4,7 @@ import base64
 import logging
 from pathlib import Path
 
-from pytest_mes_core.transports import BaseTransport
+from pytest_mes_core.transports import DutTransport
 from pytest_mes_core.provisioning import ProvisioningError
 
 # If you decide to move the Validator to protocols/pki.py later, that's perfectly fine.
@@ -21,7 +21,7 @@ class PkiProvisioner:
 
     @staticmethod
     def provision_credential(
-        transport: BaseTransport,
+        transport: DutTransport,
         local_filepath: Path,
         remote_dest: str,
         permissions: str = "400"
@@ -45,11 +45,11 @@ class PkiProvisioner:
 
         # 2. Defensive Idempotency: Check if correct file is already there
         check_cmd = f"sha256sum {remote_dest} 2>/dev/null | awk '{{print $1}}'"
-        res_check = transport.execute(check_cmd)
+        res_check = transport.safe_run(check_cmd)
 
-        if res_check.exit_code == 0 and res_check.stdout.strip() == local_hash:
+        if res_check.exited == 0 and res_check.stdout.strip() == local_hash:
             logger.info("[PKI] Credential already exists on target with correct hash. Skipping transit.")
-            transport.execute(f"chmod {permissions} {remote_dest}")
+            transport.safe_run(f"chmod {permissions} {remote_dest}")
             return
 
         # 3. Base64 Encode and Chunk (CRITICAL FOR UART LINE BUFFERS)
@@ -60,26 +60,26 @@ class PkiProvisioner:
 
         # 4. Create remote directory tree
         remote_dir = "/".join(remote_dest.split("/")[:-1])
-        transport.execute(f"mkdir -p {remote_dir}")
+        transport.safe_run(f"mkdir -p {remote_dir}")
 
         # 5. Inject using POSIX Heredoc (UART & SSH Safe)
         # Using a heredoc (<< 'EOF') is infinitely safer than `echo '...'` because it bypasses
         # shell escaping issues and handles massive multi-line strings perfectly.
         inject_cmd = f"cat << 'EOF' | base64 -d > {remote_dest}\n{b64_payload}\nEOF"
-        res_inject = transport.execute(inject_cmd)
+        res_inject = transport.safe_run(inject_cmd)
 
-        if res_inject.exit_code != 0:
+        if res_inject.exited != 0:
             raise ProvisioningError(f"Failed to write payload to DUT: {res_inject.stderr.strip()}")
 
-        transport.execute(f"chmod {permissions} {remote_dest}")
+        transport.safe_run(f"chmod {permissions} {remote_dest}")
 
         # 6. Remote Hash Verification
-        remote_hash = transport.execute(check_cmd).stdout.strip()
+        remote_hash = transport.safe_run(check_cmd).stdout.strip()
 
         if local_hash != remote_hash:
             # ZERO LEAKAGE: Destroy the corrupted credential immediately
             logger.critical(f"[PKI] Transit corruption! Local: {local_hash}, Remote: {remote_hash}")
-            transport.execute(f"rm -f {remote_dest}")
+            transport.safe_run(f"rm -f {remote_dest}")
             raise ProvisioningError("Cryptographic transit failure. Corrupted payload destroyed on target.")
 
         logger.info("[PKI] Injection successful and verified.")
@@ -93,7 +93,7 @@ class PkiPairingValidator:
 
     @staticmethod
     def verify_x509_pairing(
-        transport: BaseTransport,
+        transport: DutTransport,
         remote_cert_path: str,
         remote_key_path: str
     ) -> ValidatorResult:
@@ -101,13 +101,13 @@ class PkiPairingValidator:
 
         # Extract modulus from Certificate
         cmd_cert = f"openssl x509 -noout -modulus -in {remote_cert_path} | openssl md5"
-        res_cert = transport.execute(cmd_cert)
+        res_cert = transport.safe_run(cmd_cert)
 
         # Extract modulus from Private Key
         cmd_key = f"openssl rsa -noout -modulus -in {remote_key_path} | openssl md5"
-        res_key = transport.execute(cmd_key)
+        res_key = transport.safe_run(cmd_key)
 
-        if res_cert.exit_code != 0 or res_key.exit_code != 0:
+        if res_cert.exited != 0 or res_key.exited != 0:
             logger.error("[PKI] OpenSSL error on DUT. Are the files readable?")
             return ValidatorResult(passed=False, error_msg="OpenSSL missing or files unreadable on target.")
 
@@ -118,7 +118,7 @@ class PkiPairingValidator:
             logger.critical(f"[PKI] PAIRING FAILED! Cert Modulus: {cert_mod}, Key Modulus: {key_mod}")
 
             # ZERO LEAKAGE: A mismatched key pair is a fatal security liability. Destroy them.
-            transport.execute(f"rm -f {remote_cert_path} {remote_key_path}")
+            transport.safe_run(f"rm -f {remote_cert_path} {remote_key_path}")
             return ValidatorResult(passed=False, error_msg="x509 Certificate and Private Key mismatch. Files destroyed.")
 
         logger.info("[PKI] Cryptographic pairing mathematically proven.")

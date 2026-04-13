@@ -175,15 +175,19 @@ def mes_record(
                     logger.warning(f"[Post-Mortem] Test {test_name} failed. Extracting final states over Transport...")
 
                     # Pstore safety net: wait for OS to recover if it kernel panicked
-                    if not dut_transport.is_connected():
-                        logger.info("[Post-Mortem] Transport dead. Waiting up to 15s for OS to recover...")
-                        dut_transport.wait_for_connection(timeout_s=15.0)
+                    if not dut_transport.is_connected:
+                        logger.info("[Post-Mortem] Transport dead. Attempting to reconnect...")
+                        try:
+                            # connect() natively handles timeouts and retries
+                            dut_transport.connect()
+                        except Exception:
+                            logger.error("[Post-Mortem] OS failed to recover. Aborting dumps.")
 
                     dump_context = {}
-                    if dut_transport.is_connected():
+                    if dut_transport.is_connected:
                         for cmd in commands_to_run:
-                            res = dut_transport.execute(cmd, timeout_s=5.0)
-                            dump_context[cmd] = res.stdout if res.exit_code == 0 else f"NO DATA: {res.stderr}"
+                            res = dut_transport.safe_run(cmd, timeout_s=5.0)
+                            dump_context[cmd] = res.stdout if res.exited == 0 else f"NO DATA: {res.stderr}"
 
                     record.context["post_mortem"] = dump_context
                     logger.info("[Post-Mortem] Forensic data attached to telemetry payload.")

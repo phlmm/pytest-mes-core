@@ -162,7 +162,7 @@ class EphemeralSerialClient:
     # ------------------------------------------
     # COMMAND EXECUTION
     # ------------------------------------------
-    def safe_run(self, cmd: str, timeout_s: float = 30.0, check_exit_code: bool = True) -> CommandResult:
+    def safe_run(self, cmd: str, timeout_s: float = 30.0, check_exit_code: bool = True, **kwargs: Any) -> CommandResult:
         """
         Executes a command and forces the remote shell to return an exit code.
         Drops echoed text and isolates the pure stdout.

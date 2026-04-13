@@ -20,6 +20,7 @@ from .hid_scanner import HeadlessBarcodeScanner, HidScannerTimeoutError
 from .serial_uart import HostSerialAdapter, HostSerialError
 from .safety import EStopWatchdog
 from .openocd import OpenOcdDaemonAdapter, HostOpenOcdError
+from .microchip import HostPickitAdapter
 
 __all__ = [
     # Contracts & Exceptions
@@ -42,6 +43,6 @@ __all__ = [
     "EStopWatchdog",
 
     # JTAG
-    "OpenOcdDaemonAdapter", "HostOpenOcdError"
+    "OpenOcdDaemonAdapter", "HostOpenOcdError",
     "HostPickitAdapter"
 ]

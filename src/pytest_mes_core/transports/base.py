@@ -23,10 +23,10 @@ class TransportTimeoutError(TransportError):
 # ==========================================
 @dataclass(frozen=True)
 class CommandResult:
-     """
+    """
     A unified, IMMUTABLE wrapper bridging various transport outputs.
     Guarantees strict data integrity between the physical layer and the parsing protocols.
-
+    """
     command: str        # The exact payload transmitted to the DUT
     stdout: str
     stderr: str

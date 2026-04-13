@@ -4,6 +4,8 @@ import logging
 from pytest_mes_core.transports import DutTransport
 from pytest_mes_core.protocols import ValidatorResult
 
+from pytest_mes_core.config import UsbStorageConfig
+
 logger = logging.getLogger("mes_core.protocols.usb")
 
 class UsbMassStorageValidator:
@@ -20,17 +22,17 @@ class UsbMassStorageValidator:
         """Dynamically maps the VID:PID to a logical block device (e.g., /dev/sda1)."""
         # Find the USB bus and device number for the specific VID:PID
         lsusb_cmd = f"lsusb -d {self.cfg.vid_hex}:{self.cfg.pid_hex}"
-        res = self.transport.execute(lsusb_cmd)
+        res = self.transport.safe_run(lsusb_cmd)
 
-        if res.exit_code != 0 or not res.stdout:
+        if res.exited != 0 or not res.stdout:
             return ""
 
         # Use udevadm or lsblk to map the physical USB ID to a block device
         # A robust embedded Linux trick is looking at the /dev/disk/by-id/ path
-        res_disk = self.transport.execute("ls -l /dev/disk/by-id/usb-* | grep -m 1 part1")
-        if res_disk.exit_code != 0:
+        res_disk = self.transport.safe_run("ls -l /dev/disk/by-id/usb-* | grep -m 1 part1")
+        if res_disk.exited != 0:
             # Fallback for stripped-down embedded systems
-            fallback = self.transport.execute("lsblk -l -o NAME,TRAN | grep usb | awk '{print $1}' | head -n 1")
+            fallback = self.transport.safe_run("lsblk -l -o NAME,TRAN | grep usb | awk '{print $1}' | head -n 1")
             return f"/dev/{fallback.stdout.strip()}1" if fallback.stdout.strip() else ""
 
         # Extract the device name (e.g., ../../sda1)
@@ -48,14 +50,14 @@ class UsbMassStorageValidator:
         logger.debug(f"[USB] Drive dynamically mapped to {block_dev}.")
 
         # 2. Clear Kernel Ring Buffer (For Brownout Detection)
-        self.transport.execute("dmesg -c > /dev/null")
+        self.transport.safe_run("dmesg -c > /dev/null")
 
         # 3. Safe Mounting
-        self.transport.execute(f"mkdir -p {self.mount_point}")
-        self.transport.execute(f"umount -l {block_dev}", warn=True) # Unmount if previously stuck
+        self.transport.safe_run(f"mkdir -p {self.mount_point}")
+        self.transport.safe_run(f"umount -l {block_dev}", warn=True) # Unmount if previously stuck
 
-        mount_res = self.transport.execute(f"mount {block_dev} {self.mount_point}")
-        if mount_res.exit_code != 0:
+        mount_res = self.transport.safe_run(f"mount {block_dev} {self.mount_point}")
+        if mount_res.exited != 0:
             return ValidatorResult(passed=False, error_msg=f"Failed to mount {block_dev}: {mount_res.stderr}")
 
         test_file = f"{self.mount_point}/factory_test.bin"
@@ -63,9 +65,9 @@ class UsbMassStorageValidator:
         try:
             # 4. Stress Test (Write random bytes & force sync)
             write_cmd = f"dd if=/dev/urandom of={test_file} bs=1M count={self.cfg.test_size_mb} conv=fsync"
-            write_res = self.transport.execute(write_cmd, timeout_s=45.0)
+            write_res = self.transport.safe_run(write_cmd, timeout_s=45.0)
 
-            if write_res.exit_code != 0:
+            if write_res.exited != 0:
                 return ValidatorResult(passed=False, error_msg=f"I/O Write Error: {write_res.stderr.strip()}")
 
             # Parse throughput (e.g., "5242880 bytes (5.2 MB, 5.0 MiB) copied, 0.5 s, 10.5 MB/s")
@@ -79,12 +81,12 @@ class UsbMassStorageValidator:
                 )
 
             # 5. Readback / Integrity Verification
-            hash_res = self.transport.execute(f"md5sum {test_file}")
-            if hash_res.exit_code != 0:
+            hash_res = self.transport.safe_run(f"md5sum {test_file}")
+            if hash_res.exited != 0:
                  return ValidatorResult(passed=False, error_msg="Readback I/O Error. Corrupted USB data lines.")
 
             # 6. Brownout Detection (Check for USB resets during high current draw)
-            dmesg_res = self.transport.execute("dmesg | grep -i -E 'usb disconnect|reset.*high-speed|over-current'")
+            dmesg_res = self.transport.safe_run("dmesg | grep -i -E 'usb disconnect|reset.*high-speed|over-current'")
             if dmesg_res.stdout:
                 logger.critical(f"[USB] VBUS BROWNOUT DETECTED! Kernel log:\n{dmesg_res.stdout}")
                 return ValidatorResult(passed=False, error_msg="USB switch brownout or EMI reset detected during load.")
@@ -96,7 +98,7 @@ class UsbMassStorageValidator:
 
         finally:
             # 7. ZERO-LEAKAGE: Guaranteed cleanup
-            self.transport.execute(f"rm -f {test_file}")
-            self.transport.execute("sync")
-            self.transport.execute(f"umount -l {self.mount_point}")
-            self.transport.execute(f"rm -rf {self.mount_point}")
+            self.transport.safe_run(f"rm -f {test_file}")
+            self.transport.safe_run("sync")
+            self.transport.safe_run(f"umount -l {self.mount_point}")
+            self.transport.safe_run(f"rm -rf {self.mount_point}")
