@@ -1,33 +1,53 @@
 import logging
-from pytest_mes_core.networking import EphemeralSSHClient
-from pytest_mes_core.protocols.base import ValidatorResult
+from typing import Dict, Any
+
+from pytest_mes_core.transports import (
+    DutTransport,
+    TransportConnectionError,
+    TransportTimeoutError
+)
+from pytest_mes_core.protocols import ValidatorResult
 from pytest_mes_core.config import MmioConfig
 
 logger = logging.getLogger("mes_core.protocols.mmio")
 
 class MmioValidator:
-    """Reads raw physical silicon addresses bypassing Linux kernel drivers."""
+    """
+    Reads and writes raw physical silicon addresses, bypassing Linux kernel drivers.
+    Features Data Abort/Kernel Panic interception and CONFIG_STRICT_DEVMEM detection.
+    """
 
     @staticmethod
-    def read_register(dut_ssh: EphemeralSSHClient, cfg: MmioConfig) -> ValidatorResult:
+    def read_register(dut: DutTransport, cfg: MmioConfig) -> ValidatorResult:
         logger.debug(f"[MMIO] Reading {cfg.data_width}-bit register at {cfg.address_hex}...")
+
+        context_data: Dict[str, Any] = {"address": cfg.address_hex, "mask": cfg.bit_mask_hex}
 
         # We use a strict 3-second timeout. If the bus hangs (unclocked domain),
         # devmem won't return, and we need to catch it quickly.
         cmd = f"devmem {cfg.address_hex} {cfg.data_width}"
-        res = dut_ssh.safe_run(cmd, timeout_s=3.0)
-
-        if not res.ok:
-            logger.error(f"[MMIO] Failed to read {cfg.address_hex}. Unclocked domain? {res.stderr}")
-            return ValidatorResult(passed=False, error_msg="MMIO Read Failed (Bus Hang / Permission Denied)")
 
         try:
+            res = dut.safe_run(cmd, timeout_s=3.0)
+
+            if not res.ok:
+                error_msg = res.stderr.strip() or res.stdout.strip()
+                logger.error(f"[MMIO] Failed to read {cfg.address_hex}: {error_msg}")
+
+                # Check for strict kernel memory protection
+                if "Operation not permitted" in error_msg:
+                    return ValidatorResult(passed=False, error_msg="Kernel blocked access (CONFIG_STRICT_DEVMEM enabled).", context=context_data)
+
+                return ValidatorResult(passed=False, error_msg=f"MMIO Read Failed: {error_msg}", context=context_data)
+
             # Parse the raw hex output
             raw_val = int(res.stdout.strip(), 16)
             mask = int(cfg.bit_mask_hex, 16)
             masked_val = raw_val & mask
 
             hex_result = hex(masked_val).upper()
+            context_data["mmio_raw_val"] = hex(raw_val).upper()
+            context_data["mmio_masked_val"] = hex_result
 
             logger.info(f"[MMIO] {cfg.address_hex} & {cfg.bit_mask_hex} = {hex_result}")
 
@@ -38,15 +58,58 @@ class MmioValidator:
                     logger.warning(f"[MMIO] MISMATCH: Expected {hex(expected).upper()}, got {hex_result}")
                     return ValidatorResult(
                         passed=False,
-                        error_msg=f"MMIO Mismatch (Expected {hex(expected).upper()})",
-                        context={"mmio_raw": hex(raw_val), "mmio_masked": hex_result}
+                        error_msg=f"MMIO Mismatch (Expected {hex(expected).upper()}, Got {hex_result})",
+                        metrics={"t_mmio_read_s": res.duration_s},
+                        context=context_data
                     )
 
             return ValidatorResult(
                 passed=True,
-                context={"mmio_val": hex_result}
+                metrics={"t_mmio_read_s": res.duration_s},
+                context=context_data
             )
 
-        except ValueError:
-            logger.error(f"[MMIO] Invalid devmem output: {res.stdout}")
-            return ValidatorResult(passed=False, error_msg="Failed to parse devmem output.")
+        except ValueError as e:
+            logger.error(f"[MMIO] Invalid devmem output: {res.stdout.strip()}")
+            return ValidatorResult(passed=False, error_msg=f"Failed to parse devmem output: {e}", context=context_data)
+
+        except TransportTimeoutError:
+            # The AXI/AHB bus locked up waiting for an unclocked peripheral to respond
+            logger.critical(f"[MMIO] BUS HANG: Silicon locked up reading {cfg.address_hex}.")
+            return ValidatorResult(passed=False, error_msg="Bus Hang: Silicon locked up (Unclocked domain?).", context=context_data)
+
+        except TransportConnectionError as e:
+            # The read triggered an asynchronous Data Abort, instantly crashing the kernel
+            logger.critical(f"[MMIO] KERNEL PANIC: Hardware aborted access to {cfg.address_hex}.")
+            return ValidatorResult(passed=False, error_msg=f"Kernel Panic/Data Abort accessing MMIO: {e}", context=context_data)
+
+
+    @staticmethod
+    def write_register(dut: DutTransport, cfg: MmioConfig, write_val_hex: str) -> ValidatorResult:
+        """
+        DANGEROUS: Writes raw bits directly to physical silicon.
+        Can cause immediate hard-faults if written to read-only/protected memory.
+        """
+        logger.warning(f"[MMIO] FORCING HARDWARE WRITE to {cfg.address_hex} = {write_val_hex} ")
+        context_data: Dict[str, Any] = {"address": cfg.address_hex, "write_val": write_val_hex}
+
+        cmd = f"devmem {cfg.address_hex} {cfg.data_width} {write_val_hex}"
+
+        try:
+            res = dut.safe_run(cmd, timeout_s=3.0)
+
+            if not res.ok:
+                error_msg = res.stderr.strip() or res.stdout.strip()
+                logger.error(f"[MMIO] Failed to write {cfg.address_hex}: {error_msg}")
+                return ValidatorResult(passed=False, error_msg=f"MMIO Write Failed: {error_msg}", context=context_data)
+
+            return ValidatorResult(
+                passed=True,
+                metrics={"t_mmio_write_s": res.duration_s},
+                context=context_data
+            )
+
+        except TransportTimeoutError:
+            return ValidatorResult(passed=False, error_msg="Bus Hang: Silicon locked up during write.", context=context_data)
+        except TransportConnectionError as e:
+            return ValidatorResult(passed=False, error_msg=f"Kernel Panic/Data Abort during MMIO write: {e}", context=context_data)

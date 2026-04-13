@@ -25,112 +25,13 @@ The machine physically wired to the test jig running the Pytest runner.
 * **System Packages:**
   * `libgpiod-dev` (For physical E-Stop monitoring)
   * `libvisa-dev` (For SCPI Power Supply control)
-* **Hardware Interfacing:** * Ensure the active user is in the `dialout` and `input` groups to read UART TTYS and USB Barcode Scanners.
+  * `mfgtools` **(Crucial: Provides the NXP `uuu` utility for TEZI provisioning)**
+* **Hardware Interfacing & Permissions:** Ensure the active user is in the `dialout` and `input` groups to read UART TTYs and USB Barcode Scanners.
+  * **USB Recovery Permissions:** The Host PC must have the NXP/Toradex `udev` rules installed. If you do not install these, `uuu` will be blocked by the OS and fail to enumerate the DUT.
 
-### 2. Target Requirements (The DUT)
-The embedded device under test (e.g., Toradex i.MX8 SoM).
-The framework operates via SSH and expects a standard BusyBox or Debian userland. Your Yocto/Buildroot image **MUST** include the following packages:
-
-| Protocol Domain | Required Target Binaries | Yocto Recipe / Package | Purpose |
-| :--- | :--- | :--- | :--- |
-| **Network & MAC** | `iperf3`, `ethtool` | `iperf3`, `ethtool` | Throughput validation and MAC physics. |
-| **CAN Bus** | `cansend`, `candump`, `ip` | `can-utils`, `iproute2` | Automotive bus loopback testing. |
-| **Silicon Storage** | `i2ctransfer`, `i2cdetect`, `flash_erase` | `i2c-tools`, `mtd-utils` | EEPROM & SPI NOR destructive validation. |
-| **GPIO & Relays** | `gpiomon`, `gpioset`, `gpioget` | `libgpiod-tools` | Edge detection and optocoupler testing. |
-| **Cryptography** | `openssl`, `sha256sum`, `base64` | `openssl`, `busybox` | Secure TEZI provisioning and X.509 injection. |
-| **Bare-Metal MMIO** | `devmem` | `busybox` (CONFIG_DEVMEM=y) | Direct IOMUXC / Pad register verification. |
-
->  **Security Mandate (`devmem`):** The `devmem` utility provides direct physical memory access and is required for EOL silicon verification. **It MUST NOT be shipped in production user firmware.** Firmware teams must provide a `tezi-factory-image` for the test jig, which is later securely overwritten with the locked `tezi-production-image` before shipping.
-
----
-
-## Installation & Environment Setup
-
-To protect the Host PC's operating system from dependency conflicts, `pytest-mes-core` **MUST** be installed inside an isolated virtual environment.
-
-We highly recommend using [Astral's `uv`](https://www.google.com/search?q=%5Bhttps://github.com/astral-sh/uv%5D\(https://github.com/astral-sh/uv\)) for blazingly fast, deterministic package resolution on the factory floor.
-
-### Method A: The Modern Standard (`uv` - Recommended)
-
-If `uv` is installed on the Host PC, use it to instantly build the environment and link the framework.
-
-```bash
-# 1. Clone the repository
-git clone https://github.com/your-org/pytest-mes-core.git
-cd pytest-mes-core
-
-# 2. Create a lightning-fast virtual environment
-uv venv
-
-# 3. Activate the environment
-source .venv/bin/activate
-
-# 4. Install the framework in editable mode
-uv pip install -e .
-```
-
-### Method B: The Legacy Standard (`venv` - Fallback)
-
-If the Host PC is strictly air-gapped and lacks modern toolchains, use the standard Python library.
-
-```bash
-# 1. Clone the repository
-git clone https://github.com/your-org/pytest-mes-core.git
-cd pytest-mes-core
-
-# 2. Create the standard virtual environment
-python3 -m venv .venv
-
-# 3. Activate the environment
-source .venv/bin/activate
-
-# 4. Install the framework in editable mode
-pip install -e .
-```
-
-### Verifying the Installation
-
-Once installed, verify that the Pytest runner has successfully intercepted the MES Core hooks. Run the following command anywhere on the Host PC (while the virtual environment is active):
-
-```bash
-pytest --help | grep "mes_core"
-```
-
-*Expected Output:* You should see the custom MES arguments (`--operator-id`, `--env-config`, `--generate-mes-config`) successfully injected into the Pytest CLI.
-
----
-
-## Usage & Operations
-
-### Step 1: Generate the Station Configuration
-On a new factory PC, generate the boilerplate physical configuration:
-```bash
-pytest --generate-mes-config
-```
-This drops a `station_env.toml` file in your directory. Edit this file to match the physical reality of the Jig (IP addresses, GPIO pins, expected network speeds).
-
-### Step 2: Execute the Factory Run
-Operators must provide their Badge ID to execute a run. The framework reads the TOML, arms the physical E-Stop, powers the board, and begins execution.
-
-```bash
-pytest test_evse_functional.py --operator-id=OP-4092 --env-config=station_env.toml
-```
-
-### Step 3: Analyze Telemetry & Forensics
-Upon completion (or violent crash), all outputs are safely stored in the `artifacts/` directory:
-
-* `artifacts/telemetry/halt_batch_YYYYMMDD_HHMMSS.jsonl` -> Atomic, line-delimited JSON ready for Grafana.
-* `artifacts/forensics/fail_test_ethernet_171542.log` -> Automated hardware dumps of failing subsystems.
-* `artifacts/forensics/config_snapshot_XXXX.json` -> Cryptographic proof of the TOML settings used for that specific batch run.
-
----
-
-##  The E-Stop Safety Guarantee
-This framework bypasses the standard Python Event Loop for safety-critical operations. If the physical E-Stop GPIO pin is pressed, a background daemon instantly sends a `SIGINT` to the Pytest runner, forcing the `SafePowerController` to immediately de-energize the connected DC Power Supplies before the interpreter dies.
-
-***
-
-### Ready for the Proprietary Suite
-With this `README.md` dropped into the root of `pytest-mes-core`, your core engine is fully documented and sealed.
-
-You can now completely switch repositories to your `evse-eol-suite`. Shall we initialize that project and write the `conftest.py` that imports all these beautiful fixtures?
+  *To install the uuu udev rules on the Host:*
+  ```bash
+  wget [https://raw.githubusercontent.com/nxp-imx/mfgtools/master/uuu/uuu.rules](https://raw.githubusercontent.com/nxp-imx/mfgtools/master/uuu/uuu.rules) -O /tmp/uuu.rules
+  sudo cp /tmp/uuu.rules /etc/udev/rules.d/99-uuu.rules
+  sudo udevadm control --reload-rules
+  sudo udevadm trigger

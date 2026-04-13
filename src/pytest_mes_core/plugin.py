@@ -9,6 +9,9 @@ from typing import Generator, Any
 from pytest_mes_core.telemetry import TestRecord
 from pytest_mes_core.config import StationEnvironment, load_toml_config
 from pytest_mes_core.host_adapters.safety import EStopWatchdog
+from pytest_mes_core.networking import EphemeralSSHClient
+from pytest_mes_core.transports.serial import EphemeralSerialClient
+from pytest_mes_core.transports.failover import FailoverTransport
 
 logger = logging.getLogger("mes_core.plugin")
 
@@ -253,3 +256,47 @@ def record_metrics(
     except Exception as e:
         logger.critical(f"FATAL: Failed to flush telemetry for {record.test_name}: {e}")
         raise
+
+@pytest.fixture(scope="session")
+def raw_ssh(station_config):
+    """Base high-speed transport."""
+    client = EphemeralSSHClient(station_config.dut_ip)
+    client.connect()
+    yield client
+    client.disconnect()
+
+@pytest.fixture(scope="session")
+def raw_serial(station_config):
+    """Base out-of-band transport."""
+    client = EphemeralSerialClient(port=station_config.serial_port)
+    client.connect()
+    yield client
+    client.disconnect()
+
+@pytest.fixture(scope="function")
+def dut(request, raw_ssh, raw_serial):
+    """
+    THE MASTER ROUTER:
+    Yields the optimal transport configuration based on the test's intent.
+    """
+    # STRATEGY 1: Proactive Routing
+    # If the test is tagged with @pytest.mark.destructive_net, hand it the Serial port immediately.
+    # We do NOT use the Failover wrapper here, because we know SSH will die and we don't
+    # want to waste 30 seconds waiting for the primary transport to timeout.
+    if "destructive_net" in request.keywords:
+        logger.info("[Router] Destructive network test detected. Pre-routing to Out-of-Band Serial.")
+        yield raw_serial
+        return
+
+    # STRATEGY 2: Reactive Failover
+    # For all normal tests, we provide the High-Speed SSH, but wrapped in the Failover armor.
+    # If the board panics mid-test, the wrapper catches it and shifts to Serial invisibly.
+    logger.debug("[Router] Standard test detected. Deploying SSH with Serial Failover Matrix.")
+
+    matrix = FailoverTransport(primary=raw_ssh, fallback=raw_serial)
+    yield matrix
+
+    # Optional: If the wrapper failed over during the test, we might want to log a severe
+    # warning or attempt to recover the SSH pipe for the next test.
+    if matrix.is_failed_over:
+        logger.warning("[Router] ⚠️ Test completed, but primary transport was permanently lost.")

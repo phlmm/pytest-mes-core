@@ -1,34 +1,64 @@
-# src/pytest_mes_core/protocols/__init__.py
+"""
+MES Core Protocols Layer
+------------------------
+Hardware physics evaluation, telemetry generation, and physical fault isolation.
+All protocols strictly return the immutable ValidatorResult contract.
+"""
 
+# 1. Core Contracts (The Currency)
 from .base import ValidatorResult
-from .can_bus import CanLoopbackValidator
-from .serial_uart import UartEchoValidator
+
+# 2. System & Environment
+from .environment import EnvironmentValidator
+from .time_sync import RtcTimeValidator
+from .sysfs_poller import BackgroundSysfsPoller
+from .executable import CustomPayloadValidator
+
+# 3. Networking & Communications
 from .ethernet import EthernetValidator
+from .can_bus import CanBusValidator
+from .serial_uart import UartEchoValidator
+
+# 4. Silicon & Memory
 from .memory import MemoryValidator, MtdFlashValidator
 from .block_storage import BlockDeviceValidator
-from .gpio import GpioLedActuator, GpioLedActuator, GpioLoopbackValidator
-from .iio_data import IioAdcValidator, IioDacActuator
 from .efuse import NvmemEfuseValidator
-from .sysfs_poller import BackgroundSysfsPoller
-from .environment import EnvironmentValidator
-from .executable import CustomPayloadValidator
 from .mmio import MmioValidator
 
+# 5. Physical I/O
+from .gpio import GpioEdgeValidator, GpioLedActuator, GpioLoopbackValidator
+from .iio_data import IioAdcValidator, IioDacActuator
+
+
+# ==========================================
+# STRICT PUBLIC API BOUNDARY
+# ==========================================
 __all__ = [
+    # Contracts
     "ValidatorResult",
-    "CanLoopbackValidator",
-    "UartEchoValidator",
+
+    # System & Environment
+    "EnvironmentValidator",
+    "RtcTimeValidator",
+    "BackgroundSysfsPoller",
+    "CustomPayloadValidator",
+
+    # Networking & Communications
     "EthernetValidator",
+    "CanBusValidator",
+    "UartEchoValidator",
+
+    # Silicon & Memory
     "MemoryValidator",
     "MtdFlashValidator",
     "BlockDeviceValidator",
-    "GpioLedActuator",
-    "GpioEdgeValidator",
-    "GpioLoopbackValidator",
-    "GpioLedActuator",
-    "IioAdcValidator",
-    "IioDacActuator",
     "NvmemEfuseValidator",
-    "EnvironmentValidator",
-    "MmioValidator"
+    "MmioValidator",
+
+    # Physical I/O
+    "GpioEdgeValidator",
+    "GpioLedActuator",
+    "GpioLoopbackValidator",
+    "IioAdcValidator",
+    "IioDacActuator"
 ]

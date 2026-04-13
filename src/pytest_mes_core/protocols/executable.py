@@ -1,81 +1,146 @@
-import time
 import logging
 from pathlib import Path
-from pytest_mes_core.networking import EphemeralSSHClient
-from pytest_mes_core.protocols.base import ValidatorResult
+from typing import Dict, Any, Optional
+
+from pytest_mes_core.transports import (
+    DutTransport,
+    HostSideBuffer,
+    TransportConnectionError,
+    TransportTimeoutError
+)
+from pytest_mes_core.protocols import ValidatorResult
 from pytest_mes_core.config import ExecutableConfig
 
 logger = logging.getLogger("mes_core.protocols.exec")
 
+# POSIX Fatal Signal Map (128 + Signal Number)
+FATAL_SIGNALS = {
+    132: "SIGILL (Illegal Instruction - Compiled for wrong ARM architecture?)",
+    134: "SIGABRT (Abort - Failed C assertion or glibc panic)",
+    135: "SIGBUS (Bus Error - Bad physical memory alignment)",
+    136: "SIGFPE (Floating Point Exception - Division by zero)",
+    137: "SIGKILL (Assassinated by Linux OOM Killer)",
+    139: "SIGSEGV (Segmentation Fault - Null pointer or buffer overflow)"
+}
+
 class CustomPayloadValidator:
     """
     The 'Escape Hatch' protocol.
-    Executes proprietary, third-party, or custom C/Go/Rust binaries on the DUT safely.
-    Enforces strict timeouts and zero-leakage process reaping.
+    Executes proprietary binaries safely, featuring automatic Kernel Trap interception,
+    POSIX signal decoding, and asynchronous log vacuuming via HostSideBuffer.
     """
 
     @staticmethod
-    def run_binary(dut_ssh: EphemeralSSHClient, cfg: ExecutableConfig) -> ValidatorResult:
+    def run_binary(dut: DutTransport, cfg: ExecutableConfig) -> ValidatorResult:
         binary_name = Path(cfg.binary_path).name
         full_cmd = f"{cfg.binary_path} {cfg.arguments}".strip()
 
         logger.info(f"[Payload] Executing custom binary: {binary_name} (Timeout: {cfg.timeout_s}s)")
-        logger.debug(f"[Payload] Full command: {full_cmd}")
 
-        # 1. Check if binary exists and is executable
-        if not dut_ssh.safe_run(f"test -x {cfg.binary_path}", timeout_s=5.0).ok:
-            logger.error(f"[Payload] Binary missing or not executable at {cfg.binary_path}")
-            return ValidatorResult(passed=False, error_msg="Executable not found or permissions denied.")
+        # 1. Pre-Flight File Check
+        try:
+            if not dut.safe_run(f"test -x {cfg.binary_path}", timeout_s=5.0).ok:
+                return ValidatorResult(passed=False, error_msg="Executable not found or missing execute (+x) permissions.")
+        except TransportConnectionError as e:
+            return ValidatorResult(passed=False, error_msg=f"Transport pipe shattered during pre-flight check: {e}")
 
-        t0 = time.perf_counter()
+        tailer: Optional[HostSideBuffer] = None
+        context_data: Dict[str, Any] = {}
 
         try:
-            # 2. Execute the payload
-            # We use safe_run which inherently protects the SSH pipe
-            res = dut_ssh.safe_run(full_cmd, timeout_s=cfg.timeout_s)
-            duration = round(time.perf_counter() - t0, 3)
-
-            # 3. Contextualize the output (Truncate to prevent JSONL telemetry bloat)
-            stdout_trunc = res.stdout.strip()[-500:] if res.stdout else ""
-            stderr_trunc = res.stderr.strip()[-500:] if res.stderr else ""
-
-            context_data = {
-                "exit_code": res.exited,
-                "stdout_tail": stdout_trunc,
-                "stderr_tail": stderr_trunc
-            }
-
-            # 4. Fetch the custom log file if specified
+            # 2. Arm the Background Data Vacuum (Transport Agnostic!)
             if cfg.log_file_path:
-                logger.debug(f"[Payload] Retrieving payload log from {cfg.log_file_path}...")
-                log_res = dut_ssh.safe_run(f"cat {cfg.log_file_path} 2>/dev/null", timeout_s=10.0)
+                tailer = HostSideBuffer(dut, cfg.log_file_path, poll_interval_s=1.0)
+                tailer.start()
+
+            # 3. Execute the payload
+            res = dut.safe_run(full_cmd, timeout_s=cfg.timeout_s)
+
+            # 4. Contextualize standard streams
+            context_data["exit_code"] = res.exited
+            context_data["stdout_tail"] = res.stdout.strip()[-500:] if res.stdout else ""
+            context_data["stderr_tail"] = res.stderr.strip()[-500:] if res.stderr else ""
+
+            # 5. Fetch Custom Vacuumed Log
+            if tailer:
+                surviving_lines = tailer.stop()
+                if surviving_lines:
+                    context_data["custom_log_tail"] = "\n".join(surviving_lines)[-1000:]
+            elif cfg.log_file_path:
+                # Fallback if HostSideBuffer was disabled via TOML but a path was provided
+                log_res = dut.safe_run(f"cat {cfg.log_file_path} 2>/dev/null", timeout_s=10.0)
                 if log_res.ok and log_res.stdout:
                     context_data["custom_log_tail"] = log_res.stdout.strip()[-1000:]
-                else:
-                    logger.warning(f"[Payload] Log file {cfg.log_file_path} was requested but not found.")
 
-            # 5. Evaluate pass/fail criteria
-            if res.exited != cfg.expected_exit_code:
-                logger.error(f"[Payload] {binary_name} exited with {res.exited} (Expected {cfg.expected_exit_code}).")
+            # ==========================================
+            # 6. FORENSIC KERNEL INTERCEPTOR
+            # ==========================================
+            if res.exited in FATAL_SIGNALS:
+                sig_name = FATAL_SIGNALS[res.exited]
+                logger.error(f"[Payload] CRITICAL HARDWARE/OS FAULT: {binary_name} crashed with {sig_name}!")
+
+                # Perform an immediate sweep of the kernel ring buffer for the trap registers
+                dmesg_cmd = f"dmesg | grep -E '{binary_name}|traps:|Out of memory' | tail -n 20"
+                dmesg_res = dut.safe_run(dmesg_cmd, timeout_s=5.0)
+
+                if dmesg_res.ok and dmesg_res.stdout:
+                    context_data["kernel_trap_trace"] = dmesg_res.stdout.strip()
+                    logger.debug(f"[Payload] Kernel Trap captured: \n{context_data['kernel_trap_trace']}")
+                else:
+                    context_data["kernel_trap_trace"] = "No dmesg trace found. Kernel may have frozen."
+
                 return ValidatorResult(
                     passed=False,
-                    error_msg=f"Binary exited with code {res.exited}",
+                    error_msg=f"Binary crashed violently: {sig_name}",
                     context=context_data
                 )
 
-            logger.info(f"[Payload] Execution completed successfully in {duration}s.")
+            # 7. Evaluate logical success criteria
+            if res.exited != cfg.expected_exit_code:
+                return ValidatorResult(
+                    passed=False,
+                    error_msg=f"Binary exited with code {res.exited} (Expected: {cfg.expected_exit_code})",
+                    context=context_data
+                )
+
             return ValidatorResult(
                 passed=True,
-                metrics={f"t_{binary_name}_exec_s": duration},
+                metrics={f"t_{binary_name}_exec_s": res.duration_s},
                 context=context_data
             )
 
-        finally:
-            # 6. ZERO-LEAKAGE: The Safety Net
-            # If the binary spawned detached children or didn't die cleanly, we reap it violently.
-            logger.debug(f"[Payload] ZERO-LEAKAGE: Sweeping for zombie '{binary_name}' processes.")
-            dut_ssh.conn.run(f"killall -9 {binary_name} >/dev/null 2>&1 || true", hide=True, warn=True)
+        except TransportTimeoutError:
+            # 8. Timeout Intercept (Silicon / Application Lockup)
+            error_msg = f"Binary {binary_name} locked up and failed to return within {cfg.timeout_s}s."
+            logger.critical(f"[Payload] TIMEOUT: {error_msg}")
 
-            # Clean up the log file so it doesn't bleed into the next test iteration
-            if cfg.log_file_path:
-                dut_ssh.conn.run(f"rm -f {cfg.log_file_path} >/dev/null 2>&1 || true", hide=True, warn=True)
+            # The vacuum might still have snagged the last thing the binary logged before it froze
+            if tailer:
+                surviving_lines = tailer.stop()
+                if surviving_lines:
+                    context_data["custom_log_tail_SURVIVED"] = "\n".join(surviving_lines)[-1000:]
+
+            return ValidatorResult(passed=False, error_msg=error_msg, context=context_data)
+
+        except TransportConnectionError as e:
+            # 9. Transport Drop Intercept (Kernel Panic / Power Loss)
+            error_msg = f"Transport pipe shattered while executing {binary_name}: {e}"
+            logger.critical(f"[Payload] CATASTROPHE: {error_msg}")
+
+            # The vacuum thread caught the data right before the socket died!
+            if tailer:
+                surviving_lines = tailer.stop()
+                if surviving_lines:
+                    context_data["custom_log_tail_SURVIVED"] = "\n".join(surviving_lines)[-1000:]
+
+            return ValidatorResult(passed=False, error_msg=error_msg, context=context_data)
+
+        finally:
+            # 10. ZERO-LEAKAGE TEARDOWN
+            if dut.is_connected:
+                try:
+                    dut.safe_run(f"killall -9 {binary_name} >/dev/null 2>&1 || true", timeout_s=5.0)
+                    if cfg.log_file_path:
+                        dut.safe_run(f"rm -f {cfg.log_file_path} >/dev/null 2>&1 || true", timeout_s=5.0)
+                except Exception as teardown_err:
+                    logger.debug(f"[Payload] Cleanup failed (Transport likely dying): {teardown_err}")

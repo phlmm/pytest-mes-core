@@ -1,72 +1,90 @@
 # src/pytest_mes_core/provisioning/tezi_uuu.py
-import subprocess
 import time
 import logging
+import subprocess
 from pathlib import Path
-from pytest_mes_core.protocols.base import ValidatorResult
+from typing import Optional
+
+from pytest_mes_core.provisioning.base import BaseProvisioner, ProvisioningError
 
 logger = logging.getLogger("mes_core.provisioning.tezi")
 
-class UuuTeziProvisioner:
+class UuuTeziProvisioner(BaseProvisioner):
     """
     Zero-leakage manager for the NXP Universal Update Utility (uuu).
     Pushes TEZI images into SoC RAM via USB Serial Downloader mode.
+    Enforces USB port isolation for parallel multi-jig environments.
     """
+    def __init__(
+        self,
+        wait_for_recovery_s: int = 30,
+        flash_timeout_s: int = 300,
+        usb_path: Optional[str] = None
+    ):
+        self.wait_for_recovery_s = wait_for_recovery_s
+        self.flash_timeout_s = flash_timeout_s
+        # Expected format: "1:2" or "2:1.4" (matches `uuu -lsusb` output)
+        self.usb_path = usb_path
 
-    @staticmethod
-    def _is_device_in_recovery() -> bool:
-        """Polls `uuu -lsusb` to verify the SoC BootROM is visible to the Host PC."""
+    def _is_device_in_recovery(self) -> bool:
+        """Polls `uuu -lsusb` to verify the specific SoC BootROM is visible."""
         try:
             res = subprocess.run(["uuu", "-lsusb"], capture_output=True, text=True, timeout=5)
-            # 'uuu -lsusb' lists Connected Known USB Devices. If empty, nothing is in recovery.
+
+            # 1. Multi-Jig Isolation Check
+            if self.usb_path:
+                return self.usb_path in res.stdout
+
+            # 2. Single-Jig Fallback
             return "1:" in res.stdout or "Toradex" in res.stdout or "NXP" in res.stdout
+
         except subprocess.TimeoutExpired:
             return False
+        except FileNotFoundError:
+            raise ProvisioningError("FATAL: 'uuu' tool is not installed or not in the system PATH.")
 
-    @staticmethod
-    def flash_tezi_image(
-        tezi_dir: Path,
-        wait_for_recovery_s: int = 30,
-        flash_timeout_s: int = 300
-    ) -> ValidatorResult:
+    def provision(self, image_path: Path) -> None:
         """
         Hardware Flow:
             1. Blocks until the DUT physical USB enumerates in NXP Recovery Mode.
-            2. Executes `uuu` targeting the TEZI folder.
+            2. Executes `uuu` targeting the specific USB port and TEZI folder.
             3. Violently reaps the `uuu` process on timeout to prevent Host PC deadlocks.
         """
+        # For TEZI, the 'image_path' is actually the directory containing uuu.auto
+        tezi_dir = image_path
+
         if not tezi_dir.exists() or not tezi_dir.is_dir():
-            logger.error(f"[TEZI] Missing image directory: {tezi_dir}")
-            return ValidatorResult(passed=False, error_msg=f"TEZI payload directory not found: {tezi_dir}")
+            raise ProvisioningError(f"TEZI payload directory not found: {tezi_dir}")
 
         if not (tezi_dir / "uuu.auto").exists():
-            logger.error(f"[TEZI] Missing 'uuu.auto' script inside {tezi_dir}")
-            return ValidatorResult(passed=False, error_msg="Invalid TEZI payload (missing uuu.auto).")
+            raise ProvisioningError(f"Invalid TEZI payload (missing uuu.auto inside {tezi_dir}).")
 
-        logger.info(f"[TEZI] Waiting up to {wait_for_recovery_s}s for DUT to enter USB Recovery Mode...")
+        target_str = f" on USB port {self.usb_path}" if self.usb_path else ""
+        logger.info(f"[TEZI] Waiting up to {self.wait_for_recovery_s}s for DUT to enter Recovery Mode{target_str}...")
 
         # 1. Defeat OS Jitter / Operator Delay
         t_wait_start = time.perf_counter()
         device_found = False
-        while time.perf_counter() - t_wait_start < wait_for_recovery_s:
-            if UuuTeziProvisioner._is_device_in_recovery():
+        while time.perf_counter() - t_wait_start < self.wait_for_recovery_s:
+            if self._is_device_in_recovery():
                 device_found = True
                 break
             time.sleep(1.0)
 
         if not device_found:
-            logger.error("[TEZI] TIMEOUT. Device never enumerated in Recovery Mode. Jumper missing?")
-            return ValidatorResult(passed=False, error_msg="Timeout waiting for USB Recovery mode.")
+            raise ProvisioningError(f"Timeout waiting for USB Recovery mode{target_str}. Is the boot jumper set?")
 
-        logger.info(f"[TEZI] DUT detected. Injecting TEZI payload from {tezi_dir}...")
+        logger.info(f"[TEZI] DUT detected. Injecting TEZI payload from {tezi_dir.name}...")
 
-        # 2. Execute uuu securely
-        # 'uuu <folder>' automatically targets the uuu.auto script inside it
-        cmd = ["uuu", str(tezi_dir.absolute())]
+        # 2. Execute uuu securely with Port Isolation
+        cmd = ["uuu"]
+        if self.usb_path:
+            cmd.extend(["-m", self.usb_path])
+        cmd.append(str(tezi_dir.absolute()))
 
         t0 = time.perf_counter()
 
-        # We spawn using Popen to enforce violent destruction in finally block
+        # Spawn using Popen to enforce violent destruction in finally block
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -75,14 +93,14 @@ class UuuTeziProvisioner:
         )
 
         try:
-            stdout, stderr = proc.communicate(timeout=flash_timeout_s)
+            stdout, stderr = proc.communicate(timeout=self.flash_timeout_s)
         except subprocess.TimeoutExpired:
-            logger.critical(f"[TEZI] FATAL: uuu hung for >{flash_timeout_s}s! USB EMI reset? Killing process.")
+            logger.critical(f"[TEZI] FATAL: uuu hung for >{self.flash_timeout_s}s! USB EMI reset? Killing process.")
             proc.kill()
             proc.communicate() # Reap the zombie
-            return ValidatorResult(passed=False, error_msg=f"uuu execution timed out after {flash_timeout_s}s.")
+            raise ProvisioningError(f"uuu execution timed out after {self.flash_timeout_s}s.")
         finally:
-            # ZERO-LEAKAGE: Catch-all to ensure we don't leave uuu running if the Python thread panics
+            # ZERO-LEAKAGE: Catch-all if the Python thread panics for an unrelated reason
             if proc.poll() is None:
                 proc.kill()
                 proc.communicate()
@@ -91,17 +109,13 @@ class UuuTeziProvisioner:
 
         # 3. Analyze output physics
         if proc.returncode != 0:
-            logger.error(f"[TEZI] uuu failed with code {proc.returncode}. Stderr: {stderr.strip()}")
-            return ValidatorResult(passed=False, error_msg="uuu rejected the payload or lost USB sync.")
+            logger.error(f"[TEZI] uuu failed with code {proc.returncode}. Stderr:\n{stderr.strip()}")
+            raise ProvisioningError(f"uuu rejected the payload or lost USB sync (Code {proc.returncode}).")
 
         # uuu sometimes exits 0 even if it fails to write if a script error occurs. We verify the stdout log.
-        if "Wait for Known USB Device Appear" in stdout and "Done" not in stdout:
+        stdout_lower = stdout.lower()
+        if "error" in stdout_lower or ("done" not in stdout_lower and "success" not in stdout_lower):
             logger.error(f"[TEZI] uuu falsely exited 0. Payload never executed.\n{stdout}")
-            return ValidatorResult(passed=False, error_msg="uuu script failed to execute fully.")
+            raise ProvisioningError("uuu script failed to execute fully. Missing 'Done' confirmation.")
 
         logger.info(f"[TEZI] Flash successfully pushed to SoC RAM in {duration}s.")
-        return ValidatorResult(
-            passed=True,
-            metrics={"t_tezi_uuu_flash_s": duration},
-            context={"tezi_payload": tezi_dir.name}
-        )
