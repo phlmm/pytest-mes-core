@@ -175,6 +175,17 @@ ethernet = [
     "ethtool -d eth0",              # Dump raw PHY silicon registers
     "dmesg | tail -n 50"            # Grab the last 50 lines of the kernel buffer
 ]
+# If a test executing a custom vendor binary fails, extract the user-space crash log
+user_space_crash = [
+    "coredumpctl info --no-pager | tail -n 50",   # Grabs the most recent segfault backtrace
+    "journalctl -p err..emerg -n 20 --no-pager"   # Grabs recent systemd errors
+]
+
+# If a test causes a hard reboot (e.g., driver load test), extract the kernel panic
+kernel_panic = [
+    "cat /sys/fs/pstore/dmesg-ramoops-0",         # The golden kernel panic trace
+    "cat /sys/fs/pstore/console-ramoops-0"
+]
 """
 
 def generate_sample_config(filepath: Path = Path("/etc/mes/station.toml")) -> None:

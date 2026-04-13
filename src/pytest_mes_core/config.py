@@ -142,6 +142,12 @@ class JtagTargetConfig(BaseHardwareConfig):
     )
     firmware_path: str = Field(description="Absolute path to the .bin or .hex payload")
     timeout_s: int = Field(default=120)
+    gdb_port: int = Field(default=3333, description="Must be unique for parallel jigs.")
+    gdb_toolchain_path: str = Field(default="gdb-multiarch", description="Path to GDB executable.")
+
+    # Optional Post-Mortem Memory Addresses
+    dcc_buffer_address_hex: Optional[str] = Field(default=None, description="e.g., '0x20000000'")
+    stack_pointer_address_hex: Optional[str] = Field(default=None, description="e.g., '0x2001FF00")
 
 class BootstrapConfig(BaseHardwareConfig):
     """Configuration for physical Host PC GPIOs that control the DUT's Boot/Reset state."""
@@ -251,6 +257,14 @@ class TimeSyncConfig(BaseHardwareConfig):
     pps_devices: List[str] = Field(default_factory=lambda: ["/dev/pps0"])
     verify_hardware_pps: bool = Field(default=False)
     verify_chrony_pps: bool = Field(default=False)
+
+class UsbStorageConfig(BaseHardwareConfig):
+    """Configuration for USB Mass Storage validation drives."""
+    vid_hex: str = Field(description="Authorized Vendor ID (e.g., '0781' for SanDisk)")
+    pid_hex: str = Field(description="Authorized Product ID (e.g., '5581')")
+    expected_speed: str = Field(default="high-speed", description="e.g., 'high-speed' (480Mbps) or 'SuperSpeed' (5Gbps)")
+    test_size_mb: int = Field(default=5, gt=0, description="Megabytes of random data to write")
+    min_write_mbps: float = Field(default=5.0, gt=0.0)
 
 # --- ROOT STATION ENVIRONMENT ---
 class StationEnvironment(BaseHardwareConfig):
@@ -363,6 +377,10 @@ class StationEnvironment(BaseHardwareConfig):
     mmio_registers: Dict[str, MmioConfig] = Field(
         default_factory=dict,
         description="Direct memory-mapped IO registers to read/verify across the SoC bus."
+    )
+    usb_storage: Dict[str, UsbStorageConfig] = Field(
+        default_factory=dict,
+        description="Complete descritpion of a usb flash drive incliding VID, PID and speed"
     )
 
     # --- Advanced Provisioning & Context ---

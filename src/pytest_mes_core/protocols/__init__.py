@@ -29,6 +29,9 @@ from .mmio import MmioValidator
 from .gpio import GpioEdgeValidator, GpioLedActuator, GpioLoopbackValidator
 from .iio_data import IioAdcValidator, IioDacActuator
 
+# 6. USB
+from .usb import UsbMassStorageValidator
+
 
 # ==========================================
 # STRICT PUBLIC API BOUNDARY
@@ -60,5 +63,8 @@ __all__ = [
     "GpioLedActuator",
     "GpioLoopbackValidator",
     "IioAdcValidator",
-    "IioDacActuator"
+    "IioDacActuator",
+
+    # USB
+    "UsbMassStorageValidator"
 ]
