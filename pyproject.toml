@@ -35,3 +35,14 @@ packages = ["src/pytest_mes_core"]
 
 [tool.mypy]
 strict = true
+
+[tool.pytest.ini_options]
+# 1. Defeat the src/ layout trap by explicitly forcing it into the Python path
+pythonpath = ["src", "."]
+
+# 2. Tell Pytest to only look in the tests directory
+testpaths = ["tests"]
+
+# 3. Lobotomize the factory plugin during unit testing so it doesn't demand an Operator ID.
+# (We will manually test the plugin logic later using pytester).
+addopts = "-p no:mes_core -v --tb=short"

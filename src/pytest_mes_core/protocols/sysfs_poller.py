@@ -1,6 +1,6 @@
 import logging
 from typing import Dict, List, Any
-from pytest_mes_core.protocols import DutTransport
+from pytest_mes_core.transports import DutTransport
 from pytest_mes_core.config import SysfsPollerConfig
 
 logger = logging.getLogger("mes_core.protocols.sysfs")

@@ -14,9 +14,9 @@ class ScpiPowerSupply:
     Unified SCPI driver for COTS Power Supplies.
     Abstracts vendor-specific dialects into a single, clean API.
     """
-    def __init__(self, cfg: PsuVendorConfig):
+    def __init__(self, cfg: PsuVendorConfig, visa_backend: str = ""):
         self.cfg = cfg
-        self.rm = pyvisa.ResourceManager()
+        self.rm = pyvisa.ResourceManager(visa_backend)
         self.instrument: Optional[pyvisa.Resource] = None
         self._channel = 1
 
