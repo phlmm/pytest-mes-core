@@ -1,3 +1,4 @@
+# src/pytest_mes_core/protocols/block_storage.py
 import re
 import logging
 from typing import Dict, Any
@@ -40,10 +41,13 @@ class BlockDeviceValidator:
         # ==========================================
         # 1. PRE-FLIGHT CHECK: Capacity Verification
         # ==========================================
-        # Check if the mount point exists and grab raw df output
+        logger.debug(f"[Storage] Pre-flight check: Verifying capacity at {mount_point}...")
         df_res = dut.safe_run(f"df -m {mount_point} 2>/dev/null", timeout_s=3.0)
+
         if not df_res.ok:
-            return ValidatorResult(passed=False, error_msg=f"Mount point unreachable: {mount_point}")
+            err_msg = f"Mount point unreachable: {mount_point}"
+            logger.error(f"[Storage] {err_msg}")
+            return ValidatorResult(passed=False, error_msg=err_msg)
 
         context_data["df_pre_flight"] = df_res.stdout.strip()
 
@@ -53,12 +57,13 @@ class BlockDeviceValidator:
         # If the drive drops below 0.5 MB/s, it's virtually dead. We cap the maximum wait time
         # to prevent the test jig from hanging infinitely on a bad batch of eMMC chips.
         max_wait_s = max(30.0, (test_file_size_mb / 0.5))
-        logger.debug(f"[Storage] Enforcing strict hardware timeout of {max_wait_s}s")
+        logger.debug(f"[Storage] Calculated hardware timeout: {max_wait_s}s (Minimum allowed speed: 0.5 MB/s)")
 
         # ==========================================
         # 3. PHYSICAL EXECUTION (Defeat the Cache)
         # ==========================================
         cmd = f"dd if=/dev/urandom of={test_file} bs=1M count={test_file_size_mb} conv=fdatasync"
+        logger.debug(f"[Storage] Pushing payload to bypass Linux Page Cache: {cmd}")
 
         try:
             # We strictly use safe_run to inherit transport agnosticism and socket protections
@@ -69,20 +74,23 @@ class BlockDeviceValidator:
             context_data["raw_dd_output"] = combined_output
 
             # ==========================================
-            # 🚨 FORENSIC KERNEL INTERCEPTOR 🚨
+            #  FORENSIC KERNEL INTERCEPTOR
             # ==========================================
             if not res.ok:
                 if "No space left on device" in combined_output:
+                    logger.error("[Storage] False Negative: Mount point is physically out of space.")
                     return ValidatorResult(passed=False, error_msg="False Negative: Disk is completely full.", context=context_data)
 
-                logger.error(f"[Storage] Physical Write Failed (Exit Code {res.exited}). Scraping dmesg...")
+                logger.error(f"[Storage] Physical Write Failed (Exit Code {res.exited}). Scraping dmesg for kernel faults...")
 
                 # If `dd` fails, it is almost always a kernel-level I/O error or mmc bus drop.
                 # We scrape the kernel ring buffer for 'mmc', 'sdhci', 'blk', or 'I/O'.
                 dmesg_res = dut.safe_run("dmesg | grep -iE 'mmc|sdhci|blk_update_request|I/O error' | tail -n 15", timeout_s=5.0)
                 if dmesg_res.ok and dmesg_res.stdout:
                     context_data["kernel_io_faults"] = dmesg_res.stdout.strip()
-                    logger.debug(f"[Storage] I/O Fault captured: \n{context_data['kernel_io_faults']}")
+                    logger.critical("="*60)
+                    logger.critical(f"[Storage] FATAL: I/O Fault captured in kernel ring buffer:\n{context_data['kernel_io_faults']}")
+                    logger.critical("="*60)
 
                 return ValidatorResult(
                     passed=False,
@@ -94,10 +102,10 @@ class BlockDeviceValidator:
             # 4. SILICON SPEED PARSING
             # ==========================================
             # Handles "MB/s", "GB/s", "kB/s" (BusyBox drops the space: "50.0MB/s")
-            match = re.search(r'([0-9.]+)\s*([kKMG]B/s)', combined_output)
+            match = re.search(r'([0-9.]+)\s*([kKMG]B/s)', combined_output, re.IGNORECASE)
 
             if not match:
-                logger.error(f"[Storage] Failed to parse metrics from output: {combined_output}")
+                logger.error(f"[Storage] Regex parser failed on dd output:\n{combined_output}")
                 return ValidatorResult(passed=False, error_msg="Regex parser failed on dd output.", context=context_data)
 
             speed_val = float(match.group(1))
@@ -129,12 +137,12 @@ class BlockDeviceValidator:
 
         except TransportTimeoutError:
             # The transport is alive, but the flash memory controller locked up the CPU.
-            logger.critical(f"[Storage] SILICON LOCKUP: eMMC failed to complete {test_file_size_mb}MB write within {max_wait_s}s.")
+            logger.critical(f"[Storage] FATAL: SILICON LOCKUP. eMMC failed to complete {test_file_size_mb}MB write within {max_wait_s}s.")
             return ValidatorResult(passed=False, error_msg="Silicon Lockup: Timeout during physical write.", context=context_data)
 
         except TransportConnectionError as e:
             # The voltage dropped or the kernel panicked, shattering the transport pipe.
-            logger.critical(f"[Storage] CATASTROPHIC FAULT: Transport pipe shattered during block write: {e}")
+            logger.critical(f"[Storage] FATAL: CATASTROPHIC FAULT. Transport pipe shattered during block write: {e}")
             return ValidatorResult(passed=False, error_msg="Catastrophic Fault: Transport dropped during write (Kernel Panic/Power Dip).")
 
         finally:
@@ -144,8 +152,8 @@ class BlockDeviceValidator:
             # Wrapped in a try/except so a dead transport doesn't mask the actual test failure
             if dut.is_connected:
                 try:
-                    logger.debug(f"[Storage] ZERO-LEAKAGE: Deleting {test_file_size_mb}MB payload from {test_file}")
+                    logger.debug(f"[Storage] ZERO-LEAKAGE: Deleting {test_file_size_mb}MB payload from {test_file}...")
                     dut.safe_run(f"rm -f {test_file}", timeout_s=5.0)
                     dut.safe_run("sync", timeout_s=10.0) # Ensure the deletion is actually committed
                 except Exception as cleanup_err:
-                    logger.debug(f"[Storage] Cleanup failed: {cleanup_err}")
+                    logger.warning(f"[Storage] Cleanup failed (Transport likely destabilized): {cleanup_err}")

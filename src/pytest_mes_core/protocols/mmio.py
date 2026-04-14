@@ -1,3 +1,4 @@
+# src/pytest_mes_core/protocols/mmio.py
 import logging
 from typing import Dict, Any
 
@@ -19,25 +20,31 @@ class MmioValidator:
 
     @staticmethod
     def read_register(dut: DutTransport, cfg: MmioConfig) -> ValidatorResult:
-        logger.debug(f"[MMIO] Reading {cfg.data_width}-bit register at {cfg.address_hex}...")
+        logger.info(f"[MMIO] Reading {cfg.data_width}-bit hardware register at {cfg.address_hex}...")
 
         context_data: Dict[str, Any] = {"address": cfg.address_hex, "mask": cfg.bit_mask_hex}
 
         # We use a strict 3-second timeout. If the bus hangs (unclocked domain),
         # devmem won't return, and we need to catch it quickly.
         cmd = f"devmem {cfg.address_hex} {cfg.data_width}"
+        logger.debug(f"[MMIO] Executing kernel bypass: {cmd}")
 
         try:
             res = dut.safe_run(cmd, timeout_s=3.0)
 
             if not res.ok:
                 error_msg = res.stderr.strip() or res.stdout.strip()
-                logger.error(f"[MMIO] Failed to read {cfg.address_hex}: {error_msg}")
 
-                # Check for strict kernel memory protection
+                #  FORENSIC KERNEL CONFIG INTERCEPTOR
                 if "Operation not permitted" in error_msg:
+                    logger.critical("="*60)
+                    logger.critical("[MMIO] FATAL: KERNEL BLOCKED PHYSICAL MEMORY ACCESS!")
+                    logger.critical("[MMIO] CONFIG_STRICT_DEVMEM is enabled in the Linux kernel.")
+                    logger.critical("[MMIO] You must disable it in the kernel defconfig to use this validator.")
+                    logger.critical("="*60)
                     return ValidatorResult(passed=False, error_msg="Kernel blocked access (CONFIG_STRICT_DEVMEM enabled).", context=context_data)
 
+                logger.error(f"[MMIO] Failed to read {cfg.address_hex}: {error_msg}")
                 return ValidatorResult(passed=False, error_msg=f"MMIO Read Failed: {error_msg}", context=context_data)
 
             # Parse the raw hex output
@@ -49,7 +56,7 @@ class MmioValidator:
             context_data["mmio_raw_val"] = hex(raw_val).upper()
             context_data["mmio_masked_val"] = hex_result
 
-            logger.info(f"[MMIO] {cfg.address_hex} & {cfg.bit_mask_hex} = {hex_result}")
+            logger.debug(f"[MMIO] Raw: {context_data['mmio_raw_val']} | Mask: {cfg.bit_mask_hex} -> Result: {hex_result}")
 
             # Optional Verification
             if cfg.expected_value_hex:
@@ -63,6 +70,7 @@ class MmioValidator:
                         context=context_data
                     )
 
+            logger.info(f"[MMIO] Register evaluation passed: {hex_result}")
             return ValidatorResult(
                 passed=True,
                 metrics={"t_mmio_read_s": res.duration_s},
@@ -75,12 +83,20 @@ class MmioValidator:
 
         except TransportTimeoutError:
             # The AXI/AHB bus locked up waiting for an unclocked peripheral to respond
-            logger.critical(f"[MMIO] BUS HANG: Silicon locked up reading {cfg.address_hex}.")
+            logger.critical("="*60)
+            logger.critical(f"[MMIO] FATAL: AXI/AHB BUS HANG DETECTED!")
+            logger.critical(f"[MMIO] Silicon locked up reading {cfg.address_hex}.")
+            logger.critical("[MMIO] Target peripheral clock is likely disabled (unclocked domain).")
+            logger.critical("="*60)
             return ValidatorResult(passed=False, error_msg="Bus Hang: Silicon locked up (Unclocked domain?).", context=context_data)
 
         except TransportConnectionError as e:
             # The read triggered an asynchronous Data Abort, instantly crashing the kernel
-            logger.critical(f"[MMIO] KERNEL PANIC: Hardware aborted access to {cfg.address_hex}.")
+            logger.critical("="*60)
+            logger.critical(f"[MMIO] FATAL: KERNEL PANIC / DATA ABORT DETECTED!")
+            logger.critical(f"[MMIO] Hardware aggressively rejected access to {cfg.address_hex}: {e}")
+            logger.critical("[MMIO] You are likely reading unmapped or protected TrustZone memory.")
+            logger.critical("="*60)
             return ValidatorResult(passed=False, error_msg=f"Kernel Panic/Data Abort accessing MMIO: {e}", context=context_data)
 
 
@@ -90,19 +106,31 @@ class MmioValidator:
         DANGEROUS: Writes raw bits directly to physical silicon.
         Can cause immediate hard-faults if written to read-only/protected memory.
         """
-        logger.warning(f"[MMIO] FORCING HARDWARE WRITE to {cfg.address_hex} = {write_val_hex} ")
         context_data: Dict[str, Any] = {"address": cfg.address_hex, "write_val": write_val_hex}
 
+        logger.warning("="*60)
+        logger.warning(f"[MMIO]  DANGER: FORCING HARDWARE WRITE TO {cfg.address_hex} ")
+        logger.warning(f"[MMIO] Injecting Value: {write_val_hex} ({cfg.data_width}-bit)")
+        logger.warning("="*60)
+
         cmd = f"devmem {cfg.address_hex} {cfg.data_width} {write_val_hex}"
+        logger.debug(f"[MMIO] Executing kernel bypass: {cmd}")
 
         try:
             res = dut.safe_run(cmd, timeout_s=3.0)
 
             if not res.ok:
                 error_msg = res.stderr.strip() or res.stdout.strip()
+
+                # Check for strict kernel memory protection on write
+                if "Operation not permitted" in error_msg:
+                    logger.critical(f"[MMIO] FATAL: Kernel blocked access. CONFIG_STRICT_DEVMEM is enabled.")
+                    return ValidatorResult(passed=False, error_msg="Kernel blocked write (CONFIG_STRICT_DEVMEM).", context=context_data)
+
                 logger.error(f"[MMIO] Failed to write {cfg.address_hex}: {error_msg}")
                 return ValidatorResult(passed=False, error_msg=f"MMIO Write Failed: {error_msg}", context=context_data)
 
+            logger.info(f"[MMIO] Successfully injected {write_val_hex} into {cfg.address_hex}.")
             return ValidatorResult(
                 passed=True,
                 metrics={"t_mmio_write_s": res.duration_s},
@@ -110,6 +138,8 @@ class MmioValidator:
             )
 
         except TransportTimeoutError:
+            logger.critical(f"[MMIO] FATAL: AXI/AHB Bus Hang. Silicon locked up during write to {cfg.address_hex}.")
             return ValidatorResult(passed=False, error_msg="Bus Hang: Silicon locked up during write.", context=context_data)
         except TransportConnectionError as e:
+            logger.critical(f"[MMIO] FATAL: Kernel Panic / Data Abort triggered by MMIO write to {cfg.address_hex}: {e}")
             return ValidatorResult(passed=False, error_msg=f"Kernel Panic/Data Abort during MMIO write: {e}", context=context_data)

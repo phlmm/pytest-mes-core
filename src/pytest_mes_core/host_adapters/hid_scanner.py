@@ -64,7 +64,6 @@ class HeadlessBarcodeScanner(BaseHostAdapter):
 
     def __init__(self, cfg: HidScannerConfig):
         self.cfg = cfg
-        # The linter is now perfectly happy because InputDevice is always a valid class
         self.device: Optional[InputDevice] = None
 
     def __enter__(self) -> 'HeadlessBarcodeScanner':
@@ -72,27 +71,36 @@ class HeadlessBarcodeScanner(BaseHostAdapter):
             raise HostAdapterError("evdev library is missing or running on non-Linux OS.")
 
         target = self.cfg.device_name_substring.lower()
+        logger.debug(f"[HID] Hunting for scanner matching '{target}' in /dev/input/...")
 
         for path in list_devices():
             try:
                 dev = InputDevice(path)
                 if dev.name and target in dev.name.lower():
-                    logger.info(f"[HID] Bound to scanner '{dev.name}' at {path}")
+                    logger.info(f"[HID] Hardware bound: '{dev.name}' at {path}")
                     self.device = dev
 
                     # 1. Exclusively grab the input.
                     self.device.grab()
 
                     # 2. BUFFER PURGE: Clear any partial keystrokes from premature operator scans
+                    purged_count = 0
                     while self.device.read_one() is not None:
-                        pass
+                        purged_count += 1
+
+                    if purged_count > 0:
+                        logger.debug(f"[HID] Purged {purged_count} stale keystrokes from hardware buffer.")
 
                     return self
             except (IOError, PermissionError) as e:
-                logger.warning(f"[HID] Cannot access {path} ({e}). Skipping...")
+                # Log at DEBUG because X11/Wayland aggressively locks keyboards and mice,
+                # causing expected permission errors on standard desktop inputs.
+                logger.debug(f"[HID] Cannot access {path} ({e}). Skipping...")
 
-        logger.error(f"[HID] No scanner matching '{target}' found in /dev/input/.")
-        raise HostHardwareDisconnectError(f"HID Scanner '{target}' not found or unplugged.")
+        # If we exit the loop, the scanner wasn't found
+        err_msg = f"HID Scanner '{target}' not found or unplugged."
+        logger.critical(f"[HID] FATAL: {err_msg}")
+        raise HostHardwareDisconnectError(err_msg)
 
     def __exit__(self, _exc_type: Any, _exc_val: Any, _exc_tb: Any) -> None:
         """ZERO-LEAKAGE: Release the kernel lock on the USB device."""
@@ -114,7 +122,8 @@ class HeadlessBarcodeScanner(BaseHostAdapter):
         if not self.device:
             raise HostAdapterError("Scanner not initialized. Must be used within a 'with' context manager.")
 
-        logger.info(f"[HID] Awaiting operator scan (Timeout: {self.cfg.scan_timeout_s}s)...")
+        # Always visible Operator prompt
+        logger.warning(f">>> [OPERATOR ACTION] SCAN BARCODE NOW (Timeout: {self.cfg.scan_timeout_s}s) <<<")
         barcode = ""
 
         try:
@@ -132,13 +141,19 @@ class HeadlessBarcodeScanner(BaseHostAdapter):
                         keycode = key.keycode[0] if isinstance(key.keycode, list) else key.keycode
 
                         if keycode == 'KEY_ENTER':
-                            logger.info(f"[HID] Scan captured: {barcode}")
+                            logger.info(f"[HID] Scan successfully captured: '{barcode}'")
                             return barcode
 
                         if keycode in self.KEY_MAPPING:
-                            barcode += self.KEY_MAPPING[keycode]
+                            char = self.KEY_MAPPING[keycode]
+                            logger.debug(f"[HID] RX: {keycode} -> '{char}'")
+                            barcode += char
                         elif keycode.startswith('KEY_') and len(keycode) == 5:
-                            barcode += keycode.replace('KEY_', '')
+                            char = keycode.replace('KEY_', '')
+                            logger.debug(f"[HID] RX: {keycode} -> '{char}'")
+                            barcode += char
+                        else:
+                            logger.debug(f"[HID] RX: {keycode} (Unmapped/Ignored)")
 
         except OSError as e:
             logger.critical(f"[HID] Hardware disconnect mid-scan: {e}")

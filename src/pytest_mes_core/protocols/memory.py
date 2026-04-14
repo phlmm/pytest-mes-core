@@ -1,3 +1,4 @@
+# src/pytest_mes_core/protocols/memory.py
 import time
 import secrets
 import logging
@@ -20,14 +21,14 @@ class MemoryValidator:
     @staticmethod
     def verify_i2c_read_write(dut: DutTransport, cfg: I2cEepromConfig) -> ValidatorResult:
         # 1. Defensive check: Prevent silicon page wrap-around corruption
+        logger.debug(f"[I2C] Calculating page boundaries for {cfg.num_bytes}-byte payload...")
         reg_int = int(cfg.test_register, 16)
         if (reg_int % cfg.page_size_bytes) + cfg.num_bytes > cfg.page_size_bytes:
-            logger.error("[I2C] Illegal write! Payload crosses physical EEPROM page boundary.")
-            return ValidatorResult(
-                passed=False,
-                error_msg=f"Test Configuration Error: Write crosses EEPROM page boundary of {cfg.page_size_bytes} bytes."
-            )
+            err_msg = f"Test Configuration Error: Write crosses EEPROM page boundary of {cfg.page_size_bytes} bytes."
+            logger.error(f"[I2C] {err_msg}")
+            return ValidatorResult(passed=False, error_msg=err_msg)
 
+        logger.debug(f"[I2C] Generating {cfg.num_bytes}-byte cryptographic test payload...")
         random_bytes = [secrets.randbelow(256) for _ in range(cfg.num_bytes)]
         hex_payload = " ".join([f"0x{b:02X}" for b in random_bytes])
         context_data: Dict[str, Any] = {"i2c_bus": cfg.bus, "i2c_address": cfg.address, "test_register": cfg.test_register}
@@ -40,18 +41,26 @@ class MemoryValidator:
             res_write = dut.safe_run(cmd_write, timeout_s=5.0)
 
             if not res_write.ok:
-                logger.error(f"[I2C] Write failed. Bus locked? Err: {res_write.stderr.strip()}")
+                #  FORENSIC HARDWARE INTERCEPTOR
+                logger.critical("="*60)
+                logger.critical(f"[I2C] FATAL: I2C Write rejected! Bus electrically locked or Device NACK'd.")
+                dmesg_res = dut.safe_run(f"dmesg | grep -i i2c-{cfg.bus} | tail -n 5", timeout_s=3.0)
+                if dmesg_res.ok and dmesg_res.stdout:
+                    logger.critical(f"[I2C] Kernel I2C Driver Trace:\n{dmesg_res.stdout.strip()}")
+                logger.critical("="*60)
                 return ValidatorResult(passed=False, error_msg=f"I2C Write rejected: {res_write.stderr.strip()}", context=context_data)
 
             # 3. Acknowledge Hardware Physics (tW)
-            logger.debug(f"[I2C] Awaiting {cfg.write_delay_s}s for silicon page-write cycle (tW)...")
+            logger.debug(f"[I2C] Awaiting {cfg.write_delay_s}s for silicon page-write cycle (tW) to complete...")
             time.sleep(cfg.write_delay_s)
 
             # 4. Read from Silicon
+            logger.debug(f"[I2C] Initiating readback from {cfg.test_register}...")
             cmd_read = f"i2ctransfer -y {cfg.bus} w1@{cfg.address} {cfg.test_register} r{cfg.num_bytes}"
             res_read = dut.safe_run(cmd_read, timeout_s=5.0)
 
             if not res_read.ok:
+                logger.critical(f"[I2C] FATAL: I2C Read failed! {res_read.stderr.strip()}")
                 return ValidatorResult(passed=False, error_msg=f"I2C Read rejected: {res_read.stderr.strip()}", context=context_data)
 
             try:
@@ -63,13 +72,18 @@ class MemoryValidator:
                     raise ValueError(f"Expected {cfg.num_bytes} bytes, got {len(read_bytes)}.")
 
             except ValueError as e:
-                logger.error(f"[I2C] Failed to parse readback: {res_read.stdout.strip()}")
+                logger.error(f"[I2C] Failed to parse readback output: {res_read.stdout.strip()}")
                 return ValidatorResult(passed=False, error_msg=f"Corrupt readback data: {e}", context=context_data)
 
             # 5. Logical Evaluation
             passed = (read_bytes == random_bytes)
             if not passed:
-                logger.critical(f"[I2C] VERIFICATION FAILED! Wrote: {random_bytes}, Read: {read_bytes}")
+                logger.critical("="*60)
+                logger.critical(f"[I2C] FATAL: VERIFICATION FAILED! SILICON CORRUPTED OR NOISY BUS.")
+                logger.critical(f"[I2C] Wrote: {random_bytes}")
+                logger.critical(f"[I2C] Read:  {read_bytes}")
+                logger.critical(f"[I2C] Check I2C pull-up resistors and bus capacitance.")
+                logger.critical("="*60)
                 return ValidatorResult(passed=False, error_msg="I2C Readback mismatch (Silicon corrupted).", context=context_data)
 
             logger.info("[I2C] Readback matches cryptographic payload exactly.")
@@ -80,8 +94,10 @@ class MemoryValidator:
             )
 
         except TransportTimeoutError:
+            logger.critical(f"[I2C] FATAL: DUT hung during I2C transaction. SDA/SCL lines shorted?")
             return ValidatorResult(passed=False, error_msg="DUT hung during I2C transaction. Bus locked?", context=context_data)
         except TransportConnectionError as e:
+            logger.critical(f"[I2C] FATAL: Transport dropped during I2C transaction: {e}")
             return ValidatorResult(passed=False, error_msg=f"Transport dropped during I2C transaction: {e}", context=context_data)
 
 
@@ -90,12 +106,15 @@ class MtdFlashValidator:
 
     @staticmethod
     def verify_scratch_sector(dut: DutTransport, cfg: MtdFlashConfig) -> ValidatorResult:
-        logger.warning(f"[MTD] Destructive write on {cfg.mtd_dev} at {cfg.sector_offset_hex}")
+        logger.warning(f"[MTD] Initiating destructive write on {cfg.mtd_dev} at {cfg.sector_offset_hex}...")
         context_data: Dict[str, Any] = {"mtd_device": cfg.mtd_dev, "offset": cfg.sector_offset_hex}
 
         # Calculate blocks pre-flight
+        logger.debug(f"[MTD] Calculating flash block alignment...")
         if cfg.test_bytes % cfg.page_size_bytes != 0:
-            return ValidatorResult(passed=False, error_msg="Test Configuration Error: test_bytes must be a multiple of page_size_bytes.")
+            err_msg = "Test Configuration Error: test_bytes must be a multiple of page_size_bytes."
+            logger.error(f"[MTD] {err_msg}")
+            return ValidatorResult(passed=False, error_msg=err_msg)
 
         block_count = cfg.test_bytes // cfg.page_size_bytes
         offset_dec = int(cfg.sector_offset_hex, 16) // cfg.page_size_bytes
@@ -106,10 +125,18 @@ class MtdFlashValidator:
             # ==========================================
             # 1. PHYSICAL ERASE
             # ==========================================
+            logger.debug(f"[MTD] Erasing {cfg.erase_blocks} hardware blocks at {cfg.sector_offset_hex}...")
             erase_cmd = f"flash_erase {cfg.mtd_dev} {cfg.sector_offset_hex} {cfg.erase_blocks}"
             res_erase = dut.safe_run(erase_cmd, timeout_s=10.0)
 
             if not res_erase.ok:
+                logger.critical("="*60)
+                logger.critical(f"[MTD] FATAL: flash_erase failed! SPI Flash chip locked or dead.")
+
+                dmesg_res = dut.safe_run("dmesg | grep -iE 'mtd|spi|nand' | tail -n 5", timeout_s=3.0)
+                if dmesg_res.ok and dmesg_res.stdout:
+                    logger.critical(f"[MTD] Kernel SPI/MTD Trace:\n{dmesg_res.stdout.strip()}")
+                logger.critical("="*60)
                 return ValidatorResult(passed=False, error_msg=f"flash_erase failed: {res_erase.stderr.strip()}", context=context_data)
 
             time.sleep(0.1) # Charge pump settling
@@ -127,23 +154,30 @@ class MtdFlashValidator:
             res_write = dut.safe_run(write_cmd, timeout_s=15.0)
 
             if not res_write.ok:
-                logger.error(f"[MTD] Write failed: {res_write.stderr.strip()}")
+                logger.critical(f"[MTD] FATAL: Flash write rejected: {res_write.stderr.strip()}")
                 return ValidatorResult(passed=False, error_msg=f"MTD write rejected: {res_write.stderr.strip()}", context=context_data)
 
             # ==========================================
             # 3. PHYSICAL READBACK & VERIFY
             # ==========================================
+            logger.debug(f"[MTD] Executing hardware readback...")
             abs_offset = int(cfg.sector_offset_hex, 16)
             read_cmd = f"hexdump -v -e '1/1 \"%02X\"' -s {abs_offset} -n {cfg.test_bytes} {cfg.mtd_dev}"
             res_read = dut.safe_run(read_cmd, timeout_s=10.0)
 
             if not res_read.ok:
+                 logger.critical(f"[MTD] FATAL: Flash readback failed: {res_read.stderr.strip()}")
                  return ValidatorResult(passed=False, error_msg=f"MTD readback failed: {res_read.stderr.strip()}", context=context_data)
 
             actual_hex = res_read.stdout.strip()
 
             if payload.hex().upper() != actual_hex:
-                logger.critical(f"[MTD] CORRUPTION DETECTED! Wrote: {payload.hex().upper()}, Read: {actual_hex}")
+                logger.critical("="*60)
+                logger.critical(f"[MTD] FATAL: MEMORY CORRUPTION DETECTED!")
+                logger.critical(f"[MTD] Wrote: {payload.hex().upper()}")
+                logger.critical(f"[MTD] Read:  {actual_hex}")
+                logger.critical(f"[MTD] Flash wearout (bad block) or severe SPI bus EMI detected.")
+                logger.critical("="*60)
                 return ValidatorResult(passed=False, error_msg="MTD Payload mismatch (Flash wearout / bad block).", context=context_data)
 
             logger.info(f"[MTD] Verified {cfg.test_bytes} bytes successfully in {res_write.duration_s}s.")
@@ -154,8 +188,10 @@ class MtdFlashValidator:
             )
 
         except TransportTimeoutError:
+            logger.critical(f"[MTD] FATAL: Silicon Lockup. DUT hung entirely during MTD flash operation.")
             return ValidatorResult(passed=False, error_msg="Silicon Lockup: DUT hung during MTD flash operation.", context=context_data)
         except TransportConnectionError as e:
+            logger.critical(f"[MTD] FATAL: Transport pipe shattered. (Brownout during flash erase/write charge pump activation?): {e}")
             return ValidatorResult(passed=False, error_msg=f"Transport pipe shattered (Brownout during flash erase/write?): {e}", context=context_data)
 
         finally:
@@ -164,7 +200,7 @@ class MtdFlashValidator:
             # ==========================================
             if dut.is_connected:
                 try:
-                    logger.debug(f"[MTD] ZERO-LEAKAGE: Wiping scratch sector {cfg.sector_offset_hex} on {cfg.mtd_dev}.")
+                    logger.debug(f"[MTD] ZERO-LEAKAGE: Wiping scratch sector {cfg.sector_offset_hex} on {cfg.mtd_dev}...")
                     dut.safe_run(f"flash_erase {cfg.mtd_dev} {cfg.sector_offset_hex} {cfg.erase_blocks}", timeout_s=10.0)
                 except Exception as cleanup_err:
                     logger.debug(f"[MTD] Final wipe skipped (Transport likely dead): {cleanup_err}")

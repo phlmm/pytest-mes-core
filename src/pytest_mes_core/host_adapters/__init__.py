@@ -21,6 +21,7 @@ from .serial_uart import HostSerialAdapter, HostSerialError
 from .safety import EStopWatchdog
 from .openocd import OpenOcdDaemonAdapter, HostOpenOcdError
 from .microchip import HostPickitAdapter
+from .diagnostics import ResourceDiagnostics
 
 __all__ = [
     # Contracts & Exceptions
@@ -44,5 +45,8 @@ __all__ = [
 
     # JTAG
     "OpenOcdDaemonAdapter", "HostOpenOcdError",
-    "HostPickitAdapter"
+    "HostPickitAdapter",
+
+    # Diagnostics
+    "ResourceDiagnostics"
 ]

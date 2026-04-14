@@ -54,7 +54,7 @@ class EStopWatchdog(BaseHostAdapter):
             logger.warning("[Safety] gpiod not available. E-Stop bypassed. DANGEROUS IF PHYSICAL HIGH VOLTAGE IS PRESENT!")
             return self
 
-        logger.info(f"[Safety] Arming E-Stop Watchdog on Host chip{self.cfg.gpiochip}:line{self.cfg.line}...")
+        logger.debug(f"[Safety] Initializing GPIO lock on Host chip{self.cfg.gpiochip}:line{self.cfg.line}...")
 
         # FAIL-FAST BINDING: We bind in the main thread. If hardware is missing,
         # the test crashes immediately before applying power.
@@ -63,7 +63,11 @@ class EStopWatchdog(BaseHostAdapter):
             self.line = self.chip.get_line(self.cfg.line)
             self.line.request(consumer="mes_estop", type=gpiod.LINE_REQ_DIR_IN)
         except Exception as e:
-            raise HostAdapterError(f"FATAL: Failed to bind E-Stop hardware on chip{self.cfg.gpiochip}: {e}")
+            err_msg = f"Failed to bind E-Stop hardware on chip{self.cfg.gpiochip}:line{self.cfg.line}. Error: {e}"
+            logger.critical(f"[Safety] FATAL: {err_msg}")
+            raise HostAdapterError(err_msg)
+
+        logger.info("[Safety] Watchdog Armed. Physical E-Stop button actively monitored.")
 
         self._stop_event.clear()
         self._thread = threading.Thread(target=self._monitor, daemon=True)
@@ -73,7 +77,7 @@ class EStopWatchdog(BaseHostAdapter):
 
     def __exit__(self, _exc_type: Any, _exc_val: Any, _exc_tb: Any) -> None:
         """ZERO-LEAKAGE: Disarm the watchdog and release GPIO pins."""
-        logger.debug("[Safety] Disarming E-Stop Watchdog.")
+        logger.debug("[Safety] ZERO-LEAKAGE: Disarming E-Stop Watchdog.")
         self._stop_event.set()
 
         if self._thread and self._thread.is_alive():
@@ -83,13 +87,13 @@ class EStopWatchdog(BaseHostAdapter):
         if self.line:
             try:
                 self.line.release()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"[Safety] Failed to release line lock: {e}")
         if self.chip:
             try:
                 self.chip.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"[Safety] Failed to close chip: {e}")
 
     def _monitor(self) -> None:
         """Background thread logic for monitoring physical state."""
@@ -97,10 +101,15 @@ class EStopWatchdog(BaseHostAdapter):
             return
 
         trigger_state = 0 if self.cfg.active_low else 1
+        logger.debug(f"[Safety] Background poller started. Target trigger state: {trigger_state}")
 
         try:
             while not self._stop_event.is_set():
                 state = self.line.get_value()
+
+                # Matrix Tracing: Logs the raw boolean logic of the pin
+                # This will flood the -vv trace, but is critical for identifying ground loops.
+                logger.debug(f"[Safety] Pin State: {state}")
 
                 if state == trigger_state:
                     logger.critical("="*60)
@@ -109,6 +118,7 @@ class EStopWatchdog(BaseHostAdapter):
 
                     # 1. Send SIGINT to the main thread. Pytest catches this as KeyboardInterrupt
                     # and triggers all context manager __exit__ and fixture teardown blocks.
+                    logger.info("[Safety] Sending SIGINT to main process to trigger relay shutdowns...")
                     os.kill(os.getpid(), signal.SIGINT)
 
                     # 2. Defend against deadlocked main threads (e.g. frozen C-extensions).
@@ -116,13 +126,14 @@ class EStopWatchdog(BaseHostAdapter):
                     time.sleep(5.0)
 
                     # 3. If the process is still alive after 5s, execute the violent kill.
-                    logger.critical("[Safety] Pytest failed to exit cleanly. Executing hard kill.")
+                    logger.critical("[Safety] Pytest failed to exit cleanly within 5 seconds. Executing hard kill.")
                     os._exit(1)
 
                 time.sleep(self.cfg.polling_interval_s)
 
         except Exception as e:
-            logger.error(f"[Safety] Watchdog hardware failure mid-test! {e}")
+            logger.critical(f"[Safety] FATAL: Watchdog hardware failure mid-test! {e}")
+            logger.critical("[Safety] Halting process to prevent unmonitored high-voltage hazards.")
             # If safety monitoring physically fails (e.g., operator unplugs GPIO wire),
             # we MUST halt the line to prevent unmonitored hazards.
             os.kill(os.getpid(), signal.SIGINT)

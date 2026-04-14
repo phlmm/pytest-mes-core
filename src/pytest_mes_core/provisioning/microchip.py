@@ -1,6 +1,5 @@
 # src/pytest_mes_core/provisioning/microchip.py
 import logging
-import subprocess
 from pathlib import Path
 
 from pytest_mes_core.provisioning.base import (
@@ -11,12 +10,15 @@ from pytest_mes_core.provisioning.base import (
 )
 from pytest_mes_core.host_adapters.microchip import HostPickitAdapter
 
+# IMPORT THE NEW ENTERPRISE PRIMITIVE
+from pytest_mes_core.utils.process import LiveProcess, ProcessTimeoutError, ProcessExecutionError
+
 logger = logging.getLogger("mes_core.provisioning.microchip")
 
 class MicrochipIpeProvisioner(BaseProvisioner):
     """
     Executes Microchip's IPECMD tool over a securely locked Host Adapter.
-    Validates output defensively and ensures deep observability for hardware failures.
+    Validates output defensively against JVM quirks and ensures deep observability.
     """
     def __init__(
         self,
@@ -32,12 +34,19 @@ class MicrochipIpeProvisioner(BaseProvisioner):
 
     def provision(self, image_path: Path) -> None:
         if not self.ipecmd_path.exists():
-            raise ProvisioningError(f"IPECMD jar not found at {self.ipecmd_path}.")
+            err_msg = f"IPECMD Java archive not found at {self.ipecmd_path}."
+            logger.critical(f"[ICSP] FATAL: {err_msg}")
+            raise ProvisioningError(err_msg)
+
         if not image_path.exists():
-            raise ProvisioningError(f"Firmware hex not found: {image_path}")
+            err_msg = f"Firmware hex not found: {image_path}"
+            logger.critical(f"[ICSP] FATAL: {err_msg}")
+            raise ProvisioningError(err_msg)
 
-        logger.info(f"[ICSP] Flashing {self.device} with {image_path.name} via {self.pickit.tool_serial}...")
+        logger.info(f"[ICSP] Initiating Java IPECMD flash of {self.device} with {image_path.name}...")
 
+        # -M: Program entire device
+        # -Y: Verify after programming
         cmd = [
             "java", "-jar", str(self.ipecmd_path),
             f"-P{self.device}",
@@ -47,34 +56,57 @@ class MicrochipIpeProvisioner(BaseProvisioner):
         ]
 
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=self.timeout_s)
-            stdout_lower = result.stdout.lower()
+            # ==========================================
+            # LIVE PROCESS EXECUTION & TELEMETRY
+            # ==========================================
+            process = LiveProcess(cmd, self.timeout_s, logger).execute()
 
-            # 1. Check for Verification Failures
+            stdout_lower = process.stdout.lower()
+
+            # ==========================================
+            # IPECMD HEURISTIC ERROR MAPPING
+            # ==========================================
+            # 1. JVM Failures
+            if "exception in thread" in stdout_lower or "outofmemoryerror" in stdout_lower:
+                log_path = process.export_log(Path("/tmp/mes_artifacts"))
+                logger.critical(f"\n[ICSP] FATAL: Java Virtual Machine crashed! Trace saved to: {log_path}")
+                raise ProvisioningError("IPECMD JVM crashed. Check Host PC RAM and Java version.")
+
+            # 2. Hardware / Target Missing (Very common if test jig pins don't make contact)
+            if "target device was not found" in stdout_lower or "connection failed" in stdout_lower:
+                log_path = process.export_log(Path("/tmp/mes_artifacts"))
+                logger.critical(f"\n[ICSP] FATAL: PICkit could not detect the {self.device}. Pogo pin failure? Trace saved to: {log_path}")
+                raise ProvisioningError("Target silicon not detected. Check physical ICSP connections and VDD.")
+
+            # 3. Verification Failures
             if "verify failed" in stdout_lower:
-                logger.critical(f"[ICSP] Flash VERIFY FAILED. Raw Output:\n{result.stdout}")
-                raise ImageVerificationError("ICSP readback verification failed. Bad sector or noisy clock line.")
+                log_path = process.export_log(Path("/tmp/mes_artifacts"))
+                logger.critical(f"\n[ICSP] FATAL: Flash VERIFY FAILED. Bad sector or noisy clock line? Trace saved to: {log_path}")
+                raise ImageVerificationError("ICSP readback verification failed.")
 
-            # 2. Check for Hardware Locks
+            # 4. Silicon Configuration Locks
             if "protected" in stdout_lower or "code protect" in stdout_lower:
-                logger.error(f"[ICSP] Silicon locked. Raw Output:\n{result.stdout}")
-                raise SiliconLockError("PIC18 Configuration Bits are locked.")
+                log_path = process.export_log(Path("/tmp/mes_artifacts"))
+                logger.critical(f"\n[ICSP] FATAL: Silicon is read/write protected. Trace saved to: {log_path}")
+                raise SiliconLockError("PIC Configuration Bits are locked. Cannot flash.")
 
-            # 3. Check for Explicit Tool Failures (Expose the Root Cause!)
-            if "programming failed" in stdout_lower or result.returncode != 0:
-                logger.error(f"[ICSP] IPECMD failed with code {result.returncode}. Raw Output:\n{result.stdout}")
-                raise ProvisioningError(f"IPECMD failed to program the device. See logs for Device ID or VDD errors.")
+            # 5. Generic Tool Failures
+            if "programming failed" in stdout_lower or process.returncode != 0:
+                log_path = process.export_log(Path("/tmp/mes_artifacts"))
+                logger.critical(f"\n[ICSP] FATAL: IPECMD failed with code {process.returncode}. Trace saved to: {log_path}")
+                raise ProvisioningError(f"IPECMD failed to program the device. Check logs for Device ID or VDD errors.")
 
-            # 4. Require POSITIVE Confirmation
+            # 6. Require POSITIVE Confirmation (IPECMD sometimes exits 0 on internal script aborts)
             if "programming complete" not in stdout_lower:
-                logger.error(f"[ICSP] Missing positive confirmation. Raw Output:\n{result.stdout}")
-                raise ProvisioningError("IPECMD returned 0, but did not confirm programming was complete.")
+                log_path = process.export_log(Path("/tmp/mes_artifacts"))
+                logger.critical(f"\n[ICSP] FATAL: Missing positive confirmation from IPECMD. Trace saved to: {log_path}")
+                raise ProvisioningError("IPECMD returned exit code 0, but did not confirm programming was complete.")
 
-            logger.info(f"[ICSP] Successfully flashed and verified {self.device}.")
+            logger.info(f"\n[ICSP] Successfully flashed and verified {self.device} in {process.duration_s}s.")
 
-        except subprocess.TimeoutExpired:
-            logger.critical(f"[ICSP] IPECMD hung for >{self.timeout_s}s.")
-            raise ProvisioningError(f"PIC18 flash operation timed out after {self.timeout_s} seconds.")
-        except FileNotFoundError:
-            logger.error("[ICSP] Java executable not found in PATH.")
-            raise ProvisioningError("Java is not installed or not in the system PATH. IPECMD requires Java.")
+        except ProcessTimeoutError:
+            raise ProvisioningError(f"PIC flash operation timed out after {self.timeout_s}s. JVM Deadlock.")
+        except ProcessExecutionError as e:
+            err_msg = f"Failed to execute IPECMD. Is Java installed? Error: {e}"
+            logger.critical(f"\n[ICSP] FATAL: {err_msg}")
+            raise ProvisioningError(err_msg)

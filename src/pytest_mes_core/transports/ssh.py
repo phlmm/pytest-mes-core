@@ -4,7 +4,7 @@ import socket
 import logging
 from typing import Any, Dict
 
-from tenacity import retry, stop_after_attempt, wait_fixed
+from tenacity import retry, stop_after_attempt, wait_fixed, before_sleep_log
 from fabric import Connection, Config  # type: ignore
 from paramiko.ssh_exception import SSHException  # type: ignore
 from invoke.exceptions import CommandTimedOut, ThreadException  # type: ignore
@@ -74,7 +74,13 @@ class EphemeralSSHClient:
         """Required by DutTransport Contract."""
         return self.conn is not None and self.conn.is_connected
 
-    @retry(stop=stop_after_attempt(10), wait=wait_fixed(2.0), reraise=True)
+    # Wire the retry loop into the logger so operators can see the boot polling
+    @retry(
+        stop=stop_after_attempt(10),
+        wait=wait_fixed(2.0),
+        reraise=True,
+        before_sleep=before_sleep_log(logger, logging.WARNING)
+    )
     def connect(self) -> None:
         """
         Actively polls the DUT until the OpenSSH daemon binds and accepts authentication.
@@ -83,7 +89,7 @@ class EphemeralSSHClient:
         if self.is_connected:
             return
 
-        logger.debug(f"[SSH] Polling {self.ip_address}:{self.cfg.port} for sshd...")
+        logger.debug(f"[SSH] Polling {self.ip_address}:{self.cfg.port} for OpenSSH Daemon...")
         try:
             self.conn.open()
             logger.info(f"[SSH] Successfully authenticated with {self.ip_address} as {self.cfg.user}")
@@ -95,10 +101,10 @@ class EphemeralSSHClient:
         """Zero-Leakage teardown (Required by DutTransport Contract)."""
         if self.is_connected:
             try:
+                logger.debug(f"[SSH] ZERO-LEAKAGE: Tearing down TCP socket to {self.ip_address}...")
                 self.conn.close()
-                logger.debug(f"[SSH] Severed connection to {self.ip_address}")
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"[SSH] Teardown exception (Safe to ignore): {e}")
 
     # ==========================================
     # COMMAND EXECUTION
@@ -109,12 +115,17 @@ class EphemeralSSHClient:
         Contains ZERO internal auto-healing to allow external Failover architectures to function.
         """
         if not self.is_connected:
-            raise TransportConnectionError("Cannot execute: SSH socket is disconnected.")
+            err_msg = "Cannot execute: SSH socket is disconnected."
+            logger.critical(f"[SSH] FATAL: {err_msg}")
+            raise TransportConnectionError(err_msg)
 
         kwargs.setdefault('hide', True)
         kwargs.setdefault('warn', True)
 
+        # Matrix Tracing: Expose the exact shell command to the Pytest artifacts
+        logger.debug(f"[SSH] TX -> {cmd}")
         t0 = time.perf_counter()
+
         try:
             # 1. Execute via Fabric
             res = self.conn.run(cmd, timeout=timeout_s, **kwargs)
@@ -124,7 +135,12 @@ class EphemeralSSHClient:
             # Sometimes paramiko doesn't raise, it just dumps to stderr and exits with -1.
             if not res.ok and ("closed" in str(res.stderr).lower() or res.exited == -1):
                 self.disconnect()
-                raise TransportConnectionError("SSH Socket silently closed during execution.")
+                err_msg = "SSH Socket silently closed during execution."
+                logger.critical(f"[SSH] FATAL: {err_msg}")
+                raise TransportConnectionError(err_msg)
+
+            # Matrix Tracing
+            logger.debug(f"[SSH] RX <- Exited {res.exited} in {duration}s")
 
             # 3. Return the Immutable Contract
             return CommandResult(
@@ -141,6 +157,8 @@ class EphemeralSSHClient:
             # The physical pipe is fine, the OS is just slow or the command blocked.
             # We return a failed result so the test fails, but we DO NOT raise a connection error.
             duration = round(time.perf_counter() - t0, 3)
+            logger.warning(f"[SSH] Execution timed out after {timeout_s}s: {cmd}")
+
             return CommandResult(
                 command=cmd,
                 stdout=e.result.stdout if hasattr(e, 'result') and e.result else "",
@@ -153,4 +171,6 @@ class EphemeralSSHClient:
         except (SSHException, socket.error, EOFError, ThreadException) as e:
             # THE SURVIVAL EVENT: The physical pipe shattered.
             self.disconnect()
-            raise TransportConnectionError(f"Physical link severed during execution: {e}") from e
+            err_msg = f"Physical TCP/SSH link severed during execution of '{cmd}': {e}"
+            logger.critical(f"[SSH] FATAL: {err_msg}")
+            raise TransportConnectionError(err_msg) from e

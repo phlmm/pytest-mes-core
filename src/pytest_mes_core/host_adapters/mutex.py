@@ -48,8 +48,9 @@ def hardware_mutex(resource_name: str, timeout_s: float = 60.0) -> Iterator[None
         return
 
     lock_file = f"/tmp/mes_hw_{resource_name}.lock"
-    logger.debug(f"[Mutex] Attempting to acquire hardware lock: {resource_name}")
+    logger.debug(f"[Mutex] Attempting to acquire OS lock on {lock_file}...")
     t0 = time.perf_counter()
+    waiting_logged = False
 
     # Use 'a' (append) so we don't truncate the file while another process holds the lock
     with open(lock_file, "a") as f:
@@ -59,20 +60,30 @@ def hardware_mutex(resource_name: str, timeout_s: float = 60.0) -> Iterator[None
                 fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 break
             except BlockingIOError:
-                if (time.perf_counter() - t0) > timeout_s:
-                    logger.critical(f"[Mutex] FATAL DEADLOCK: Failed to acquire {resource_name} after {timeout_s}s.")
-                    raise HostMutexTimeoutError(
-                        f"Resource '{resource_name}' is locked by another process and did not free in time."
-                    )
-                # Sleep briefly to prevent 100% CPU core pinning while waiting
-                time.sleep(0.5)
+                # If we get rejected, it means another worker owns the hardware.
+                # Elevate to INFO so the operator sees the parallel queueing happening.
+                if not waiting_logged:
+                    logger.info(f"[Mutex] Hardware '{resource_name}' is currently busy. Worker queued (Timeout: {timeout_s}s)...")
+                    waiting_logged = True
 
-        logger.debug(f"[Mutex] Acquired {resource_name}.")
+                if (time.perf_counter() - t0) > timeout_s:
+                    err_msg = f"Failed to acquire {resource_name} after {timeout_s}s. Deadlock or ghost worker?"
+                    logger.critical(f"[Mutex] FATAL: {err_msg}")
+                    raise HostMutexTimeoutError(err_msg)
+
+                # Sleep briefly to prevent 100% CPU core pinning while waiting in line
+                time.sleep(0.2)
+
+        wait_duration = time.perf_counter() - t0
+        if waiting_logged:
+            logger.info(f"[Mutex] Worker successfully acquired '{resource_name}' after waiting {wait_duration:.2f}s.")
+        else:
+            logger.debug(f"[Mutex] Acquired '{resource_name}' instantly.")
 
         try:
             yield
         finally:
-            logger.debug(f"[Mutex] Releasing {resource_name}.")
+            logger.debug(f"[Mutex] ZERO-LEAKAGE: Releasing OS lock on '{resource_name}'.")
             # The OS also guarantees release when the file descriptor closes (exiting the `with` block),
             # but explicitly calling LOCK_UN is the cleanest architectural pattern.
             fcntl.flock(f, fcntl.LOCK_UN)

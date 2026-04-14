@@ -1,5 +1,7 @@
+# src/pytest_mes_core/protocols/sysfs_poller.py
 import logging
 from typing import Dict, List, Any
+
 from pytest_mes_core.transports import DutTransport
 from pytest_mes_core.config import SysfsPollerConfig
 
@@ -24,11 +26,12 @@ class BackgroundSysfsPoller:
         self.metrics: Dict[str, Any] = {}
 
     def __enter__(self) -> 'BackgroundSysfsPoller':
-        logger.info(f"[Sysfs] Deploying telemetry agent (Interval: {self.cfg.polling_interval_s}s)...")
+        logger.info(f"[Sysfs] Deploying telemetry agent monitoring {self._keys} (Interval: {self.cfg.polling_interval_s}s)...")
         self.dut.safe_run(f"rm -f {self.log_file} {self.pid_file}", hide=True)
 
         # 1. Calculate safe hardware read timeout (Max 50% of the polling interval)
         read_timeout = max(0.2, self.cfg.polling_interval_s * 0.5)
+        logger.debug(f"[Sysfs] Enforcing {read_timeout}s read timeout to prevent kernel driver lockups.")
 
         # 2. Construct the robust, sandboxed bash loop
         cat_commands = ' echo "||" '.join([
@@ -44,6 +47,7 @@ class BackgroundSysfsPoller:
         )
 
         # 3. Spawn in background via nohup
+        logger.debug("[Sysfs] Spawning bash daemon on DUT via nohup...")
         deploy_cmd = f"nohup sh -c '{script}' >/dev/null 2>&1 & echo $! > {self.pid_file}"
         self.dut.safe_run(deploy_cmd, hide=True)
 
@@ -57,26 +61,31 @@ class BackgroundSysfsPoller:
             self._buffer = HostSideBuffer(self.dut, self.log_file, poll_interval_s=1.0)
             self._buffer.start()
         else:
-            logger.debug(f"[Sysfs] Base transport ({type(self.dut).__name__}) detected. Using End-of-Test Fetching.")
+            logger.debug(f"[Sysfs] Base transport ({type(self.dut).__name__}) detected. Falling back to End-of-Test Fetching.")
 
         return self
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         """Zero-Leakage Teardown & Data Retrieval"""
-        logger.debug("[Sysfs] Reaping background daemon and extracting trace...")
+        logger.debug("[Sysfs] Reaping background daemon and extracting telemetry trace...")
         raw_lines: List[str] = []
 
         # 1. Fetch Data
         if self._buffer:
+            logger.debug("[Sysfs] Extracting vacuumed data from Host PC RAM...")
             # Safely halt the background thread and get the surviving SSH data
             raw_lines = self._buffer.stop()
         else:
+            logger.debug(f"[Sysfs] Extracting file {self.log_file} from DUT over Serial...")
             # Serial fallback: Fetch it all now
             res = self.dut.safe_run(f"cat {self.log_file}", hide=True, warn=True)
             if res.ok and res.stdout:
                 raw_lines = res.stdout.strip().split('\n')
 
+        logger.info(f"[Sysfs] Successfully extracted {len(raw_lines)} telemetry samples from DUT.")
+
         # 2. Surgical Kill
+        logger.debug(f"[Sysfs] ZERO-LEAKAGE: Terminating PID in {self.pid_file}...")
         kill_cmd = f"if [ -f {self.pid_file} ]; then kill -9 $(cat {self.pid_file}) >/dev/null 2>&1 || true; fi"
         self.dut.safe_run(kill_cmd, hide=True)
 
@@ -86,10 +95,13 @@ class BackgroundSysfsPoller:
         # 4. Parse and attach physics data to the class instance
         self.metrics = self._parse_data(raw_lines)
 
+        if self.metrics:
+            logger.debug(f"[Sysfs] Aggregated Metrics: {self.metrics}")
+
     def _parse_data(self, raw_lines: List[str]) -> Dict[str, Any]:
         aggregated: Dict[str, Any] = {}
         if not raw_lines or raw_lines == ['']:
-            logger.warning("[Sysfs] No telemetry data captured!")
+            logger.warning("[Sysfs] No telemetry data captured! Did the kernel panic immediately?")
             return aggregated
 
         # Setup tracking arrays

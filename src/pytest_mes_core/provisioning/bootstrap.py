@@ -45,17 +45,19 @@ class HardwareBootstrapper:
         Public method to dynamically assert any boot state defined in the station configuration.
         """
         if mode_name not in self.cfg.boot_modes:
-            raise ProvisioningError(
-                f"Boot mode '{mode_name}' is not defined in the station configuration."
-            )
+            err_msg = f"Boot mode '{mode_name}' is not defined in the station configuration."
+            logger.critical(f"[Bootstrap] FATAL: {err_msg}")
+            raise ProvisioningError(err_msg)
 
         target_states = self.cfg.boot_modes[mode_name]
 
         if len(target_states) != len(self.cfg.boot_pins):
-            raise ProvisioningError(
+            err_msg = (
                 f"Mismatch: Mode '{mode_name}' provides {len(target_states)} states, "
                 f"but {len(self.cfg.boot_pins)} boot pins are configured."
             )
+            logger.critical(f"[Bootstrap] FATAL: {err_msg}")
+            raise ProvisioningError(err_msg)
 
         logger.info(f"[Bootstrap] Forcing silicon into '{mode_name.upper()}' mode (States: {target_states})...")
         self._strobe_hardware(target_states)
@@ -63,7 +65,7 @@ class HardwareBootstrapper:
     def _strobe_hardware(self, target_states: List[int]) -> None:
         """Internal helper to assert multiplexed boot pins and strobe the reset line."""
         if not HAS_GPIOD:
-            logger.warning("[Bootstrap] gpiod missing. Hardware boot state bypassed!")
+            logger.warning("[Bootstrap] gpiod missing. Hardware boot state bypassed! (OK if testing on Windows/Mac)")
             return
 
         # DEFENSIVE: Initialize variables to prevent UnboundLocalError in finally block
@@ -72,19 +74,23 @@ class HardwareBootstrapper:
         r_line: Optional[Any] = None
 
         try:
+            logger.debug(f"[Bootstrap] Binding to GPIO chip{self.cfg.gpiochip}...")
             chip = gpiod.Chip(f"gpiochip{self.cfg.gpiochip}")
 
             # Request the exact number of Boot Mode lines
             for i, pin in enumerate(self.cfg.boot_pins):
+                logger.debug(f"[Bootstrap] Acquiring lock on Boot Pin {pin}...")
                 line = chip.get_line(pin)
                 line.request(consumer=f"mes_boot_{i}", type=gpiod.LINE_REQ_DIR_OUT)
                 b_lines.append(line)
 
             # Request Reset line
+            logger.debug(f"[Bootstrap] Acquiring lock on Reset Pin {self.cfg.reset_pin}...")
             r_line = chip.get_line(self.cfg.reset_pin)
             r_line.request(consumer="mes_reset", type=gpiod.LINE_REQ_DIR_OUT)
 
             # 1. Assert the multiplexed Boot States
+            logger.debug(f"[Bootstrap] Asserting boot pins to states: {target_states}")
             for line, state in zip(b_lines, target_states):
                 line.set_value(state)
 
@@ -92,18 +98,23 @@ class HardwareBootstrapper:
             reset_assert_val = 0 if self.cfg.reset_active_low else 1
             reset_release_val = 1 if self.cfg.reset_active_low else 0
 
+            logger.debug(f"[Bootstrap] Asserting Reset Line (Value: {reset_assert_val})...")
             r_line.set_value(reset_assert_val)
             time.sleep(0.1) # Allow silicon capacitors to drain
 
             # 3. Release Reset (Silicon samples BOOT pins on the rising/falling edge of reset)
+            logger.debug(f"[Bootstrap] Releasing Reset Line (Value: {reset_release_val}). Silicon sampling boot pins now...")
             r_line.set_value(reset_release_val)
             time.sleep(0.5) # Wait for Boot ROM to lock in the mode
 
         except Exception as e:
-            raise ProvisioningError(f"Failed to toggle physical bootstrap pins: {e}")
+            err_msg = f"Failed to toggle physical bootstrap pins: {e}"
+            logger.critical(f"[Bootstrap] FATAL: {err_msg}")
+            raise ProvisioningError(err_msg)
 
         finally:
             # ZERO-LEAKAGE: Safely release all GPIO lines back to the Linux Kernel
+            logger.debug("[Bootstrap] ZERO-LEAKAGE: Releasing GPIO locks back to OS.")
             for line in b_lines:
                 try:
                     line.release()

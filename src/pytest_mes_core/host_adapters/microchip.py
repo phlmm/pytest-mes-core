@@ -2,8 +2,8 @@
 import logging
 from typing import Any
 
-from pytest_mes_core.host_adapters import BaseHostAdapter, HostAdapterError
-from pytest_mes_core.host_adapters import hardware_mutex, HostMutexTimeoutError
+from pytest_mes_core.host_adapters.base import BaseHostAdapter, HostAdapterError
+from pytest_mes_core.host_adapters.mutex import hardware_mutex, HostMutexTimeoutError
 
 logger = logging.getLogger("mes_core.host_adapters.microchip")
 
@@ -27,10 +27,14 @@ class HostPickitAdapter(BaseHostAdapter):
                 timeout_s=self.mutex_timeout_s
             )
             self._mutex_context.__enter__()
+
+            logger.info(f"[PICkit] Hardware lock successfully acquired for probe {self.tool_serial}.")
             return self
 
         except HostMutexTimeoutError as e:
-            raise HostAdapterError(f"Failed to acquire PICkit {self.tool_serial}: {e}")
+            err_msg = f"Failed to acquire PICkit {self.tool_serial}: {e}"
+            logger.critical(f"[PICkit] FATAL: {err_msg}")
+            raise HostAdapterError(err_msg)
 
     def __exit__(self, _exc_type: Any, _exc_val: Any, _exc_tb: Any) -> None:
         """ZERO-LEAKAGE: Release the OS-level hardware lock."""

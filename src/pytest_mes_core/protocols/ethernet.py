@@ -1,3 +1,4 @@
+# src/pytest_mes_core/protocols/ethernet.py
 import json
 import time
 import subprocess
@@ -32,18 +33,23 @@ class EthernetValidator:
 
         try:
             # 1. Zero-State Initialization (Kill daemons that fight us)
+            logger.debug(f"[ETH {cfg.interface}] Flushing stale IPs and forcing link DOWN...")
             dut.safe_run(f"ip addr flush dev {cfg.interface} >/dev/null 2>&1 || true")
             dut.safe_run(f"ip link set dev {cfg.interface} down", timeout_s=3.0)
 
             # 2. Enforce MTU and Static IP
+            logger.debug(f"[ETH {cfg.interface}] Enforcing MTU {cfg.mtu} and binding IP {cfg.dut_static_ip}...")
             res_mtu = dut.safe_run(f"ip link set dev {cfg.interface} mtu {cfg.mtu}", timeout_s=3.0)
             if not res_mtu.ok:
-                return ValidatorResult(passed=False, error_msg=f"Hardware rejected MTU {cfg.mtu}.")
+                err_msg = f"Hardware rejected MTU {cfg.mtu}."
+                logger.error(f"[ETH {cfg.interface}] {err_msg}")
+                return ValidatorResult(passed=False, error_msg=err_msg)
 
             dut.safe_run(f"ip addr add {cfg.dut_static_ip} dev {cfg.interface}", timeout_s=3.0)
             dut.safe_run(f"ip link set dev {cfg.interface} up", timeout_s=3.0)
 
             # 3. Safe Carrier Polling
+            logger.debug(f"[ETH {cfg.interface}] Polling MAC/PHY for Carrier Lock (5.0s timeout)...")
             carrier_up = False
             t_end = time.perf_counter() + 5.0
             while time.perf_counter() < t_end:
@@ -54,13 +60,21 @@ class EthernetValidator:
                 time.sleep(0.5)
 
             if not carrier_up:
-                # Forensic Intercept: Scrape dmesg for PHY driver faults
+                #  FORENSIC HARDWARE INTERCEPTOR
                 dmesg_res = dut.safe_run(f"dmesg | grep -iE '{cfg.interface}|phy|mac' | tail -n 5")
                 context_data["kernel_phy_trace"] = dmesg_res.stdout.strip() if dmesg_res.ok else ""
-                logger.error(f"[ETH {cfg.interface}] PHY failed to achieve carrier lock (Cable unplugged?)")
+
+                logger.critical("="*60)
+                logger.critical(f"[ETH {cfg.interface}] FATAL: PHY failed to achieve carrier lock!")
+                logger.critical("[ETH] Is the Ethernet cable unplugged? Is the PHY oscillator dead?")
+                if context_data["kernel_phy_trace"]:
+                    logger.critical(f"[ETH] Kernel Trace:\n{context_data['kernel_phy_trace']}")
+                logger.critical("="*60)
+
                 return ValidatorResult(passed=False, error_msg="Physical link did not come up.", context=context_data)
 
             # 4. Verify Auto-Negotiated Speed
+            logger.debug(f"[ETH {cfg.interface}] Carrier locked. Interrogating auto-negotiated link speed...")
             res_speed = dut.safe_run(f"cat /sys/class/net/{cfg.interface}/speed", timeout_s=2.0)
             try:
                 actual_speed = int(res_speed.stdout.strip())
@@ -70,7 +84,11 @@ class EthernetValidator:
             context_data["negotiated_mtu"] = cfg.mtu
 
             if actual_speed < cfg.expected_speed_mbps:
-                logger.error(f"[ETH {cfg.interface}] DEGRADED SILICON! Negotiated {actual_speed}Mbps (Expected {cfg.expected_speed_mbps}Mbps).")
+                #  FORENSIC SILICON INTERCEPTOR
+                logger.critical("="*60)
+                logger.critical(f"[ETH {cfg.interface}] FATAL: DEGRADED SILICON OR BENT RJ45 PINS DETECTED!")
+                logger.critical(f"[ETH {cfg.interface}] Negotiated {actual_speed} Mbps. Expected {cfg.expected_speed_mbps} Mbps.")
+                logger.critical("="*60)
                 return ValidatorResult(
                     passed=False,
                     error_msg=f"Degraded PHY speed: {actual_speed} Mbps",
@@ -78,12 +96,17 @@ class EthernetValidator:
                     context=context_data
                 )
 
-            logger.info(f"[ETH {cfg.interface}] Physical Link Locked at {actual_speed} Mbps.")
+            logger.info(f"[ETH {cfg.interface}] Physical Link Locked securely at {actual_speed} Mbps.")
             return ValidatorResult(passed=True, metrics={"eth_speed_mbps": float(actual_speed)}, context=context_data)
 
         except TransportTimeoutError:
+            logger.critical(f"[ETH {cfg.interface}] FATAL: DUT completely unresponsive during link configuration. Kernel locked?")
             return ValidatorResult(passed=False, error_msg="DUT completely unresponsive during link configuration.")
         except TransportConnectionError as e:
+            logger.critical("="*60)
+            logger.critical(f"[ETH {cfg.interface}] FATAL: Transport pipe shattered during network reset!")
+            logger.critical("[ETH] SUICIDE TRAP: Did you route an Ethernet test over the SSH transport?")
+            logger.critical("="*60)
             return ValidatorResult(
                 passed=False,
                 error_msg=f"Transport pipe shattered during network reset (Routing error?): {e}"
@@ -98,21 +121,25 @@ class EthernetValidator:
 
         try:
             # 1. Spawn Host Server Safely
+            logger.debug(f"[ETH] Spawning local Host PC iperf3 daemon on port {cfg.iperf_port}...")
             server_cmd = ["iperf3", "-s", "-p", str(cfg.iperf_port), "-1", "-J"]
             server_proc = subprocess.Popen(server_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             time.sleep(0.5)
 
             if server_proc.poll() is not None:
                 _, stderr = server_proc.communicate()
+                logger.critical(f"[ETH] FATAL: Host PC iperf3 server failed to bind! {stderr.strip()}")
                 return ValidatorResult(passed=False, error_msg=f"Host iperf3 server failed to bind: {stderr.strip()}")
 
             # 2. Execute Target Client
             cmd = f"iperf3 -c {cfg.host_iperf_ip} -p {cfg.iperf_port} -t {cfg.iperf_duration_s} -J"
+            logger.debug(f"[ETH] Commanding DUT to initiate traffic: {cmd}")
             result = dut.safe_run(cmd, timeout_s=cfg.iperf_duration_s + 5.0)
 
             # 3. Shielded JSON Parsing
             if not result.ok:
                 context_data["iperf_stderr"] = result.stderr.strip()
+                logger.error(f"[ETH] Target iperf3 client execution failed: {context_data['iperf_stderr']}")
                 return ValidatorResult(passed=False, error_msg="iperf3 client command failed.", context=context_data)
 
             try:
@@ -122,14 +149,17 @@ class EthernetValidator:
                 context_data["retransmits"] = data["end"]["sum_sent"].get("retransmits", 0)
 
             except (json.JSONDecodeError, KeyError) as e:
-                logger.error(f"[ETH] Failed to parse iperf3 JSON: {e}")
+                logger.critical(f"[ETH] FATAL: Failed to parse iperf3 JSON matrix: {e}")
                 context_data["raw_output"] = result.stdout.strip()[-500:]
                 return ValidatorResult(passed=False, error_msg="Malformed iperf3 output.", context=context_data)
 
             # 4. Evaluate Hardware Physics
             passed = mbps >= cfg.iperf_min_mbps
             if not passed:
-                logger.warning(f"[ETH] THROUGHPUT FAILED! {mbps} Mbps < {cfg.iperf_min_mbps} Mbps limit.")
+                logger.critical("="*60)
+                logger.critical(f"[ETH] FATAL: THROUGHPUT FAILED! DMA/MAC is degraded.")
+                logger.critical(f"[ETH] Clocked: {mbps} Mbps | Required Limit: {cfg.iperf_min_mbps} Mbps")
+                logger.critical("="*60)
 
             return ValidatorResult(
                 passed=passed,
@@ -139,20 +169,22 @@ class EthernetValidator:
             )
 
         except TransportTimeoutError:
+            logger.critical("[ETH] FATAL: iperf3 execution caused a hard CPU lockup on the DUT. Check power rails.")
             return ValidatorResult(passed=False, error_msg="iperf3 execution caused a hard CPU lockup on the DUT.")
         except TransportConnectionError as e:
+            logger.critical(f"[ETH] FATAL: Transport dropped during iperf. (SSH Suicide Trap?): {e}")
             return ValidatorResult(
                 passed=False,
                 error_msg=f"Transport dropped during iperf. (Did you route a destructive net test over SSH instead of Serial?): {e}"
             )
         except Exception as e:
             # Fallback for unexpected Python/OS issues on the Host PC side
-            logger.critical(f"[ETH] Catastrophic host failure during throughput test: {e}")
+            logger.critical(f"[ETH] FATAL: Catastrophic Host PC failure during throughput test: {e}")
             return ValidatorResult(passed=False, error_msg=f"Host Execution interrupted: {e}")
 
         finally:
             # 5. ZERO-LEAKAGE: Host Subprocess Teardown
             if server_proc and server_proc.poll() is None:
-                logger.debug("[ETH] Reaping Host PC iperf3 server...")
+                logger.debug("[ETH] ZERO-LEAKAGE: Reaping Host PC iperf3 server daemon...")
                 server_proc.kill()
                 server_proc.communicate()

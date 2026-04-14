@@ -1,12 +1,13 @@
 # src/pytest_mes_core/host_adapters/usb_sd_mux.py
+import os
 import logging
 import subprocess
 import time
 from typing import Any
 
 from pytest_mes_core.config import UsbSdMuxConfig
-from pytest_mes_core.host_adapters.base import BaseHostAdapter, HostAdapterError
-from pytest_mes_core.host_adapters.mutex import hardware_mutex, HostMutexTimeoutError
+from pytest_mes_core.host_adapters import BaseHostAdapter, HostAdapterError
+from pytest_mes_core.host_adapters import hardware_mutex, HostMutexTimeoutError
 
 logger = logging.getLogger("mes_core.host_adapters.usb_sd_mux")
 
@@ -20,20 +21,41 @@ class HostUsbSdMuxAdapter(BaseHostAdapter):
         self.mutex_timeout_s = mutex_timeout_s
         self._mutex_context = None
 
+        # ==========================================
+        # HARDWARE INTELLIGENCE: Auto-pad to 12 digits
+        # ==========================================
+        if self.cfg.serial_id.startswith("/dev/"):
+            self.device_path = self.cfg.serial_id
+        else:
+            normalized_serial = self.cfg.serial_id.zfill(12)
+            self.device_path = f"/dev/usb-sd-mux/id-{normalized_serial}"
+
     def _set_mux_state(self, state: str) -> None:
         """Helper to invoke the usbsdmux CLI."""
-        if state not in ["host", "dut"]:
-            raise ValueError("Mux state must be 'host' or 'dut'")
+        if state not in ["host", "dut", "off"]:
+            raise ValueError("Mux state must be 'host', 'dut', or 'off'")
 
-        cmd = ["usbsdmux", self.cfg.serial_id, state]
+        if not os.path.exists(self.device_path):
+            err_msg = f"USB-SD-Mux not found at '{self.device_path}'. Is it plugged in and udev rules installed?"
+            logger.critical(f"[SD-Mux] FATAL: {err_msg}")
+            raise HostAdapterError(err_msg)
+
+        cmd = ["usbsdmux", self.device_path, state]
+        logger.debug(f"[SD-Mux] Executing: {' '.join(cmd)}")
+
         try:
             res = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
             if res.returncode != 0:
+                logger.error(f"[SD-Mux] usbsdmux CLI rejected the command. Stderr: {res.stderr.strip()}")
                 raise HostAdapterError(f"usbsdmux failed to switch to {state}: {res.stderr.strip()}")
         except FileNotFoundError:
-            raise HostAdapterError("The 'usbsdmux' tool is not installed on the Host PC.")
+            err_msg = "The 'usbsdmux' tool is not installed on the Host PC."
+            logger.critical(f"[SD-Mux] FATAL: {err_msg}")
+            raise HostAdapterError(err_msg)
         except subprocess.TimeoutExpired:
-            raise HostAdapterError(f"usbsdmux timed out switching {self.cfg.serial_id} to {state}.")
+            err_msg = f"usbsdmux timed out switching {self.device_path} to {state}."
+            logger.critical(f"[SD-Mux] FATAL: {err_msg}")
+            raise HostAdapterError(err_msg)
 
     def __enter__(self) -> 'HostUsbSdMuxAdapter':
         logger.debug(f"[SD-Mux] Acquiring hardware lock for mux {self.cfg.serial_id}...")
@@ -47,27 +69,31 @@ class HostUsbSdMuxAdapter(BaseHostAdapter):
             self._mutex_context.__enter__()
 
             # 2. Toggle physical hardware to HOST
-            logger.info(f"[SD-Mux] Toggling {self.cfg.serial_id} to HOST PC...")
+            logger.info(f"[SD-Mux] Hardware locked. Toggling {self.device_path} to HOST PC...")
             self._set_mux_state("host")
 
             # 3. Defeat Linux Kernel USB Enumeration Jitter
-            # Give the Host PC 2 seconds to enumerate the block device (e.g., /dev/sda)
+            logger.debug("[SD-Mux] Delaying 2.0s for Linux Kernel block device enumeration (/dev/sda)...")
             time.sleep(2.0)
 
             return self
 
         except HostMutexTimeoutError as e:
-            raise HostAdapterError(f"Failed to acquire SD-Mux {self.cfg.serial_id}: {e}")
+            err_msg = f"Failed to acquire SD-Mux {self.cfg.serial_id}: {e}"
+            logger.critical(f"[SD-Mux] FATAL: {err_msg}")
+            raise HostAdapterError(err_msg)
 
     def __exit__(self, _exc_type: Any, _exc_val: Any, _exc_tb: Any) -> None:
         """ZERO-LEAKAGE: Flip the SD card back to the DUT and release the lock."""
         try:
-            logger.info(f"[SD-Mux] ZERO-LEAKAGE: Toggling {self.cfg.serial_id} back to DUT...")
+            logger.info(f"[SD-Mux] ZERO-LEAKAGE: Toggling {self.device_path} back to DUT...")
             self._set_mux_state("dut")
             time.sleep(1.0) # Allow DUT to detect insertion
         except Exception as e:
-            logger.error(f"[SD-Mux] Teardown failure on {self.cfg.serial_id}: {e}")
+            # Downgraded to WARNING so we don't accidentally mask a primary test exception
+            logger.warning(f"[SD-Mux] Teardown hardware failure on {self.cfg.serial_id}: {e}")
         finally:
             if self._mutex_context:
+                logger.debug(f"[SD-Mux] ZERO-LEAKAGE: Releasing OS lock on {self.cfg.serial_id}.")
                 self._mutex_context.__exit__(_exc_type, _exc_val, _exc_tb)
                 self._mutex_context = None

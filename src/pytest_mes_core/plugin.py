@@ -9,8 +9,9 @@ from typing import Generator, Any, Optional
 from pytest_mes_core.config import StationEnvironment, load_toml_config
 from pytest_mes_core.host_adapters.safety import EStopWatchdog
 from pytest_mes_core.transports import EphemeralSSHClient, EphemeralSerialClient, FailoverTransport
-from pytest_mes_core.telemetry.base import StationContext, TestRecord, TelemetryExporter
-from pytest_mes_core.telemetry.jsonl_exporter import JsonlTelemetryExporter
+from pytest_mes_core.telemetry.base import StationContext, TestRecord
+from pytest_mes_core.telemetry.jsonl_exporter import JsonlTelemetryExporter, TelemetryExporter
+from pytest_mes_core.transports.base import TransportConnectionError, TransportTimeoutError
 
 logger = logging.getLogger("mes_core.plugin")
 
@@ -37,10 +38,25 @@ def telemetry_sink() -> Optional[TelemetryExporter]:
     return _global_telemetry_sink
 
 def pytest_configure(config: pytest.Config) -> None:
-    if config.getoption("--generate-mes-config"):
-        from pytest_mes_core.templates import generate_sample_config
-        generate_sample_config()
-        pytest.exit("Sample config generated. Exiting.", returncode=0)
+    """Dynamically maps Pytest's -v and -vv flags to live log streaming levels."""
+
+    config.option.log_cli = True
+
+    # Define the output format (Beautiful, aligned, and timestamped)
+    config.option.log_cli_format = "%(asctime)s [%(levelname)7s] %(name)s: %(message)s"
+    config.option.log_cli_date_format = "%H:%M:%S"
+
+    verbosity = config.getoption("verbose")
+
+    if verbosity == 0:
+        # 'pytest': Total Silence. Only operator actions and hardware failures.
+        config.option.log_cli_level = "WARNING"
+    elif verbosity == 1:
+        # 'pytest -v': High-Level Progress (Milestones, Tool executions)
+        config.option.log_cli_level = "INFO"
+    else:
+        # 'pytest -vv': The Matrix (Raw UART bytes, SSH traces, Hex dumps)
+        config.option.log_cli_level = "DEBUG"
 
     toml_path = Path(config.getoption("--env-config"))
     if toml_path.exists():
@@ -73,8 +89,10 @@ def pytest_configure(config: pytest.Config) -> None:
                 metadata["Operator ID"] = ctx.operator_id
                 metadata["Test Timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+            logger.info(f"[Framework] Bootstrapping MES Session for Jig: {bom.station_meta.jig_id}")
+
         except Exception as e:
-            logger.error(f"Failed to load BOM during pytest_configure: {e}")
+            logger.critical(f"[Framework] FATAL: Failed to load Hardware BOM during pytest_configure: {e}")
 
 def pytest_unconfigure(config: pytest.Config) -> None:
     global _global_watchdog, _global_telemetry_sink
@@ -107,7 +125,6 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]) ->
             html = "<br>".join([f"<b>{k}:</b> {v}" for k, v in record.result.metrics.items()])
             rep.custom_metrics_html = html
 
-from pytest_mes_core.transports.base import TransportConnectionError, TransportTimeoutError
 
 @pytest.fixture(scope="session")
 def dut_transport(mes_env: StationEnvironment):
@@ -122,11 +139,12 @@ def dut_transport(mes_env: StationEnvironment):
         transport = fallback_serial
     else:
         pytest.skip("No enabled transport targets found.")
+        return
 
     # THE FIX: Graceful Session Bootstrapping
     try:
         transport.connect()
-        logger.info("[Fixture] DUT Transport connected successfully during setup.")
+        logger.info("[Fixture] DUT Transport Matrix connected successfully.")
     except (TransportConnectionError, TransportTimeoutError) as e:
         logger.warning(f"[Fixture] DUT Transport offline during setup (Expected if Cold Booting). Reason: {e}")
     except Exception as e:
@@ -182,16 +200,19 @@ def mes_record(
                         commands_to_run.extend(cmds)
 
                 if commands_to_run:
-                    logger.warning(f"[Post-Mortem] Test {test_name} failed. Extracting final states over Transport...")
+                    logger.critical("="*60)
+                    logger.critical(f"[Post-Mortem] FATAL: Test '{test_name}' Failed!")
+                    logger.critical("[Post-Mortem] Engaging automated hardware forensic dumper...")
+                    logger.critical("="*60)
 
                     # Pstore safety net: wait for OS to recover if it kernel panicked
                     if not dut_transport.is_connected:
-                        logger.info("[Post-Mortem] Transport dead. Attempting to reconnect...")
+                        logger.warning("[Post-Mortem] Transport dead. Attempting recovery to scrape crash logs...")
                         try:
                             # connect() natively handles timeouts and retries
                             dut_transport.connect()
                         except Exception:
-                            logger.error("[Post-Mortem] OS failed to recover. Aborting dumps.")
+                            logger.error("[Post-Mortem] OS failed to recover. Aborting forensic dumps.")
 
                     dump_context = {}
                     if dut_transport.is_connected:
@@ -200,11 +221,14 @@ def mes_record(
                             dump_context[cmd] = res.stdout if res.exited == 0 else f"NO DATA: {res.stderr}"
 
                     record.context["post_mortem"] = dump_context
-                    logger.info("[Post-Mortem] Forensic data attached to telemetry payload.")
+                    logger.info("[Post-Mortem] Forensic data successfully attached to telemetry payload.")
 
         # 3. Flush to Grafana/JSONL
         if _global_telemetry_sink:
             try:
                 _global_telemetry_sink.emit_record(record)
             except Exception as e:
-                logger.critical(f"FATAL: Failed to route telemetry for {record.test_name}: {e}")
+                logger.critical("="*60)
+                logger.critical(f"[Telemetry] FATAL: FAILED TO ROUTE TELEMETRY FOR {record.test_name}!")
+                logger.critical(f"[Telemetry] Exception: {e}")
+                logger.critical("="*60)

@@ -1,10 +1,7 @@
 # src/pytest_mes_core/telemetry/jsonl_exporter.py
 import os
-import json
 import time
 import logging
-import dataclasses
-from enum import Enum
 from pathlib import Path
 
 try:
@@ -44,24 +41,42 @@ class JsonlTelemetryExporter:
         filename = f"{context.jig_id}_{context.run_id}.jsonl"
         self.active_file = self.log_dir / filename
 
-        logger.info(f"[Telemetry] Session armed. Streaming to {self.active_file}")
+        logger.info(f"[Telemetry] Session armed. Streaming localized JSONL to {self.active_file}")
 
     def emit_record(self, record: TestRecord) -> None:
         """Serializes and flushes a single payload to the active file."""
-        # 1 Defensive Serialization
+        # 1. Defensive Serialization
         if not self.active_file:
-            raise TelemetryDeliveryError("Attempted to emit record before starting session.")
+            err_msg = "Attempted to emit record before starting telemetry session."
+            logger.critical(f"[Telemetry] FATAL: {err_msg}")
+            raise TelemetryDeliveryError(err_msg)
+
         try:
             # Pydantic natively handles Enums, bytes, and JSON encoding flawlessly
             payload_str = record.model_dump_json(exclude_none=True) + "\n"
         except Exception as e:
-            logger.error(f"[Telemetry] Fatal JSON Serialization failure: {e}")
+            logger.critical("="*60)
+            logger.critical(f"[Telemetry] FATAL: Pydantic Serialization Failure!")
+            logger.critical(f"[Telemetry] Failed to encode record for test: {record.test_name}")
+            logger.critical(f"[Telemetry] Exception: {e}")
+            logger.critical("="*60)
             raise TelemetrySerializationError(f"Failed to serialize record for {record.test_name}")
+
+        # Matrix Tracing: Show the payload moving to disk (visible in -vv)
+        logger.debug(f"[Telemetry] TX -> Flushing record '{record.test_name}' to SSD...")
+
         # 2. Atomic Physical Write
         try:
             self._atomic_append(self.active_file, payload_str)
         except OSError as e:
-            logger.critical(f"[Telemetry] FATAL: Disk write failed on {self.active_file}: {e}")
+            # 🚨 FORENSIC HOST PC INTERCEPTOR 🚨
+            logger.critical("="*60)
+            logger.critical(f"[Telemetry] FATAL: HOST PC DISK WRITE FAILED!")
+            logger.critical(f"[Telemetry] Target: {self.active_file}")
+            logger.critical(f"[Telemetry] Is the factory PC hard drive full? Is the SSD dead/read-only?")
+            logger.critical(f"[Telemetry] OS Error: {e}")
+            logger.critical("="*60)
+
             self._execute_emergency_dump(payload_str)
 
             # We raise the Domain Exception so the master framework knows the telemetry backend is crippled
@@ -98,7 +113,7 @@ class JsonlTelemetryExporter:
     def _execute_emergency_dump(self, payload: str) -> None:
         """Attempts to save data to the volatile RAM disk if the main drive drops."""
         fallback_file = Path(f"/tmp/mes_emergency_dump_{int(time.time())}.jsonl")
-        logger.critical(f"[Telemetry] Executing emergency dump to {fallback_file}")
+        logger.critical(f"[Telemetry] Executing RAM-disk emergency dump to {fallback_file}...")
 
         try:
             # We don't bother locking /tmp, we just need the data to survive
@@ -106,8 +121,13 @@ class JsonlTelemetryExporter:
                 fb.write(payload)
                 fb.flush()
                 os.fsync(fb.fileno())
+            logger.critical(f"[Telemetry] Emergency dump successful. Data survived in RAM.")
         except OSError as e:
             # If /tmp is full (e.g., Out of RAM), we are completely dead.
             # Log it so at least journalctl catches the telemetry string.
-            logger.critical(f"[Telemetry] TOTAL CATASTROPHE. Emergency dump failed: {e}")
-            logger.critical(f"[Telemetry] RAW PAYLOAD: {payload}")
+            logger.critical("="*60)
+            logger.critical(f"[Telemetry] FATAL: TOTAL HOST PC CATASTROPHE!")
+            logger.critical(f"[Telemetry] Emergency RAM-disk dump failed: {e}")
+            logger.critical(f"[Telemetry] RAW PAYLOAD SALVAGE:")
+            logger.critical(payload.strip())
+            logger.critical("="*60)

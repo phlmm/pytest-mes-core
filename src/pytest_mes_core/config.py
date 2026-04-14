@@ -382,7 +382,7 @@ class StationEnvironment(BaseHardwareConfig):
     )
     usb_storage: Dict[str, UsbStorageConfig] = Field(
         default_factory=dict,
-        description="Complete descritpion of a usb flash drive incliding VID, PID and speed"
+        description="Complete description of a USB flash drive including VID, PID, and speed."
     )
 
     # --- Advanced Provisioning & Context ---

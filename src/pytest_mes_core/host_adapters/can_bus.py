@@ -5,7 +5,7 @@ import logging
 from typing import Optional, Any
 
 from pytest_mes_core.config import HostCanConfig
-from pytest_mes_core.host_adapters.base import BaseHostAdapter, HostAdapterError
+from pytest_mes_core.host_adapters import BaseHostAdapter, HostAdapterError
 
 logger = logging.getLogger("mes_core.host_adapters.can")
 
@@ -37,10 +37,12 @@ class HostCanAdapter(BaseHostAdapter):
         # ==========================================
         sysfs_path = f"/sys/class/net/{self.cfg.interface}"
         if not os.path.exists(sysfs_path):
-            raise HostCanError(
+            err_msg = (
                 f"Host interface '{self.cfg.interface}' does not exist in the OS. "
-                f"Is the USB2CAN adapter physically unplugged?"
+                "Is the USB2CAN adapter physically unplugged?"
             )
+            logger.critical(f"[Host CAN] FATAL: {err_msg}")
+            raise HostCanError(err_msg)
 
         try:
             with open(f"{sysfs_path}/operstate", "r") as f:
@@ -64,20 +66,25 @@ class HostCanAdapter(BaseHostAdapter):
             raise HostCanError(f"SocketCAN bind failure on {self.cfg.interface}: {e}")
 
         # ==========================================
-        # 3. KERNEL BUFFER SANITIZATION
+        # 3. KERNEL BUFFER SANITIZATION (The Matrix)
         # ==========================================
         # Purge any stale frames sitting in the Linux RX buffer from previous tests
-        flushed_count = 0
+        flushed_frames = []
         while True:
             # Non-blocking read to clear the buffer instantly
             msg = self.bus.recv(timeout=0.0)
             if msg is None:
                 break
-            flushed_count += 1
 
-        if flushed_count > 0:
-            logger.debug(f"[Host CAN] Sanitized {flushed_count} stale ghost frames from kernel buffer.")
+            # Record the arbitration ID of the ghost frame for the R&D Matrix (-vv)
+            frame_id = hex(msg.arbitration_id).upper()
+            flushed_frames.append(frame_id)
 
+        if flushed_frames:
+            logger.debug(f"[Host CAN] Sanitized {len(flushed_frames)} stale ghost frames from kernel buffer: {flushed_frames}")
+
+        # Ready for action! Visible on standard `pytest -v`
+        logger.info(f"[Host CAN] Hardware adapter ready on {self.cfg.interface} ({self.cfg.bitrate} bps).")
         return self
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:

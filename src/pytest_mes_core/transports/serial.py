@@ -44,6 +44,7 @@ class LiveBootProfiler:
 
     def arm(self) -> None:
         """Resets timers and regex targets before a board boot."""
+        logger.debug("[Profiler] Armed and waiting for boot milestones...")
         self.targets = {k: re.compile(v) for k, v in self._normalized_names.items()}
         self.metrics = {k: -1.0 for k in self.targets.keys()}
         self._buffer = ""  # <--- Clear the rolling buffer
@@ -57,10 +58,9 @@ class LiveBootProfiler:
         self._buffer += chunk
 
         # ==========================================
-        # NEW: THE ANSI ESCAPE CODE SHIELD
+        # THE ANSI ESCAPE CODE SHIELD
         # ==========================================
         # Strips terminal colors and cursor reports so regexes match clean text
-        import re
         ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
         clean_buffer = ansi_escape.sub('', self._buffer)
 
@@ -72,10 +72,9 @@ class LiveBootProfiler:
             if regex.search(clean_buffer):
                 self.metrics[name] = current_time
                 hit_keys.append(name)
-                # Inject the green alert instantly
-                import sys
-                sys.stdout.write(f"\r\n\033[92m[PROFILER] {name} hit at {current_time}s\033[0m\r\n")
-                sys.stdout.flush()
+                # Replaced sys.stdout hack with proper Enterprise logging
+                # so the milestones are captured in the Pytest XML/JSON artifacts.
+                logger.info(f"[Profiler] Milestone '{name}' reached at {current_time}s")
 
         for k in hit_keys:
             del self.targets[k]
@@ -153,10 +152,13 @@ class EphemeralSerialClient:
             logger.info(f"[Serial] Transport established and synchronized on {self.cfg.port}.")
 
         except serial.SerialException as e:
-            raise TransportConnectionError(f"Failed to open UART {self.cfg.port}: {e}")
+            err_msg = f"Failed to open UART {self.cfg.port}: {e}"
+            logger.critical(f"[Serial] FATAL: {err_msg}")
+            raise TransportConnectionError(err_msg)
 
     def disconnect(self) -> None:
         """Zero-Leakage Teardown."""
+        logger.debug(f"[Serial] ZERO-LEAKAGE: Tearing down UART transport on {self.cfg.port}.")
         self._stop_event.set()
         if self._rx_thread and self._rx_thread.is_alive():
             self._rx_thread.join(timeout=2.0)
@@ -170,42 +172,46 @@ class EphemeralSerialClient:
     def _rx_daemon(self) -> None:
         """
         Continuously reads the hardware buffer.
-        1. Prints to sys.stdout (Live Terminal).
-        2. Routes to the Boot Profiler.
-        3. Routes to the safe_run() event waiter.
+        Routes completely formed lines into the Pytest DEBUG logger (-vv).
         """
         line_buffer = ""
 
         while not self._stop_event.is_set() and self.conn and self.conn.is_open:
             try:
-                # Read all available bytes in the FTDI hardware buffer instantly
                 raw_data = self.conn.read(max(1, self.conn.in_waiting))
                 if not raw_data:
                     continue
 
-                # 1. LIVE CONSOLE ECHO (Requires pytest -s flag to be visible)
                 decoded = raw_data.decode('utf-8', errors='replace')
-                sys.stdout.write(decoded)
-                sys.stdout.flush()
+                line_buffer += decoded
 
-                # 2. SYNCHRONOUS ROUTING
+                # ==========================================
+                # THE MATRIX ROUTER (-vv)
+                # ==========================================
+                while '\n' in line_buffer:
+                    line, line_buffer = line_buffer.split('\n', 1)
+                    clean_line = line.strip('\r')
+
+                    # This pipes the UART stream directly into Pytest's logging engine.
+                    # It will only appear on the screen if the operator ran `pytest -vv`
+                    if clean_line:
+                        logger.debug(f"[UART] RX <- {clean_line}")
+
+                    # Route to Profiler
+                    if self._profiler:
+                        self._profiler.process_chunk(clean_line + '\n')
+
+                # Synchronous routing for safe_run()
                 with self._cmd_lock:
                     if self._waiting_for_prompt:
                         self._cmd_output += decoded
                         if self._cmd_output.endswith(self.prompt):
                             self._prompt_event.set()
 
-                # 3. PROFILER ROUTING
-                if self._profiler:
-                    # Feed the raw chunk directly, no more splitting by \n
-                    self._profiler.process_chunk(decoded)
-
-            except serial.SerialException:
-                logger.critical("[Serial] Hardware disconnected in background thread!")
+            except serial.SerialException as e:
+                logger.critical(f"[Serial] FATAL: Hardware disconnected in background thread! {e}")
                 self._stop_event.set()
                 break
-            except Exception as e:
-                logger.error(f"[Serial] RX Daemon Error: {e}")
 
     def _sync_prompt(self, timeout_s: float = 3.0) -> None:
         """Sends a newline and blocks until the RX Daemon sees the prompt."""
@@ -214,13 +220,17 @@ class EphemeralSerialClient:
             self._waiting_for_prompt = True
             self._prompt_event.clear()
 
+        logger.debug("[Serial] TX -> [Enter] (Syncing Shell...)")
         self.conn.write(b"\r\n")
         self.conn.flush()
 
         if not self._prompt_event.wait(timeout_s):
             with self._cmd_lock:
                 self._waiting_for_prompt = False
-            raise TransportConnectionError("Failed to sync to shell prompt on connect. Board dead?")
+
+            err_msg = "Failed to sync to shell prompt on connect. Board dead or kernel panic?"
+            logger.critical(f"[Serial] FATAL: {err_msg}")
+            raise TransportConnectionError(err_msg)
 
         with self._cmd_lock:
             self._waiting_for_prompt = False
@@ -241,6 +251,7 @@ class EphemeralSerialClient:
 
         try:
             # 1. Transmit
+            logger.debug(f"[UART] TX -> {cmd}")
             self.conn.write(f"{cmd}\n".encode('utf-8'))
             self.conn.flush()
 
@@ -248,7 +259,10 @@ class EphemeralSerialClient:
             if not self._prompt_event.wait(timeout_s):
                 with self._cmd_lock:
                     self._waiting_for_prompt = False
-                raise TransportTimeoutError(f"Command '{cmd}' timed out after {timeout_s}s.")
+
+                err_msg = f"Command '{cmd}' timed out after {timeout_s}s."
+                logger.critical(f"[UART] FATAL: {err_msg}")
+                raise TransportTimeoutError(err_msg)
 
             with self._cmd_lock:
                 raw_stdout = self._cmd_output
@@ -264,6 +278,7 @@ class EphemeralSerialClient:
                     self._waiting_for_prompt = True
                     self._prompt_event.clear()
 
+                logger.debug(f"[UART] TX -> echo $?")
                 self.conn.write(b"echo $?\n")
                 self.conn.flush()
 
@@ -279,10 +294,14 @@ class EphemeralSerialClient:
 
         except serial.SerialException as e:
             self.disconnect()
-            raise TransportConnectionError(f"Serial pipe shattered during execution: {e}")
+            err_msg = f"UART pipe shattered during execution: {e}"
+            logger.critical(f"[UART] FATAL: {err_msg}")
+            raise TransportConnectionError(err_msg)
 
         duration = round(time.perf_counter() - t0, 3)
         is_ok = (exit_code == 0)
+
+        logger.debug(f"[UART] Command executed in {duration}s (Exit Code: {exit_code}).")
 
         return CommandResult(
             command=cmd,

@@ -1,3 +1,4 @@
+# src/pytest_mes_core/protocols/executable.py
 import logging
 from pathlib import Path
 from typing import Dict, Any, Optional
@@ -39,8 +40,11 @@ class CustomPayloadValidator:
 
         # 1. Pre-Flight File Check
         try:
+            logger.debug(f"[Payload] Pre-flight check: Verifying {binary_name} is executable...")
             if not dut.safe_run(f"test -x {cfg.binary_path}", timeout_s=5.0).ok:
-                return ValidatorResult(passed=False, error_msg="Executable not found or missing execute (+x) permissions.")
+                err_msg = "Executable not found or missing execute (+x) permissions."
+                logger.error(f"[Payload] {err_msg}")
+                return ValidatorResult(passed=False, error_msg=err_msg)
         except TransportConnectionError as e:
             return ValidatorResult(passed=False, error_msg=f"Transport pipe shattered during pre-flight check: {e}")
 
@@ -50,10 +54,12 @@ class CustomPayloadValidator:
         try:
             # 2. Arm the Background Data Vacuum (Transport Agnostic!)
             if cfg.log_file_path:
+                logger.debug(f"[Payload] Arming background vacuum for {cfg.log_file_path}...")
                 tailer = HostSideBuffer(dut, cfg.log_file_path, poll_interval_s=1.0)
                 tailer.start()
 
             # 3. Execute the payload
+            logger.debug(f"[Payload] Spawning binary and blocking for up to {cfg.timeout_s}s...")
             res = dut.safe_run(full_cmd, timeout_s=cfg.timeout_s)
 
             # 4. Contextualize standard streams
@@ -63,6 +69,7 @@ class CustomPayloadValidator:
 
             # 5. Fetch Custom Vacuumed Log
             if tailer:
+                logger.debug("[Payload] Disarming vacuum and retrieving payload logs...")
                 surviving_lines = tailer.stop()
                 if surviving_lines:
                     context_data["custom_log_tail"] = "\n".join(surviving_lines)[-1000:]
@@ -77,17 +84,24 @@ class CustomPayloadValidator:
             # ==========================================
             if res.exited in FATAL_SIGNALS:
                 sig_name = FATAL_SIGNALS[res.exited]
-                logger.error(f"[Payload] CRITICAL HARDWARE/OS FAULT: {binary_name} crashed with {sig_name}!")
+
+                logger.critical("="*60)
+                logger.critical(f"[Payload] FATAL: CRITICAL HARDWARE/OS FAULT DETECTED!")
+                logger.critical(f"[Payload] {binary_name} crashed violently with: {sig_name}")
 
                 # Perform an immediate sweep of the kernel ring buffer for the trap registers
+                logger.critical("[Payload] Scraping dmesg for kernel trap registers...")
                 dmesg_cmd = f"dmesg | grep -E '{binary_name}|traps:|Out of memory' | tail -n 20"
                 dmesg_res = dut.safe_run(dmesg_cmd, timeout_s=5.0)
 
                 if dmesg_res.ok and dmesg_res.stdout:
                     context_data["kernel_trap_trace"] = dmesg_res.stdout.strip()
-                    logger.debug(f"[Payload] Kernel Trap captured: \n{context_data['kernel_trap_trace']}")
+                    logger.critical(f"[Payload] Kernel Trap Trace:\n{context_data['kernel_trap_trace']}")
                 else:
                     context_data["kernel_trap_trace"] = "No dmesg trace found. Kernel may have frozen."
+                    logger.critical("[Payload] No kernel trace found. Massive system fault possible.")
+
+                logger.critical("="*60)
 
                 return ValidatorResult(
                     passed=False,
@@ -97,12 +111,14 @@ class CustomPayloadValidator:
 
             # 7. Evaluate logical success criteria
             if res.exited != cfg.expected_exit_code:
+                logger.error(f"[Payload] Logical Failure: Exited {res.exited} (Expected: {cfg.expected_exit_code})")
                 return ValidatorResult(
                     passed=False,
                     error_msg=f"Binary exited with code {res.exited} (Expected: {cfg.expected_exit_code})",
                     context=context_data
                 )
 
+            logger.info(f"[Payload] Binary executed successfully in {round(res.duration_s, 3)}s.")
             return ValidatorResult(
                 passed=True,
                 metrics={f"t_{binary_name}_exec_s": res.duration_s},
@@ -112,33 +128,41 @@ class CustomPayloadValidator:
         except TransportTimeoutError:
             # 8. Timeout Intercept (Silicon / Application Lockup)
             error_msg = f"Binary {binary_name} locked up and failed to return within {cfg.timeout_s}s."
-            logger.critical(f"[Payload] TIMEOUT: {error_msg}")
+            logger.critical("="*60)
+            logger.critical(f"[Payload] FATAL: {error_msg}")
 
             # The vacuum might still have snagged the last thing the binary logged before it froze
             if tailer:
                 surviving_lines = tailer.stop()
                 if surviving_lines:
                     context_data["custom_log_tail_SURVIVED"] = "\n".join(surviving_lines)[-1000:]
+                    logger.critical(f"[Payload] Vacuum rescued {len(surviving_lines)} lines of telemetry right before the freeze!")
 
+            logger.critical("="*60)
             return ValidatorResult(passed=False, error_msg=error_msg, context=context_data)
 
         except TransportConnectionError as e:
             # 9. Transport Drop Intercept (Kernel Panic / Power Loss)
             error_msg = f"Transport pipe shattered while executing {binary_name}: {e}"
-            logger.critical(f"[Payload] CATASTROPHE: {error_msg}")
+            logger.critical("="*60)
+            logger.critical(f"[Payload] FATAL: CATASTROPHE DETECTED!")
+            logger.critical(f"[Payload] {error_msg}")
 
             # The vacuum thread caught the data right before the socket died!
             if tailer:
                 surviving_lines = tailer.stop()
                 if surviving_lines:
                     context_data["custom_log_tail_SURVIVED"] = "\n".join(surviving_lines)[-1000:]
+                    logger.critical(f"[Payload] Vacuum successfully smuggled {len(surviving_lines)} lines of telemetry out of the dying DUT!")
 
+            logger.critical("="*60)
             return ValidatorResult(passed=False, error_msg=error_msg, context=context_data)
 
         finally:
             # 10. ZERO-LEAKAGE TEARDOWN
             if dut.is_connected:
                 try:
+                    logger.debug(f"[Payload] ZERO-LEAKAGE: Reaping '{binary_name}' and clearing logs...")
                     dut.safe_run(f"killall -9 {binary_name} >/dev/null 2>&1 || true", timeout_s=5.0)
                     if cfg.log_file_path:
                         dut.safe_run(f"rm -f {cfg.log_file_path} >/dev/null 2>&1 || true", timeout_s=5.0)

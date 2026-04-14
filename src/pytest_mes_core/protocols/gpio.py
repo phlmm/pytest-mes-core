@@ -1,3 +1,5 @@
+# src/pytest_mes_core/protocols/gpio.py
+import time
 import logging
 from typing import Dict, Any
 
@@ -22,8 +24,9 @@ class GpioEdgeValidator:
 
         cmd = f"gpiomon --num-events=1 --{cfg.edge_type} gpiochip{cfg.gpiochip} {cfg.line}"
 
-        logger.info(f"[{trap_name} {cfg.gpiochip}:{cfg.line}] Arming {cfg.edge_type} trap (Timeout: {cfg.timeout_s}s)...")
-        logger.debug(f"[{trap_name}] Executing: {cmd}")
+        # Elevated to WARNING so the factory operator sees that the system is waiting for physical action
+        logger.warning(f"[{trap_name} {cfg.gpiochip}:{cfg.line}] Arming {cfg.edge_type} hardware trap (Timeout: {cfg.timeout_s}s)...")
+        logger.debug(f"[{trap_name}] Executing background listener: {cmd}")
 
         try:
             res = dut.safe_run(cmd, timeout_s=cfg.timeout_s)
@@ -36,17 +39,20 @@ class GpioEdgeValidator:
                     metrics={"t_edge_response_s": -1.0}
                 )
 
-            logger.info(f"[{trap_name} {cfg.gpiochip}:{cfg.line}] Edge trap sprung in {res.duration_s}s.")
+            logger.info(f"[{trap_name} {cfg.gpiochip}:{cfg.line}] Edge trap sprung successfully in {res.duration_s}s.")
             return ValidatorResult(passed=True, metrics={"t_edge_response_s": res.duration_s})
 
         except TransportTimeoutError:
-            logger.error(f"[{trap_name} {cfg.gpiochip}:{cfg.line}] TIMEOUT. No edge occurred.")
+            logger.error(f"[{trap_name} {cfg.gpiochip}:{cfg.line}] TIMEOUT. No edge occurred within {cfg.timeout_s}s.")
             return ValidatorResult(
                 passed=False,
                 error_msg=f"{trap_name} timeout ({cfg.timeout_s}s). No interrupt detected.",
                 metrics={"t_edge_response_s": -1.0}
             )
         except TransportConnectionError as e:
+            logger.critical("="*60)
+            logger.critical(f"[{trap_name}] FATAL: Transport pipe shattered while awaiting hardware edge!")
+            logger.critical("="*60)
             return ValidatorResult(passed=False, error_msg=f"Transport pipe shattered while awaiting edge: {e}")
 
     @staticmethod
@@ -70,7 +76,7 @@ class GpioLedActuator:
         Uses background mode to hold the line state after the command exits.
         """
         val = 1 if state else 0
-        logger.debug(f"[GPIO {cfg.gpiochip}:{cfg.line}] Driving line to {val}")
+        logger.debug(f"[GPIO {cfg.gpiochip}:{cfg.line}] Driving line to {val} (Background mode)...")
 
         # DEFENSIVE: >/dev/null 2>&1 prevents transport hanging on the open POSIX pipes
         cmd = f"gpioset --mode=wait gpiochip{cfg.gpiochip} {cfg.line}={val} >/dev/null 2>&1 &"
@@ -110,13 +116,14 @@ class GpioLoopbackValidator:
         )
 
         try:
+            logger.debug(f"[GPIO Loopback] Driving TX line to {tx_val}...")
             dut.safe_run(tx_cmd, timeout_s=3.0)
 
-            import time
-            logger.debug(f"[GPIO Loopback] Allowing {cfg.settling_time_s}s for hardware physics to settle...")
+            logger.debug(f"[GPIO Loopback] Allowing {cfg.settling_time_s}s for hardware physics/optocouplers to settle...")
             time.sleep(cfg.settling_time_s)
 
             rx_cmd = f"gpioget gpiochip{cfg.rx_gpiochip} {cfg.rx_line}"
+            logger.debug(f"[GPIO Loopback] Sampling RX line...")
             res_rx = dut.safe_run(rx_cmd, timeout_s=5.0)
 
             if not res_rx.ok:
@@ -131,9 +138,14 @@ class GpioLoopbackValidator:
 
             passed = (rx_val == tx_val)
             if not passed:
-                logger.warning(f"[GPIO Loopback] MISMATCH! TX driven to {tx_val}, but RX read {rx_val}.")
+                #  FORENSIC HARDWARE INTERCEPTOR
+                logger.critical("="*60)
+                logger.critical(f"[GPIO Loopback] FATAL: HARDWARE MISMATCH DETECTED!")
+                logger.critical(f"[GPIO Loopback] TX was driven to {tx_val}, but RX sampled {rx_val}.")
+                logger.critical("[GPIO Loopback] Possible PCB short, broken trace, or dead optocoupler.")
+                logger.critical("="*60)
             else:
-                logger.info("[GPIO Loopback] Signal propagation verified.")
+                logger.info("[GPIO Loopback] Physical signal propagation verified successfully.")
 
             return ValidatorResult(
                 passed=passed,
@@ -142,15 +154,17 @@ class GpioLoopbackValidator:
             )
 
         except TransportTimeoutError:
+            logger.critical("[GPIO Loopback] FATAL: DUT hung during GPIO loopback verification. Kernel locked?")
             return ValidatorResult(passed=False, error_msg="DUT hung during GPIO loopback verification.", context=context_data)
         except TransportConnectionError as e:
+            logger.critical(f"[GPIO Loopback] FATAL: Transport dropped during GPIO loopback: {e}")
             return ValidatorResult(passed=False, error_msg=f"Transport dropped during GPIO loopback: {e}", context=context_data)
 
         finally:
             # ZERO-LEAKAGE: Surgically kill only this specific TX hold
             if dut.is_connected:
                 try:
-                    logger.debug(f"[GPIO Loopback] ZERO-LEAKAGE: Releasing TX line hold.")
+                    logger.debug(f"[GPIO Loopback] ZERO-LEAKAGE: Releasing surgical TX line hold (PID from {pid_file}).")
                     dut.safe_run(f"kill -9 $(cat {pid_file} 2>/dev/null) >/dev/null 2>&1 || true", timeout_s=3.0)
                     dut.safe_run(f"rm -f {pid_file} >/dev/null 2>&1 || true", timeout_s=3.0)
                 except Exception as cleanup_err:

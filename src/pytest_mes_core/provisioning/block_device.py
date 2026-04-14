@@ -1,16 +1,18 @@
 # src/pytest_mes_core/provisioning/block_device.py
 import os
 import stat
-import time
 import logging
 import subprocess
 from pathlib import Path
 
-from pytest_mes_core.provisioning import (
+from pytest_mes_core.provisioning.base import (
     BaseProvisioner,
     ProvisioningError,
     ImageVerificationError
 )
+
+# IMPORT THE NEW ENTERPRISE PRIMITIVE
+from pytest_mes_core.utils.process import LiveProcess, ProcessTimeoutError, ProcessExecutionError
 
 logger = logging.getLogger("mes_core.provisioning.block_device")
 
@@ -25,19 +27,27 @@ class BmapBlockDeviceProvisioner(BaseProvisioner):
 
     def _pre_flight_safety_check(self) -> None:
         """Mathematically verifies the target is a valid, unmounted block device."""
+        logger.debug(f"[Provisioning] Executing pre-flight safety checks on {self.host_block_device}...")
+
         if not os.path.exists(self.host_block_device):
-            raise ProvisioningError(
+            err_msg = (
                 f"Block device {self.host_block_device} does not exist. "
                 "Is the SD Mux toggled to Host mode? Is the USB unplugged?"
             )
+            logger.critical(f"[Provisioning] FATAL: {err_msg}")
+            raise ProvisioningError(err_msg)
 
         # 1. Ensure it's actually a raw block device, not a standard file or directory
         mode = os.stat(self.host_block_device).st_mode
         if not stat.S_ISBLK(mode):
-            raise ProvisioningError(
-                f"FATAL SECURITY TRIP: '{self.host_block_device}' is not a block device! "
-                "Aborting flash to prevent Host OS destruction."
+            err_msg = (
+                f"SECURITY TRIP: '{self.host_block_device}' is NOT a block device! "
+                "Aborting flash to prevent catastrophic Host OS destruction."
             )
+            logger.critical("="*60)
+            logger.critical(f"[Provisioning] FATAL {err_msg}")
+            logger.critical("="*60)
+            raise ProvisioningError(err_msg)
 
         # 2. Ensure the Host Linux Kernel hasn't auto-mounted the target's partitions
         # Writing raw bytes to a mounted filesystem corrupts the kernel VFS.
@@ -47,15 +57,22 @@ class BmapBlockDeviceProvisioner(BaseProvisioner):
                 # Check for /dev/sdb AND partitions like /dev/sdb1, /dev/sdb2
                 if self.host_block_device in mounts:
                     logger.warning(f"[Provisioning] {self.host_block_device} is currently mounted. Attempting unmount...")
-                    # We use umount '**' to catch all partitions
-                    subprocess.run(f"umount {self.host_block_device}*", shell=True, stderr=subprocess.DEVNULL)
+
+                    umount_cmd = f"umount {self.host_block_device}*"
+                    logger.debug(f"[Provisioning] Executing: {umount_cmd}")
+                    # Fast, silent programmatic commands stay as subprocess.run
+                    subprocess.run(umount_cmd, shell=True, stderr=subprocess.DEVNULL)
 
                     # Re-verify
                     with open("/proc/mounts", "r") as f2:
                         if self.host_block_device in f2.read():
-                            raise ProvisioningError(f"Failed to unmount {self.host_block_device}. Device is busy.")
+                            err_msg = f"Failed to unmount {self.host_block_device}. Device is busy (Check 'lsof')."
+                            logger.critical(f"[Provisioning] FATAL: {err_msg}")
+                            raise ProvisioningError(err_msg)
+                else:
+                    logger.debug(f"[Provisioning] OS confirms {self.host_block_device} is unmounted and free.")
         except FileNotFoundError:
-            pass # Non-Linux OS fallback
+            logger.debug("[Provisioning] /proc/mounts not found. Assuming non-Linux Host OS.")
 
     def provision(self, image_path: Path) -> None:
         """
@@ -64,42 +81,47 @@ class BmapBlockDeviceProvisioner(BaseProvisioner):
             Enforces a final POSIX 'sync' to flush RAM caches to silicon.
         """
         if not image_path.exists():
-            raise ProvisioningError(f"Firmware image missing at {image_path}")
+            err_msg = f"Firmware image missing at {image_path}"
+            logger.critical(f"[Provisioning] FATAL: {err_msg}")
+            raise ProvisioningError(err_msg)
 
         # 1. Execute Safety Firewall
         self._pre_flight_safety_check()
 
         logger.info(f"[Provisioning] Initiating bmaptool flash of {image_path.name} to {self.host_block_device}...")
 
-        # bmaptool automatically handles .bmap file resolution and handles sync internally,
-        # but we capture output to map errors cleanly to our domain exceptions.
         cmd = ["bmaptool", "copy", str(image_path), self.host_block_device]
-        t0 = time.perf_counter()
 
         try:
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=self.timeout_s)
-            stdout_lower = res.stdout.lower() + res.stderr.lower()
+            # ==========================================
+            # LIVE PROCESS EXECUTION & TELEMETRY
+            # ==========================================
+            process = LiveProcess(cmd, self.timeout_s, logger).execute()
 
-            if res.returncode != 0:
-                logger.error(f"[Provisioning] bmaptool failed:\n{res.stderr}")
+            stdout_lower = process.stdout.lower()
+
+            if process.returncode != 0:
+                # EXPORT ARTIFACT: Dump the exact failure trace to a file for CI/CD retrieval
+                log_path = process.export_log(Path("/tmp/mes_artifacts"))
+                logger.error(f"\n[Provisioning] bmaptool failed with code {process.returncode}! Full trace saved to {log_path}")
 
                 # Check for common BMAP errors
                 if "no such file" in stdout_lower and ".bmap" in stdout_lower:
                     raise ProvisioningError("bmaptool requires a .bmap file next to the image, but it is missing.")
                 elif "permission denied" in stdout_lower:
-                    raise ProvisioningError("Permission denied. Pytest must be run with sudo for block level access.")
+                    raise ProvisioningError("Permission denied. Pytest must be run with sudo/root for block level access.")
                 else:
-                    raise ProvisioningError(f"bmaptool execution failed with code {res.returncode}.")
+                    raise ProvisioningError(f"bmaptool execution failed with code {process.returncode}.")
 
             # 2. Defeat OS Caching (Critical for USB-SD-Mux before switching it back to DUT)
-            logger.debug("[Provisioning] Forcing kernel sync to flush buffers to physical SD silicon...")
+            logger.info("\n[Provisioning] Flash successful. Forcing kernel sync to flush RAM buffers to silicon...")
             subprocess.run(["sync"], check=True)
 
-            duration = round(time.perf_counter() - t0, 3)
-            logger.info(f"[Provisioning] Flash completed and synced in {duration}s.")
+            logger.info(f"[Provisioning] Image successfully provisioned and synced in {process.duration_s}s.")
 
-        except subprocess.TimeoutExpired:
-            logger.critical(f"[Provisioning] bmaptool flash TIMEOUT after {self.timeout_s}s.")
-            raise ProvisioningError(f"Block device flash timed out. Is the SD card physically defective?")
-        except FileNotFoundError:
-            raise ProvisioningError("bmaptool is not installed on the Host PC.")
+        except ProcessTimeoutError:
+            raise ProvisioningError("Block device flash timed out. Is the SD card physically defective?")
+        except ProcessExecutionError as e:
+            err_msg = f"Failed to execute OS command. Is bmaptool installed? Error: {e}"
+            logger.critical(f"[Provisioning] FATAL: {err_msg}")
+            raise ProvisioningError(err_msg)

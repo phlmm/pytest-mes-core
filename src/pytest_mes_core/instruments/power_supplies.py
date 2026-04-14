@@ -3,7 +3,7 @@ import time
 import pyvisa # type: ignore
 import logging
 from tenacity import retry, stop_after_attempt, wait_fixed
-from typing import Optional
+from typing import Optional, Any
 
 from pytest_mes_core.config import PsuVendorConfig, RigolPsuConfig, KeysightPsuConfig
 
@@ -35,24 +35,32 @@ class ScpiPowerSupply:
             self.instrument.timeout = 2000 # 2 second timeout for SCPI commands
 
             # Clear status and verify identity
-            self.instrument.write("*CLS")
+            self.write("*CLS")
             idn = self.instrument.query("*IDN?").strip()
             logger.info(f"[PSU] Connected successfully to: {idn}")
 
             # Ensure output is OFF upon connection for safety
             self.disable_output()
         except pyvisa.VisaIOError as e:
-            logger.error(f"[PSU] Connection failed. Is the instrument powered on? {e}")
+            logger.critical("="*60)
+            logger.critical(f"[PSU] FATAL: Failed to connect to Power Supply at {self.resource_str}!")
+            logger.critical(f"[PSU] Is the instrument powered on? Is the Ethernet cable connected?")
+            logger.critical(f"[PSU] VISA Error: {e}")
+            logger.critical("="*60)
             raise RuntimeError(f"FATAL: Power Supply at {self.resource_str} unreachable.")
 
     def write(self, cmd: str) -> None:
         if not self.instrument: return
+        logger.debug(f"[SCPI] TX -> {cmd}")
         self.instrument.write(cmd)
 
     def query_float(self, cmd: str) -> float:
         if not self.instrument: return 0.0
         try:
-            return float(self.instrument.query(cmd).strip())
+            logger.debug(f"[SCPI] TX -> {cmd}")
+            raw_response = self.instrument.query(cmd).strip()
+            logger.debug(f"[SCPI] RX <- {raw_response}")
+            return float(raw_response)
         except ValueError:
             logger.error(f"[PSU] Failed to cast SCPI response to float for cmd: {cmd}")
             return -1.0
@@ -73,7 +81,9 @@ class ScpiPowerSupply:
             self.write(f"SOUR:CURR {amps:.3f},(@{self._channel})")
 
     def enable_output(self) -> None:
-        logger.warning(f"[PSU] ENERGIZING OUTPUT ON CHANNEL {self._channel}!")
+        logger.warning("="*60)
+        logger.warning(f"[PSU]  DANGER: ENERGIZING OUTPUT ON CHANNEL {self._channel}! ")
+        logger.warning("="*60)
         if isinstance(self.cfg, RigolPsuConfig):
             self.write(f":OUTP CH{self._channel},ON")
         elif isinstance(self.cfg, KeysightPsuConfig):
@@ -96,6 +106,7 @@ class ScpiPowerSupply:
 
     def close(self) -> None:
         if self.instrument:
+            logger.debug("[PSU] ZERO-LEAKAGE: Closing SCPI VISA session.")
             self.disable_output()
             self.instrument.close()
 
@@ -119,6 +130,7 @@ class SafePowerController:
 
         # 2. Execute Voltage Ramp (Pre-charge capacitors)
         # Ramp in 1V increments every 50ms to prevent OCP trips
+        logger.debug("[PSU Control] Ramping voltage to pre-charge DUT decoupling capacitors...")
         steps = int(self.target_v)
         for v in range(1, steps + 1):
             self.psu.set_voltage(float(v))
@@ -134,11 +146,17 @@ class SafePowerController:
 
         if idle_current >= (self.current_limit_a * 0.95):
             self.psu.disable_output()
+            #  FORENSIC HARDWARE INTERCEPTOR
+            logger.critical("="*60)
+            logger.critical(f"[PSU Control] FATAL: HARDWARE SHORT CIRCUIT DETECTED!")
+            logger.critical(f"[PSU Control] Board pulled {idle_current}A at idle (Limit: {self.current_limit_a}A).")
+            logger.critical(f"[PSU Control] Power severed. Check PCB for solder bridges or reversed polarity components.")
+            logger.critical("="*60)
             raise RuntimeError(f"FATAL: Board acting as a short circuit! Drew {idle_current}A at idle.")
 
         return self.psu
 
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         """ZERO-LEAKAGE: Always kill the power, no exceptions."""
         logger.info("[PSU Control] Test context exiting. De-energizing board.")
         self.psu.disable_output()
