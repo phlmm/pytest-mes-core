@@ -35,3 +35,21 @@ The machine physically wired to the test jig running the Pytest runner.
   sudo cp /tmp/uuu.rules /etc/udev/rules.d/99-uuu.rules
   sudo udevadm control --reload-rules
   sudo udevadm trigger
+
+
+# Development
+```shell
+# 1. Purge the namespace hijackers
+pip uninstall -y serial can
+
+# 2. Let the build system do its job!
+# The "-e ." command tells pip: "Read pyproject.toml and install everything listed in the dependencies array!"
+# This will automatically and correctly install pyserial, python-can, fabric, tenacity, and pyvisa.
+pip install -e .
+
+# 3. Ensure the hermetic testing simulators are installed for the Unit Tests
+pip install pytest-mock pyvisa-sim
+
+# 4. Execute the proofs
+pytest tests/unit/
+```

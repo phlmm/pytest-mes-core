@@ -1,12 +1,7 @@
-# tests/integration/test_plugin_telemetry.py
 import json
 from pathlib import Path
 
 def test_telemetry_atomic_flush_on_fatal_crash(pytester):
-    """
-    META-TEST: Spawns a sub-pytest process. Proves that if a proprietary
-    test violently crashes, the mes_record fixture still flushes the JSONL.
-    """
     # 1. Create a pristine, isolated factory BOM
     toml_path = pytester.makefile(".toml", """
 [station_meta]
@@ -19,17 +14,28 @@ log_directory = "artifacts/telemetry"
 """)
 
     # 2. Write a dummy proprietary EVSE test that crashes instantly
+    # We inject a dummy dut_transport so the setup doesn't skip looking for hardware!
     pytester.makepyfile("""
+import pytest
+
+@pytest.fixture(scope="session")
+def dut_transport():
+    class DummyTransport:
+        @property
+        def is_connected(self):
+            return False
+        def connect(self): pass
+        def disconnect(self): pass
+        def safe_run(self, cmd, timeout_s=5.0): pass
+    return DummyTransport()
+
 def test_evse_high_voltage_crash(mes_record):
     mes_record.metrics["inrush_current_a"] = 120.5
     x = 1 / 0  # FATAL PYTHON CRASH (ZeroDivisionError)
 """)
 
-    # 3. Execute Pytest as an Operator would on the factory floor
-    # CRITICAL: We pass "-p pytest_mes_core.plugin" to explicitly load our plugin
-    # in the subprocess, since we disabled it globally in pyproject.toml!
-    result = pytester.runpytest(
-        "-p", "pytest_mes_core.plugin",
+    # 3. Execute Pytest in a completely isolated OS process
+    result = pytester.runpytest_subprocess(
         "--operator-id=OP-123",
         f"--env-config={toml_path}"
     )

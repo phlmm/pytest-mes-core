@@ -21,5 +21,5 @@ def test_psu_discriminated_union_routing():
 
     # 3. Test Typo Rejection (The Factory Firewall)
     bad_data = {"vendor": "fluke", "ip_address": "10.0.0.1"}
-    with pytest.raises(ValidationError, match="Input should be"):
+    with pytest.raises(ValidationError, match="does not match any of the expected tags"):
         adapter.validate_python(bad_data)

@@ -81,7 +81,7 @@ def pytest_unconfigure(config: pytest.Config) -> None:
     if _global_watchdog:
         _global_watchdog.__exit__(None, None, None)
     if _global_telemetry_sink:
-        _global_telemetry_sink.end_session(passed=not config.pluginmanager.get_plugin("session").testsfailed)
+        _global_telemetry_sink.end_session(session_passed=not bool(config.pluginmanager.get_plugin("session").testsfailed))
 
 def pytest_html_report_title(report: Any) -> None:
     report.title = "Manufacturing EOL Certificate"
