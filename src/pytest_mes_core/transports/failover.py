@@ -1,6 +1,6 @@
 # src/pytest_mes_core/transports/failover.py
 import logging
-from .base import DutTransport, CommandResult
+from .base import DutTransport, CommandResult, TransportConnectionError
 
 logger = logging.getLogger("mes_core.transports.failover")
 
@@ -34,16 +34,12 @@ class FailoverTransport:
 
         try:
             # 1. Attempt Primary
-            res = self.primary.safe_run(cmd, timeout_s, **kwargs)
+            return self.primary.safe_run(cmd, timeout_s, **kwargs)
 
-            # Catch silent socket closures (Fabric/Paramiko specific behavior)
-            if not res.ok and "closed" in str(res.stderr).lower():
-                raise ConnectionError("Primary socket closed unexpectedly.")
-
-            return res
-
-        except Exception as e:
-            # 2. THE SURVIVAL EVENT: Primary Shattered.
+        except TransportConnectionError as e:
+            # 2. THE SURVIVAL EVENT: Primary Shattered physically.
+            # Note: The "silent socket closure" is now elegantly handled inside
+            # primary.safe_run() which raises this exact error.
             logger.critical(f"[Failover] Primary transport severed: {e}")
             logger.critical("[Failover] ENGAGING OUT-OF-BAND SERIAL FALLBACK...")
 

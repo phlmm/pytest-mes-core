@@ -121,7 +121,8 @@ class EphemeralSSHClient:
             duration = round(time.perf_counter() - t0, 3)
 
             # 2. Catch the "Silent Closure" bug inherent to Paramiko
-            if not res.ok and "closed" in str(res.stderr).lower():
+            # Sometimes paramiko doesn't raise, it just dumps to stderr and exits with -1.
+            if not res.ok and ("closed" in str(res.stderr).lower() or res.exited == -1):
                 self.disconnect()
                 raise TransportConnectionError("SSH Socket silently closed during execution.")
 
@@ -136,10 +137,20 @@ class EphemeralSSHClient:
             )
 
         except CommandTimedOut as e:
-            # Application Hang: Command took longer than timeout_s. The pipe is fine.
-            raise TransportTimeoutError(f"SSH Command timed out after {timeout_s}s: {e}")
+            # Application Hang: Command took longer than timeout_s.
+            # The physical pipe is fine, the OS is just slow or the command blocked.
+            # We return a failed result so the test fails, but we DO NOT raise a connection error.
+            duration = round(time.perf_counter() - t0, 3)
+            return CommandResult(
+                command=cmd,
+                stdout=e.result.stdout if hasattr(e, 'result') and e.result else "",
+                stderr=f"Command timed out after {timeout_s}s",
+                exited=-1,
+                ok=False,
+                duration_s=duration
+            )
 
         except (SSHException, socket.error, EOFError, ThreadException) as e:
             # THE SURVIVAL EVENT: The physical pipe shattered.
             self.disconnect()
-            raise TransportConnectionError(f"SSH transport severed during execution: {e}")
+            raise TransportConnectionError(f"Physical link severed during execution: {e}") from e

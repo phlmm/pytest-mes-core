@@ -16,7 +16,7 @@ from .base import (
 
 # 2. The Physical Implementations
 from .ssh import EphemeralSSHClient
-from .serial import EphemeralSerialClient
+from .serial import EphemeralSerialClient, AsyncBootProfiler
 
 # 3. The Auto-Healing Matrix
 from .failover import FailoverTransport
