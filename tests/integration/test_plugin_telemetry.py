@@ -1,3 +1,4 @@
+# tests/integration/test_plugin_telemetry.py
 import json
 from pathlib import Path
 
