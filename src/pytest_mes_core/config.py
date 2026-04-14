@@ -204,8 +204,10 @@ class SshTargetConfig(BaseHardwareConfig):
 class BootProfilerConfig(BaseHardwareConfig):
     port: str = Field(description="Host PC physical UART port, e.g., /dev/ttyUSB0")
     baudrate: int = Field(default=115200, gt=0)
-    milestones: Union[Dict[str, str], List[str]] = Field(default_factory=dict)
     timeout_s: float = Field(default=60.0, gt=0)
+    auto_login_user: Optional[str] = None
+    auto_login_password: Optional[str] = None
+    milestones: Dict[str, str] = Field(default_factory=dict)
 
 class HostCanConfig(BaseHardwareConfig):
     interface: str = Field(default="can0", description="Host socketcan interface")

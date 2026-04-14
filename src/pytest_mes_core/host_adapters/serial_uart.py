@@ -20,6 +20,8 @@ from pytest_mes_core.host_adapters.base import (
     HostHardwareDisconnectError
 )
 
+from pytest_mes_core.host_adapters.diagnostics import ResourceDiagnostics
+
 logger = logging.getLogger("mes_core.host_adapters.serial_uart")
 
 class HostSerialError(HostAdapterError):
@@ -43,51 +45,36 @@ class HostSerialAdapter(BaseHostAdapter):
         return self.cfg.baudrate
 
     def __enter__(self) -> 'HostSerialAdapter':
-        if not HAS_SERIAL:
-            raise HostAdapterError("pyserial library is not installed in this environment.")
-
         logger.debug(f"[Host Serial] Opening {self.cfg.port} at {self.cfg.baudrate} baud...")
 
-        # ==========================================
-        # 1. OS-LEVEL PRE-FLIGHT CHECK
-        # ==========================================
-        # We only run this on Unix systems. Windows COM ports are handled by the try/except block.
-        if self.cfg.port.startswith("/dev/") and not os.path.exists(self.cfg.port):
-            raise HostHardwareDisconnectError(
-                f"Serial port '{self.cfg.port}' does not exist. Is the FTDI cable unplugged?"
-            )
-
-        # ==========================================
-        # 2. SOCKET BINDING & LOCKING
-        # ==========================================
         try:
-            # exclusive=True is the magic bullet here. It instructs the OS kernel to reject
-            # any other process trying to open this port while Pytest owns it.
             self.ser = serial.Serial(
                 port=self.cfg.port,
                 baudrate=self.cfg.baudrate,
                 timeout=self.cfg.timeout_s,
-                exclusive=True
+                exclusive=True  # Asks the OS to lock the port
             )
-
-            # ==========================================
-            # 3. KERNEL BUFFER SANITIZATION
-            # ==========================================
-            # DEFENSIVE: Purge floating hardware noise generated during USB enumeration
             self.ser.reset_input_buffer()
             self.ser.reset_output_buffer()
 
         except serial.SerialException as e:
             err_str = str(e).lower()
-            logger.error(f"[Host Serial] Failed to claim {self.cfg.port}: {e}")
 
-            # Intelligently map raw OS errors into our global framework exceptions
             if "device or resource busy" in err_str or "access is denied" in err_str:
-                raise HostResourceBusyError(f"Serial port {self.cfg.port} is locked by another terminal (minicom/screen?).")
+                # THE UPGRADE: Ask the Kernel who owns the port!
+                owner = ResourceDiagnostics.get_device_owner(self.cfg.port)
+
+                if owner:
+                    error_msg = f"Serial port {self.cfg.port} is locked by {owner}!"
+                    logger.critical(f"[Host Serial] {error_msg} Please close it and retry.")
+                    raise HostResourceBusyError(error_msg)
+                else:
+                    raise HostResourceBusyError(f"Serial port {self.cfg.port} is busy (OS refused to identify owner).")
+
             elif "file not found" in err_str or "no such file" in err_str:
-                raise HostHardwareDisconnectError(f"Serial port {self.cfg.port} physically disconnected: {e}")
+                raise HostHardwareDisconnectError(f"Serial port physically disconnected: {self.cfg.port}")
             else:
-                raise HostSerialError(f"Host Serial hardware failure on {self.cfg.port}: {e}")
+                raise HostSerialError(f"Hardware failure: {e}")
 
         return self
 

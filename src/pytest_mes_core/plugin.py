@@ -107,6 +107,8 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]) ->
             html = "<br>".join([f"<b>{k}:</b> {v}" for k, v in record.result.metrics.items()])
             rep.custom_metrics_html = html
 
+from pytest_mes_core.transports.base import TransportConnectionError, TransportTimeoutError
+
 @pytest.fixture(scope="session")
 def dut_transport(mes_env: StationEnvironment):
     primary_ssh = EphemeralSSHClient(mes_env.ssh_targets["primary"]) if "primary" in mes_env.ssh_targets and mes_env.ssh_targets["primary"].enabled else None
@@ -121,8 +123,16 @@ def dut_transport(mes_env: StationEnvironment):
     else:
         pytest.skip("No enabled transport targets found.")
 
+    # THE FIX: Graceful Session Bootstrapping
     try:
         transport.connect()
+        logger.info("[Fixture] DUT Transport connected successfully during setup.")
+    except (TransportConnectionError, TransportTimeoutError) as e:
+        logger.warning(f"[Fixture] DUT Transport offline during setup (Expected if Cold Booting). Reason: {e}")
+    except Exception as e:
+        logger.error(f"[Fixture] Unexpected transport failure: {e}")
+
+    try:
         yield transport
     finally:
         transport.disconnect()
