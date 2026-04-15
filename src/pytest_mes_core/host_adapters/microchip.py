@@ -1,6 +1,6 @@
-# src/pytest_mes_core/host_adapters/microchip.py
 import logging
 from typing import Any
+from contextlib import contextmanager
 
 from pytest_mes_core.host_adapters.base import BaseHostAdapter, HostAdapterError
 from pytest_mes_core.host_adapters.mutex import hardware_mutex, HostMutexTimeoutError
@@ -17,11 +17,12 @@ class HostPickitAdapter(BaseHostAdapter):
         self.mutex_timeout_s = mutex_timeout_s
         self._mutex_context = None
 
+    # ==========================================
+    # REQUIRED BY BASE CLASS CONTRACT
+    # ==========================================
     def __enter__(self) -> 'HostPickitAdapter':
         logger.debug(f"[PICkit] Acquiring hardware lock for probe {self.tool_serial}...")
-
         try:
-            # We use the tool's USB serial number as the exact mutex resource name
             self._mutex_context = hardware_mutex(
                 resource_name=f"pickit_{self.tool_serial}",
                 timeout_s=self.mutex_timeout_s
@@ -36,9 +37,21 @@ class HostPickitAdapter(BaseHostAdapter):
             logger.critical(f"[PICkit] FATAL: {err_msg}")
             raise HostAdapterError(err_msg)
 
-    def __exit__(self, _exc_type: Any, _exc_val: Any, _exc_tb: Any) -> None:
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         """ZERO-LEAKAGE: Release the OS-level hardware lock."""
         if self._mutex_context:
             logger.debug(f"[PICkit] ZERO-LEAKAGE: Releasing lock on {self.tool_serial}.")
-            self._mutex_context.__exit__(_exc_type, _exc_val, _exc_tb)
+            self._mutex_context.__exit__(exc_type, exc_val, exc_tb)
             self._mutex_context = None
+
+    # ==========================================
+    # SYNTACTIC SUGAR FOR TESTS
+    # ==========================================
+    @contextmanager
+    def lock_usb_bus(self):
+        """
+        Allows tests to use `with pickit.lock_usb_bus():` for better readability,
+        while routing through the required __enter__/__exit__ methods.
+        """
+        with self:
+            yield self

@@ -247,6 +247,8 @@ def enforce_physical_state(request: pytest.FixtureRequest, dut_state_machine: Op
         pass # Already there
     elif target_state == 'POWER_OFF':
         dut_state_machine.power_off()
+    elif target_state == 'ENERGIZED':
+        dut_state_machine.energize()
     elif target_state == 'BOOTLOADER':
         dut_state_machine.boot_to_bootloader()
     elif target_state == 'OS_USERLAND':

@@ -227,6 +227,7 @@ class MicrochipIcpConfig(BaseHardwareConfig):
     firmware_path: str = Field(description="Absolute path to the .hex payload")
     flash_timeout_s: int = Field(default=45, gt=0)
     mutex_timeout_s: float = Field(default=60.0, description="How long to wait for the USB hardware lock")
+    extra_flags: List[str] = Field(default_factory=lambda: ["W3.3"])
 
 class SshTargetConfig(BaseHardwareConfig):
     ip_address: str

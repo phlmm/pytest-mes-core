@@ -1,27 +1,27 @@
-# src/pytest_mes_core/state_machine.py
 import time
 import logging
 from abc import ABC, abstractmethod
 from typing import Dict, Optional
 from transitions import Machine
+from enum import Enum, auto
 
 from pytest_mes_core.config import StateMachineConfig, BootProfilerConfig
 from pytest_mes_core.instruments.power_supplies import ScpiPowerSupply
 from pytest_mes_core.transports import EphemeralSerialClient, EphemeralSSHClient
 from pytest_mes_core.transports.base import TransportTimeoutError
-from enum import Enum, auto
 
 logger = logging.getLogger("mes_core.state_machine")
 
 class DutState(Enum):
     POWER_OFF = auto()
+    ENERGIZED = auto()   # 🚨 NEW: Board has VDD, but framework ignores CPU state
     BOOTLOADER = auto()
     OS_USERLAND = auto()
     RECOVERY = auto()
     DIRTY = auto()
 
 class BaseDutStateMachine(ABC):
-    STATES = [DutState.POWER_OFF, DutState.BOOTLOADER, DutState.OS_USERLAND, DutState.DIRTY]
+    STATES = [DutState.POWER_OFF, DutState.ENERGIZED, DutState.BOOTLOADER, DutState.OS_USERLAND, DutState.DIRTY]
 
     def __init__(
         self,
@@ -47,13 +47,18 @@ class BaseDutStateMachine(ABC):
             send_event=True
         )
 
+        # 🚨 THE NEW TRANSITION MATRIX
         self.machine.add_transition('power_off', '*', DutState.POWER_OFF, before='_hw_power_off')
-        self.machine.add_transition('boot_to_bootloader', [DutState.POWER_OFF, DutState.OS_USERLAND, DutState.DIRTY], DutState.BOOTLOADER, before='_hw_boot_to_bootloader')
-        self.machine.add_transition('boot_to_os', [DutState.POWER_OFF, DutState.BOOTLOADER, DutState.DIRTY], DutState.OS_USERLAND, before='_hw_boot_to_os')
+        self.machine.add_transition('energize', [DutState.POWER_OFF, DutState.DIRTY], DutState.ENERGIZED, before='_hw_energize')
+        self.machine.add_transition('boot_to_bootloader', [DutState.POWER_OFF, DutState.ENERGIZED, DutState.OS_USERLAND, DutState.DIRTY], DutState.BOOTLOADER, before='_hw_boot_to_bootloader')
+        self.machine.add_transition('boot_to_os', [DutState.POWER_OFF, DutState.ENERGIZED, DutState.BOOTLOADER, DutState.DIRTY], DutState.OS_USERLAND, before='_hw_boot_to_os')
         self.machine.add_transition('mark_dirty', '*', DutState.DIRTY, before=lambda e: logger.warning(f"[State Machine] Marked DIRTY: {e.kwargs.get('reason', 'Unknown')}"))
 
     @abstractmethod
     def _hw_power_off(self, event) -> None: pass
+
+    @abstractmethod
+    def _hw_energize(self, event) -> None: pass
 
     @abstractmethod
     def _hw_boot_to_bootloader(self, event) -> None: pass
@@ -85,6 +90,30 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
                 logger.warning("[State Machine] Pytest STDIN is captured. Assuming power was dropped.")
                 time.sleep(2.0)
 
+    def _hw_energize(self, event) -> None:
+        """
+        🚨 NEW: Applies raw power so components (like the PIC) have VDD.
+        The Linux OS will autoboot in the background, but the framework won't wait for it.
+        """
+        if self.state not in [DutState.POWER_OFF, DutState.DIRTY]:
+            logger.debug("[State Machine] Board is already energized.")
+            return
+
+        logger.info("[State Machine] Applying RAW POWER to the board (Ignoring CPU/OS state)...")
+        if self.psu:
+            self.psu.enable_output()
+            logger.debug("[State Machine] Waiting 1.0s for hardware rails to stabilize...")
+            time.sleep(1.0)
+        else:
+            logger.warning("="*60)
+            logger.warning("[State Machine] ⚠️ NO AUTOMATED SCPI PSU CONFIGURED!")
+            logger.warning("[State Machine] ⚠️ MANUAL ACTION: PLUG IN THE 12V POWER NOW.")
+            logger.warning("="*60)
+            try:
+                input(">>> Press [ENTER] once power is applied... ")
+            except EOFError:
+                time.sleep(2.0)
+
     def _hw_boot_to_bootloader(self, event) -> None:
         if self.state == DutState.OS_USERLAND:
             logger.debug("[State Machine] Soft rebooting Linux...")
@@ -92,6 +121,11 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
                 self.serial.connect()
             self.serial.safe_run("reboot", timeout_s=2.0, check_exit_code=False)
         else:
+            # 🚨 FIX: If the board is already energized but we missed the boot window, we MUST power cycle.
+            if self.state == DutState.ENERGIZED:
+                logger.info("[State Machine] Board is energized. Power cycling to catch BootROM...")
+                self._hw_power_off(event)
+
             if not self.serial.is_connected:
                 logger.debug("[State Machine] Binding UART socket to catch BootROM...")
                 self.serial.connect()
@@ -111,7 +145,6 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
 
         logger.info("[State Machine] Hunting for Bootloader autoboot interrupt (Aggressive Mode)...")
 
-        # 🚨 Use the new unified buffer flush!
         self.serial.flush_buffers()
         if self.serial.ser and self.serial.ser.is_open:
             self.serial.ser.timeout = 0
@@ -121,19 +154,16 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
         blast_bytes = self.cfg.bootloader_interrupt_char.encode('utf-8')
 
         while time.perf_counter() < t_end:
-            # 1. Spam the interrupt key
             try:
                 self.serial.ser.write(blast_bytes)
                 self.serial.ser.flush()
             except Exception:
                 pass
 
-            # 2. Ingest stream directly into the parser
             if self.serial.ser.in_waiting > 0:
                 raw_bytes = self.serial.ser.read(self.serial.ser.in_waiting)
                 self.serial.parser.ingest(raw_bytes)
 
-                # 3. Check the ANSI-free live buffer for the prompt
                 if self.cfg.bootloader_prompt in self.serial.live_buffer:
                     bootloader_acquired = True
                     break
@@ -159,8 +189,9 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
         logger.info("[State Machine] Bootloader intercepted successfully.")
 
     def _hw_boot_to_os(self, event) -> None:
-        if self.state in [DutState.POWER_OFF, DutState.DIRTY]:
-            logger.debug("[State Machine] Board is cold. Routing through Bootloader phase first...")
+        # 🚨 Route through Bootloader if we are currently Energized or Off
+        if self.state in [DutState.POWER_OFF, DutState.DIRTY, DutState.ENERGIZED]:
+            logger.debug("[State Machine] Routing through Bootloader phase first...")
             self._hw_boot_to_bootloader(event)
 
         logger.info(f"[State Machine] Commanding OS Boot: '{self.cfg.bootloader_boot_cmd}'")
@@ -175,7 +206,6 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
         pending_milestones = self.boot_profiler_cfg.milestones.copy() if self.boot_profiler_cfg else {}
 
         while time.time() - start_time < self.cfg.cold_boot_timeout_s:
-            # 1. Non-blocking ingest to prevent POSIX deadlocks
             if self.serial.ser.in_waiting > 0:
                 raw_bytes = self.serial.ser.read(self.serial.ser.in_waiting)
                 self.serial.parser.ingest(raw_bytes)
@@ -185,9 +215,6 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
 
             current_elapsed = round(time.time() - start_time, 3)
 
-            # ==========================================================
-            # 2. PROMPT DETECTION (No newlines required!)
-            # ==========================================================
             if self.cfg.os_shell_prompt in self.serial.live_buffer:
                 self.boot_metrics["t_boot_total_to_shell_s"] = current_elapsed
                 logger.info(f"[State Machine] Auto-login shell reached in {current_elapsed}s.")
@@ -198,8 +225,6 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
                 logger.info(f"[State Machine] Login prompt reached in {current_elapsed}s.")
                 logger.debug(f"[UART] TX -> '{self.cfg.os_user}' (Providing Username)")
                 self.serial.ser.write(f"{self.cfg.os_user}\n".encode())
-
-                # 🚨 Clear the buffer so we don't accidentally re-trigger the login!
                 self.serial.parser.clear_buffer()
 
             elif self.cfg.os_password_prompt in self.serial.live_buffer and self.cfg.os_password:
@@ -207,50 +232,34 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
                 self.serial.ser.write(f"{self.cfg.os_password}\n".encode())
                 self.serial.parser.clear_buffer()
 
-            # ==========================================================
-            # 3. MILESTONE PROFILING (Complete lines only)
-            # ==========================================================
             for line in self.serial.parser.extract_lines():
                 logger.debug(f"[UART] RX <- {line}")
-
                 if pending_milestones:
                     found_keys = []
                     for name, substring in pending_milestones.items():
                         if substring in line:
                             self.boot_metrics[f"t_boot_{name}_s"] = current_elapsed
-
-                            logger.debug("-" * 40)
-                            logger.debug(f"[Boot Profiler] ⏱️ MILESTONE REACHED: '{name}'")
-                            logger.debug(f"[Boot Profiler] ⏱️ Matched Regex: '{substring}'")
-                            logger.debug(f"[Boot Profiler] ⏱️ Elapsed Time: {current_elapsed}s")
-                            logger.debug("-" * 40)
-
                             found_keys.append(name)
-
                     for k in found_keys:
                         pending_milestones.pop(k)
-
         else:
             raise TransportTimeoutError("Timed out waiting for Linux Shell prompt.")
+
         logger.debug("[State Machine] Allowing 2.0s for the Linux network stack and SSH daemon to settle...")
         time.sleep(2.0)
 
-        # ==============================================================
-        # 🚨 THE FIX: DROPBEAR-SPECIFIC KEY INJECTION
-        # ==============================================================
+        # 🚨 THE FIXES FROM EARLIER RETAINED HERE
         public_key = getattr(self.cfg, 'os_ssh_public_key', None)
 
         if public_key:
             logger.info("[State Machine] Injecting Framework SSH Public Key via UART...")
             self.serial.flush_buffers()
 
-            # Use absolute paths! The serial console might not have $HOME defined yet.
-            home_dir = "/root"
+            home_dir = getattr(self.cfg, 'os_user_home_dir', '/home/root')
             commands = []
 
             if getattr(self.cfg, 'immutable_rootfs', False):
                 logger.info(f"[State Machine] Immutable RootFS detected. Masking {home_dir} with tmpfs...")
-                # We must ensure the mount point exists first
                 commands.append(f"mkdir -p {home_dir}")
                 commands.append(f"mount -t tmpfs -o mode=755,uid=0,gid=0 tmpfs {home_dir}")
 
@@ -259,19 +268,15 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
             commands.append(f"echo '{public_key}' > {home_dir}/.ssh/authorized_keys")
             commands.append(f"chmod 600 {home_dir}/.ssh/authorized_keys")
             commands.append(f"chown -R root:root {home_dir}/.ssh")
-
-            # Proof of Life: List the directory to ensure it actually wrote!
             commands.append(f"ls -la {home_dir}/.ssh")
 
             for cmd in commands:
                 logger.debug(f"[UART] TX -> {cmd}")
                 self.serial.ser.write(f"{cmd}\n".encode('utf-8'))
-                time.sleep(0.2) # Give the OS time to execute
+                time.sleep(0.2)
 
-                # Read back the DUT's stdout/stderr to catch read-only errors!
                 if self.serial.ser.in_waiting > 0:
                     resp = self.serial.ser.read(self.serial.ser.in_waiting).decode('utf-8', errors='ignore')
-                    # Print the raw board output so we can see if it rejected the mount
                     for line in resp.split('\n'):
                         if line.strip() and cmd not in line:
                             logger.debug(f"[DUT] {line.strip()}")
@@ -283,10 +288,6 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
             self.serial.ser.write(f"echo 'root:{safe_pwd}' | chpasswd\n".encode('utf-8'))
             time.sleep(0.5)
 
-
-        logger.debug("[State Machine] Allowing 2.0s for the Linux network stack and SSH daemon to settle...")
-        time.sleep(2.0)
-
         logger.debug("[State Machine] Binding SSH Transport Matrix...")
 
         try:
@@ -295,12 +296,10 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
             logger.critical("=" * 60)
             logger.critical("[State Machine] SSH REJECTED! Dumping Dropbear security logs from DUT:")
             logger.critical("=" * 60)
-
-            # Flush the buffer, then ask the board why it rejected us
             self.serial.flush_buffers()
 
-            # 1. Check Dropbear's systemd journal for the exact error
-            self.serial.ser.write(b"journalctl -u dropbear@* --no-pager -n 20\n")
+            # 🚨 Socket-Activated Dropbear fix retained
+            self.serial.ser.write(b"journalctl -t dropbear --no-pager -n 20\n")
             time.sleep(1.0)
             if self.serial.ser.in_waiting > 0:
                 log_dump = self.serial.ser.read(self.serial.ser.in_waiting).decode('utf-8', errors='ignore')
@@ -308,7 +307,6 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
                     if line.strip() and "journalctl" not in line:
                         logger.error(f"[DUT-DROPBEAR] {line.strip()}")
 
-            # 2. Check where the OS actually thinks the root home directory is
             self.serial.ser.write(b"grep root /etc/passwd\n")
             time.sleep(0.5)
             if self.serial.ser.in_waiting > 0:
@@ -316,4 +314,4 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
                 logger.error(f"[DUT-PASSWD] {passwd_dump.strip()}")
 
             logger.critical("=" * 60)
-            raise e # Re-raise to let the framework tear down
+            raise e
