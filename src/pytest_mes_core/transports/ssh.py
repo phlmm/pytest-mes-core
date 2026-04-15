@@ -31,40 +31,40 @@ class EphemeralSSHClient:
 
     def _build_connection(self, cfg: SshTargetConfig) -> Connection:
         """Dynamically constructs the Fabric/Paramiko configuration matrix."""
-        ssh_config = Config(overrides={
-            'ssh': {
-                'config': {
-                    'StrictHostKeyChecking': 'no',
-                    'UserKnownHostsFile': '/dev/null',
-                    'LogLevel': 'ERROR',
-                    'ConnectTimeout': str(int(cfg.connect_timeout_s)),
-                    'ServerAliveInterval': '10',
-                    'ServerAliveCountMax': '3'
-                }
-            }
-        })
 
         connect_kwargs: Dict[str, Any] = {
-            "look_for_keys": False,
-            "allow_agent": False,
+            "look_for_keys": False,  # Strict IaC mode: no snooping in ~/.ssh/
+            "allow_agent": False,    # Strict IaC mode: no background agents
             "banner_timeout": 5.0,
-            "auth_timeout": 5.0
+            "auth_timeout": 5.0,
+            "timeout": cfg.connect_timeout_s,
+            # Prevents Paramiko from triggering the Dropbear 2022 negotiation crash
+            "disabled_algorithms": dict(pubkeys=["rsa-sha2-512", "rsa-sha2-256"])
         }
 
         if cfg.password:
             connect_kwargs["password"] = cfg.password
 
-        if cfg.identity_file:
-            logger.debug(f"[SSH] Loading strict PKI identity from {cfg.identity_file}")
-            connect_kwargs["key_filename"] = cfg.identity_file
+        identity_file_path = getattr(cfg, 'identity_file', None)
 
-        return Connection(
+        if identity_file_path:
+            logger.debug(f"[SSH] Loading strict PKI identity: {identity_file_path}")
+            # The clean, generic way to pass keys to Fabric/Paramiko
+            connect_kwargs["key_filename"] = identity_file_path
+        else:
+            logger.warning("[SSH] No identity_file defined in TOML! Paramiko will attempt a blank login.")
+
+        conn = Connection(
             host=cfg.ip_address,
             user=cfg.user,
             port=cfg.port,
-            config=ssh_config,
             connect_kwargs=connect_kwargs
         )
+
+        import paramiko
+        conn.client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+        return conn
 
     # ==========================================
     # LIFECYCLE MANAGEMENT

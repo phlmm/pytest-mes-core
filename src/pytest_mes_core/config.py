@@ -54,6 +54,16 @@ class StateMachineConfig(BaseHardwareConfig):
     os_user: str = Field(default="root")
     os_password: Optional[str] = Field(default=None)
 
+    # 🚨 THE FIX: Add the SSH Injection Fields so Pydantic parses them!
+    os_ssh_public_key: Optional[str] = Field(
+        default=None,
+        description="Public key string to inject via UART into ~/.ssh/authorized_keys"
+    )
+    immutable_rootfs: bool = Field(
+        default=False,
+        description="If True, mounts a tmpfs over ~ before injecting keys to bypass read-only filesystems."
+    )
+
     # Timing
     cold_boot_timeout_s: float = Field(default=60.0, description="Max time from Power ON to OS Shell.")
 # --- COTS PSU Configs ---

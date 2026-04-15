@@ -16,6 +16,7 @@ dependencies = [
     "pytest-repeat",
     "pydantic>=2.7.0",
     "fabric",
+    "paramiko[all]",
     "pyserial>=3.5",
     "python-can>=4.3.0",
     "tenacity",

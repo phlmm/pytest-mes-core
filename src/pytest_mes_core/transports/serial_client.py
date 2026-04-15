@@ -6,7 +6,8 @@ from contextlib import contextmanager
 from typing import Generator, Optional, Tuple
 
 from pytest_mes_core.config import HostSerialConfig
-from pytest_mes_core.transports.base import TransportConnectionError, TransportTimeoutError
+from pytest_mes_core.transports import TransportConnectionError, TransportTimeoutError
+from pytest_mes_core.utils.uart_parser import UartStreamParser
 
 logger = logging.getLogger("mes_core.transports.serial")
 
@@ -20,6 +21,7 @@ class EphemeralSerialClient:
         self.cfg = cfg
         self.ser: Optional[serial.Serial] = None
         self._is_locked = False
+        self.parser = UartStreamParser()
 
     def connect(self) -> None:
         try:
@@ -100,6 +102,31 @@ class EphemeralSerialClient:
                 clean_lines.append(clean_line)
 
         return "\n".join(clean_lines)
+
+    def flush_buffers(self) -> None:
+        """Fully purges both the hardware UART buffer and the software parser buffer."""
+        if self.ser and self.ser.is_open:
+            self.ser.reset_input_buffer()
+        self.parser.clear_buffer()
+
+    def read_clean_stream(self) -> Generator[str, None, None]:
+        """
+        Non-blocking read. Pulls all waiting bytes from the hardware,
+        strips ANSI colors, and yields clean, complete lines.
+        """
+        if not self.ser or not self.ser.is_open:
+            return
+
+        if self.ser.in_waiting > 0:
+            raw_bytes = self.ser.read(self.ser.in_waiting)
+            self.parser.ingest(raw_bytes)
+
+        yield from self.parser.extract_lines()
+
+    @property
+    def live_buffer(self) -> str:
+        """Returns the current unbroken, ANSI-free string buffer (great for catching prompt fragments)."""
+        return self.parser.buffer
 
     # ==========================================
     # RESOURCE LOCKING (For Hardware Tests)

@@ -25,7 +25,7 @@ class BaseDutStateMachine(ABC):
 
     def __init__(
         self,
-        psu: Optional[ScpiPowerSupply], # THE FIX: PSU is now strictly Optional
+        psu: Optional[ScpiPowerSupply],
         serial: EphemeralSerialClient,
         ssh: EphemeralSSHClient,
         cfg: StateMachineConfig,
@@ -75,7 +75,6 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
             logger.debug("[State Machine] Waiting 2.0s for bulk decoupling capacitors to discharge...")
             time.sleep(2.0)
         else:
-            # 🚨 MANUAL INTERVENTION INTERCEPTOR 🚨
             logger.warning("="*60)
             logger.warning("[State Machine] ⚠️ NO AUTOMATED SCPI PSU CONFIGURED!")
             logger.warning("[State Machine] ⚠️ MANUAL ACTION: UNPLUG THE 12V POWER FROM THE BOARD NOW.")
@@ -88,51 +87,76 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
 
     def _hw_boot_to_bootloader(self, event) -> None:
         if self.state == DutState.OS_USERLAND:
-            # Notice how a soft-reboot doesn't need a PSU at all!
             logger.debug("[State Machine] Soft rebooting Linux...")
-            logger.debug("[UART] TX -> 'reboot'")
+            if not self.serial.is_connected:
+                self.serial.connect()
             self.serial.safe_run("reboot", timeout_s=2.0, check_exit_code=False)
         else:
+            if not self.serial.is_connected:
+                logger.debug("[State Machine] Binding UART socket to catch BootROM...")
+                self.serial.connect()
+
             if self.psu:
                 logger.debug("[SCPI] TX -> ENERGIZING OUTPUT (COLD BOOT)")
                 self.psu.enable_output()
             else:
-                # 🚨 MANUAL INTERVENTION INTERCEPTOR 🚨
                 logger.warning("="*60)
                 logger.warning("[State Machine] ⚠️ NO AUTOMATED SCPI PSU CONFIGURED!")
-                logger.warning("[State Machine] ⚠️ MANUAL ACTION: PLUG IN THE 12V POWER TO THE BOARD NOW.")
+                logger.warning("[State Machine] ⚠️ MANUAL ACTION REQUIRED: RACE CONDITION PREVENTION.")
                 logger.warning("="*60)
                 try:
-                    input(">>> Press [ENTER] immediately after applying power... ")
+                    input(">>> 1. Press [ENTER] on your keyboard NOW to arm the framework...\n>>> 2. THEN immediately plug in the 12V power! ")
                 except EOFError:
-                    logger.warning("[State Machine] Pytest STDIN is captured. Assuming power was applied.")
-                    time.sleep(0.5)
+                    logger.warning("[State Machine] Pytest STDIN is captured.")
 
-        logger.info("[State Machine] Hunting for Bootloader autoboot interrupt...")
+        logger.info("[State Machine] Hunting for Bootloader autoboot interrupt (Aggressive Mode)...")
 
-        try:
-            # 1. Wait for interrupt and blast the stop character
-            self.serial.expect(
-                pattern=self.cfg.bootloader_interrupt_pattern,
-                timeout_s=self.cfg.cold_boot_timeout_s,
-                blast_char=self.cfg.bootloader_interrupt_char
-            )
+        # 🚨 Use the new unified buffer flush!
+        self.serial.flush_buffers()
+        if self.serial.ser and self.serial.ser.is_open:
+            self.serial.ser.timeout = 0
 
-            # 2. Wait for the prompt
-            self.serial.expect(self.cfg.bootloader_prompt, timeout_s=5.0)
+        t_end = time.perf_counter() + self.cfg.cold_boot_timeout_s
+        bootloader_acquired = False
+        blast_bytes = self.cfg.bootloader_interrupt_char.encode('utf-8')
 
-            # 3. Verify control
-            res = self.serial.safe_run("echo MES_SYNC", expected_prompt=self.cfg.bootloader_prompt)
-            if "MES_SYNC" not in res:
-                raise TransportTimeoutError("Failed to synchronize with Bootloader prompt.")
+        while time.perf_counter() < t_end:
+            # 1. Spam the interrupt key
+            try:
+                self.serial.ser.write(blast_bytes)
+                self.serial.ser.flush()
+            except Exception:
+                pass
 
-            logger.info("[State Machine] Bootloader intercepted successfully.")
+            # 2. Ingest stream directly into the parser
+            if self.serial.ser.in_waiting > 0:
+                raw_bytes = self.serial.ser.read(self.serial.ser.in_waiting)
+                self.serial.parser.ingest(raw_bytes)
 
-        except Exception as e:
-            logger.critical("="*60)
-            logger.critical(f"[State Machine] FATAL: Failed to intercept Bootloader!")
-            logger.critical("="*60)
-            raise RuntimeError(f"Bootloader intercept failed: {e}")
+                # 3. Check the ANSI-free live buffer for the prompt
+                if self.cfg.bootloader_prompt in self.serial.live_buffer:
+                    bootloader_acquired = True
+                    break
+
+            time.sleep(0.05)
+
+        if not bootloader_acquired:
+            logger.critical(f"[State Machine] FATAL: Buffer yielded: {self.serial.live_buffer[-200:]}")
+            raise RuntimeError(f"Failed to intercept Bootloader within {self.cfg.cold_boot_timeout_s}s!")
+
+        logger.info("[State Machine] Bootloader prompt detected! Synchronizing...")
+        self.serial.ser.timeout = 2.0
+
+        self.serial.ser.write(b"\n")
+        self.serial.ser.flush()
+        time.sleep(0.1)
+        self.serial.flush_buffers()
+
+        res = self.serial.safe_run("echo MES_SYNC", expected_prompt=self.cfg.bootloader_prompt, timeout_s=3.0)
+        if "MES_SYNC" not in res:
+            raise RuntimeError("Failed to synchronize with Bootloader prompt after interception.")
+
+        logger.info("[State Machine] Bootloader intercepted successfully.")
 
     def _hw_boot_to_os(self, event) -> None:
         if self.state in [DutState.POWER_OFF, DutState.DIRTY]:
@@ -141,64 +165,155 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
 
         logger.info(f"[State Machine] Commanding OS Boot: '{self.cfg.bootloader_boot_cmd}'")
         logger.debug(f"[UART] TX -> '{self.cfg.bootloader_boot_cmd}'")
+
+        self.serial.flush_buffers()
         self.serial.ser.write(f"{self.cfg.bootloader_boot_cmd}\n".encode())
 
         logger.info("[State Machine] Waiting for Linux Userland & Profiling Boot...")
         start_time = time.time()
         self.boot_metrics.clear()
-
         pending_milestones = self.boot_profiler_cfg.milestones.copy() if self.boot_profiler_cfg else {}
 
         while time.time() - start_time < self.cfg.cold_boot_timeout_s:
-            # Readline is perfect here. It captures exactly one line of the dmesg/kernel boot log.
-            line = self.serial.ser.readline().decode('utf-8', errors='replace').strip()
-            if not line:
+            # 1. Non-blocking ingest to prevent POSIX deadlocks
+            if self.serial.ser.in_waiting > 0:
+                raw_bytes = self.serial.ser.read(self.serial.ser.in_waiting)
+                self.serial.parser.ingest(raw_bytes)
+            else:
+                time.sleep(0.01)
                 continue
 
             current_elapsed = round(time.time() - start_time, 3)
 
-            # MATRIX TRACE: Stream the raw kernel boot log to the host console
-            logger.debug(f"[UART] RX <- {line}")
-
-            # Inline Boot Profiler
-            if pending_milestones:
-                found_keys = []
-                for name, substring in pending_milestones.items():
-                    if substring in line:
-                        self.boot_metrics[f"t_boot_{name}_s"] = current_elapsed
-
-                        # High-visibility trace for milestone intercepts
-                        logger.debug("-" * 40)
-                        logger.debug(f"[Boot Profiler] ⏱️ MILESTONE REACHED: '{name}'")
-                        logger.debug(f"[Boot Profiler] ⏱️ Matched Regex: '{substring}'")
-                        logger.debug(f"[Boot Profiler] ⏱️ Elapsed Time: {current_elapsed}s")
-                        logger.debug("-" * 40)
-
-                        found_keys.append(name)
-                for k in found_keys:
-                    pending_milestones.pop(k)
-
-            # State Resolution
-            if self.cfg.os_shell_prompt in line:
+            # ==========================================================
+            # 2. PROMPT DETECTION (No newlines required!)
+            # ==========================================================
+            if self.cfg.os_shell_prompt in self.serial.live_buffer:
                 self.boot_metrics["t_boot_total_to_shell_s"] = current_elapsed
                 logger.info(f"[State Machine] Auto-login shell reached in {current_elapsed}s.")
                 break
 
-            elif self.cfg.os_login_prompt in line:
+            elif self.cfg.os_login_prompt in self.serial.live_buffer:
                 self.boot_metrics["t_boot_total_to_login_s"] = current_elapsed
                 logger.info(f"[State Machine] Login prompt reached in {current_elapsed}s.")
-
                 logger.debug(f"[UART] TX -> '{self.cfg.os_user}' (Providing Username)")
                 self.serial.ser.write(f"{self.cfg.os_user}\n".encode())
 
-            elif self.cfg.os_password_prompt in line and self.cfg.os_password:
+                # 🚨 Clear the buffer so we don't accidentally re-trigger the login!
+                self.serial.parser.clear_buffer()
+
+            elif self.cfg.os_password_prompt in self.serial.live_buffer and self.cfg.os_password:
                 logger.debug(f"[UART] TX -> '********' (Providing Password)")
                 self.serial.ser.write(f"{self.cfg.os_password}\n".encode())
+                self.serial.parser.clear_buffer()
+
+            # ==========================================================
+            # 3. MILESTONE PROFILING (Complete lines only)
+            # ==========================================================
+            for line in self.serial.parser.extract_lines():
+                logger.debug(f"[UART] RX <- {line}")
+
+                if pending_milestones:
+                    found_keys = []
+                    for name, substring in pending_milestones.items():
+                        if substring in line:
+                            self.boot_metrics[f"t_boot_{name}_s"] = current_elapsed
+
+                            logger.debug("-" * 40)
+                            logger.debug(f"[Boot Profiler] ⏱️ MILESTONE REACHED: '{name}'")
+                            logger.debug(f"[Boot Profiler] ⏱️ Matched Regex: '{substring}'")
+                            logger.debug(f"[Boot Profiler] ⏱️ Elapsed Time: {current_elapsed}s")
+                            logger.debug("-" * 40)
+
+                            found_keys.append(name)
+
+                    for k in found_keys:
+                        pending_milestones.pop(k)
+
         else:
             raise TransportTimeoutError("Timed out waiting for Linux Shell prompt.")
+        logger.debug("[State Machine] Allowing 2.0s for the Linux network stack and SSH daemon to settle...")
+        time.sleep(2.0)
+
+        # ==============================================================
+        # 🚨 THE FIX: DROPBEAR-SPECIFIC KEY INJECTION
+        # ==============================================================
+        public_key = getattr(self.cfg, 'os_ssh_public_key', None)
+
+        if public_key:
+            logger.info("[State Machine] Injecting Framework SSH Public Key via UART...")
+            self.serial.flush_buffers()
+
+            # Use absolute paths! The serial console might not have $HOME defined yet.
+            home_dir = "/root"
+            commands = []
+
+            if getattr(self.cfg, 'immutable_rootfs', False):
+                logger.info(f"[State Machine] Immutable RootFS detected. Masking {home_dir} with tmpfs...")
+                # We must ensure the mount point exists first
+                commands.append(f"mkdir -p {home_dir}")
+                commands.append(f"mount -t tmpfs -o mode=755,uid=0,gid=0 tmpfs {home_dir}")
+
+            commands.append(f"mkdir -p {home_dir}/.ssh")
+            commands.append(f"chmod 700 {home_dir}/.ssh")
+            commands.append(f"echo '{public_key}' > {home_dir}/.ssh/authorized_keys")
+            commands.append(f"chmod 600 {home_dir}/.ssh/authorized_keys")
+            commands.append(f"chown -R root:root {home_dir}/.ssh")
+
+            # Proof of Life: List the directory to ensure it actually wrote!
+            commands.append(f"ls -la {home_dir}/.ssh")
+
+            for cmd in commands:
+                logger.debug(f"[UART] TX -> {cmd}")
+                self.serial.ser.write(f"{cmd}\n".encode('utf-8'))
+                time.sleep(0.2) # Give the OS time to execute
+
+                # Read back the DUT's stdout/stderr to catch read-only errors!
+                if self.serial.ser.in_waiting > 0:
+                    resp = self.serial.ser.read(self.serial.ser.in_waiting).decode('utf-8', errors='ignore')
+                    # Print the raw board output so we can see if it rejected the mount
+                    for line in resp.split('\n'):
+                        if line.strip() and cmd not in line:
+                            logger.debug(f"[DUT] {line.strip()}")
+
+            self.serial.flush_buffers()
+        else:
+            logger.info("[State Machine] Hot-patching root password for SSH fallback...")
+            safe_pwd = getattr(self.cfg, 'os_password', 'root')
+            self.serial.ser.write(f"echo 'root:{safe_pwd}' | chpasswd\n".encode('utf-8'))
+            time.sleep(0.5)
+
 
         logger.debug("[State Machine] Allowing 2.0s for the Linux network stack and SSH daemon to settle...")
         time.sleep(2.0)
 
         logger.debug("[State Machine] Binding SSH Transport Matrix...")
-        self.ssh.connect()
+
+        try:
+            self.ssh.connect()
+        except Exception as e:
+            logger.critical("=" * 60)
+            logger.critical("[State Machine] SSH REJECTED! Dumping Dropbear security logs from DUT:")
+            logger.critical("=" * 60)
+
+            # Flush the buffer, then ask the board why it rejected us
+            self.serial.flush_buffers()
+
+            # 1. Check Dropbear's systemd journal for the exact error
+            self.serial.ser.write(b"journalctl -u dropbear@* --no-pager -n 20\n")
+            time.sleep(1.0)
+            if self.serial.ser.in_waiting > 0:
+                log_dump = self.serial.ser.read(self.serial.ser.in_waiting).decode('utf-8', errors='ignore')
+                for line in log_dump.split('\n'):
+                    if line.strip() and "journalctl" not in line:
+                        logger.error(f"[DUT-DROPBEAR] {line.strip()}")
+
+            # 2. Check where the OS actually thinks the root home directory is
+            self.serial.ser.write(b"grep root /etc/passwd\n")
+            time.sleep(0.5)
+            if self.serial.ser.in_waiting > 0:
+                passwd_dump = self.serial.ser.read(self.serial.ser.in_waiting).decode('utf-8', errors='ignore')
+                logger.error(f"[DUT-PASSWD] {passwd_dump.strip()}")
+
+            logger.critical("=" * 60)
+            raise e # Re-raise to let the framework tear down

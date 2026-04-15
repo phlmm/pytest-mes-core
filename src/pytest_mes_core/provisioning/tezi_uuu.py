@@ -148,34 +148,54 @@ class UuuTeziProvisioner(BaseProvisioner):
                 serial_client.connect()
 
             with serial_client.exclusive_raw_access() as raw_uart:
-                raw_uart.timeout = 0.5          # Crucial: Returns partial lines (like "~ #") after 0.5s
-                raw_uart.write_timeout = 1.0    # Prevents deadlocks on write()
+                raw_uart.timeout = 0.5
+                raw_uart.write_timeout = 1.0
+
+                # 🚨 Use the new native method to clear everything
+                serial_client.flush_buffers()
 
                 t_end = time.perf_counter() + self.flash_timeout_s
+                last_ping_time = time.perf_counter()
                 tail_command_sent = False
 
                 while time.perf_counter() < t_end:
-                    raw_bytes = raw_uart.readline()
-                    line = raw_bytes.decode('utf-8', errors='replace').strip()
-                    if not line:
-                        continue
 
-                    print(f"\033[90m[DUT UART]\033[0m {line}", flush=True)
+                    # 1. LIVE LINE EXTRACTION
+                    # The client automatically reads hardware, sanitizes ANSI, and yields complete lines
+                    for line in serial_client.read_clean_stream():
+                        print(f"\033[90m[DUT UART]\033[0m {line}", flush=True)
+                        last_ping_time = time.perf_counter()
 
-                    # STAGE 2: Inject the live log tracker when the shell appears
-                    if not tail_command_sent and ("~ #" in line):
+                    # 2. PROMPT DETECTION (Using the client's live fragment buffer)
+                    if not tail_command_sent and ("~ #" in serial_client.live_buffer or "root@" in serial_client.live_buffer):
+                        print(f"\033[90m[DUT UART]\033[0m {serial_client.live_buffer.strip()}", flush=True)
                         logger.info("\n[TEZI] TEZI Shell acquired! Injecting live log tracker...")
                         try:
                             raw_uart.write(b"tail -f /var/volatile/tezi.log\n")
+                            raw_uart.flush()
                             tail_command_sent = True
+                            serial_client.parser.clear_buffer()
                         except Exception as e:
                             logger.warning(f"[TEZI] UART Write blocked: {e}")
+                        last_ping_time = time.perf_counter()
                         continue
 
-                    # STAGE 3: Detect the end of the installation
-                    if (success_prompt and success_prompt in line):
+                    # 3. SUCCESS DETECTION
+                    if "Successfully installed" in serial_client.live_buffer or "Rebooting" in serial_client.live_buffer or (success_prompt and success_prompt in serial_client.live_buffer):
+                        print(f"\033[90m[DUT UART]\033[0m {serial_client.live_buffer.strip()}", flush=True)
                         logger.info(f"\n[TEZI] Installation Success Signature detected!")
                         return True
+
+                    # 4. ACTIVE PING (If the OS is silent)
+                    if raw_uart.in_waiting == 0:
+                        time.sleep(0.1)
+                        if not tail_command_sent and (time.perf_counter() - last_ping_time > 3.0):
+                            try:
+                                raw_uart.write(b"\n")
+                                raw_uart.flush()
+                            except Exception:
+                                pass
+                            last_ping_time = time.perf_counter()
 
             logger.critical(f"\n[TEZI] FATAL: Failed to complete installation within {self.flash_timeout_s}s!")
             return False
