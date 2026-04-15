@@ -20,7 +20,7 @@ from .can_bus import CanBusValidator
 from .uart_loopback import UartEchoValidator
 
 # 4. Silicon & Memory
-from .memory import MemoryValidator, MtdFlashValidator
+from .memory import NativeMemoryValidator
 from .block_storage import BlockDeviceValidator
 from .efuse import NvmemEfuseValidator
 from .mmio import MmioValidator
@@ -52,8 +52,7 @@ __all__ = [
     "UartEchoValidator",
 
     # Silicon & Memory
-    "MemoryValidator",
-    "MtdFlashValidator",
+    "NativeMemoryValidator",
     "BlockDeviceValidator",
     "NvmemEfuseValidator",
     "MmioValidator",

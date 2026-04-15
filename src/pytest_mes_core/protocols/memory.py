@@ -1,8 +1,4 @@
-# src/pytest_mes_core/protocols/memory.py
-import time
-import secrets
 import logging
-import base64
 from typing import Dict, Any
 
 from pytest_mes_core.transports import (
@@ -11,196 +7,87 @@ from pytest_mes_core.transports import (
     TransportTimeoutError
 )
 from pytest_mes_core.protocols import ValidatorResult
-from pytest_mes_core.config import MtdFlashConfig, I2cEepromConfig
 
 logger = logging.getLogger("mes_core.protocols.memory")
 
-class MemoryValidator:
-    """Validates I2C EEPROM integrity, respecting silicon page-write boundaries."""
+class NativeMemoryValidator:
+    """
+    Validates any kernel-abstracted memory device (EEPROM, MTD Block, eMMC)
+    using ONLY standard POSIX/Busybox utilities (dd, cat, cmp, sync).
+    Zero dependencies required on the target Yocto image.
+    """
 
     @staticmethod
-    def verify_i2c_read_write(dut: DutTransport, cfg: I2cEepromConfig) -> ValidatorResult:
-        # 1. Defensive check: Prevent silicon page wrap-around corruption
-        logger.debug(f"[I2C] Calculating page boundaries for {cfg.num_bytes}-byte payload...")
-        reg_int = int(cfg.test_register, 16)
-        if (reg_int % cfg.page_size_bytes) + cfg.num_bytes > cfg.page_size_bytes:
-            err_msg = f"Test Configuration Error: Write crosses EEPROM page boundary of {cfg.page_size_bytes} bytes."
-            logger.error(f"[I2C] {err_msg}")
-            return ValidatorResult(passed=False, error_msg=err_msg)
+    def verify_full_capacity(
+        dut: DutTransport,
+        device_path: str,
+        total_size_bytes: int
+    ) -> ValidatorResult:
 
-        logger.debug(f"[I2C] Generating {cfg.num_bytes}-byte cryptographic test payload...")
-        random_bytes = [secrets.randbelow(256) for _ in range(cfg.num_bytes)]
-        hex_payload = " ".join([f"0x{b:02X}" for b in random_bytes])
-        context_data: Dict[str, Any] = {"i2c_bus": cfg.bus, "i2c_address": cfg.address, "test_register": cfg.test_register}
-
-        logger.info(f"[I2C Bus {cfg.bus}] Writing {cfg.num_bytes} bytes to Device {cfg.address} Reg {cfg.test_register}...")
+        context_data: Dict[str, Any] = {"device_path": device_path, "total_size_bytes": total_size_bytes}
+        logger.info(f"[Memory] Starting Native POSIX verification on {device_path} ({total_size_bytes} bytes)...")
 
         try:
-            # 2. Write to Silicon
-            cmd_write = f"i2ctransfer -y {cfg.bus} w{cfg.num_bytes}@{cfg.address} {cfg.test_register} {hex_payload}"
-            res_write = dut.safe_run(cmd_write, timeout_s=5.0)
+            # 1. Verification of device presence
+            res_check = dut.safe_run(f"test -e {device_path}")
+            if not res_check.ok:
+                return ValidatorResult(passed=False, error_msg=f"Device path {device_path} does not exist.", context=context_data)
 
-            if not res_write.ok:
-                #  FORENSIC HARDWARE INTERCEPTOR
-                logger.critical("="*60)
-                logger.critical(f"[I2C] FATAL: I2C Write rejected! Bus electrically locked or Device NACK'd.")
-                dmesg_res = dut.safe_run(f"dmesg | grep -i i2c-{cfg.bus} | tail -n 5", timeout_s=3.0)
-                if dmesg_res.ok and dmesg_res.stdout:
-                    logger.critical(f"[I2C] Kernel I2C Driver Trace:\n{dmesg_res.stdout.strip()}")
-                logger.critical("="*60)
-                return ValidatorResult(passed=False, error_msg=f"I2C Write rejected: {res_write.stderr.strip()}", context=context_data)
+            # 2. Generate random payload directly on the DUT's RAM (/tmp)
+            logger.debug("[Memory] Generating random test payload...")
+            dut.safe_run(f"dd if=/dev/urandom of=/tmp/test_payload.bin bs=1 count={total_size_bytes} 2>/dev/null", timeout_s=5.0)
 
-            # 3. Acknowledge Hardware Physics (tW)
-            logger.debug(f"[I2C] Awaiting {cfg.write_delay_s}s for silicon page-write cycle (tW) to complete...")
-            time.sleep(cfg.write_delay_s)
-
-            # 4. Read from Silicon
-            logger.debug(f"[I2C] Initiating readback from {cfg.test_register}...")
-            cmd_read = f"i2ctransfer -y {cfg.bus} w1@{cfg.address} {cfg.test_register} r{cfg.num_bytes}"
-            res_read = dut.safe_run(cmd_read, timeout_s=5.0)
-
-            if not res_read.ok:
-                logger.critical(f"[I2C] FATAL: I2C Read failed! {res_read.stderr.strip()}")
-                return ValidatorResult(passed=False, error_msg=f"I2C Read rejected: {res_read.stderr.strip()}", context=context_data)
-
-            try:
-                read_hex_strings = res_read.stdout.strip().split()
-                # Ensure we only parse actual hex bytes to prevent ValueError on kernel warnings
-                read_bytes = [int(h, 16) for h in read_hex_strings if h.startswith("0x")]
-
-                if len(read_bytes) != cfg.num_bytes:
-                    raise ValueError(f"Expected {cfg.num_bytes} bytes, got {len(read_bytes)}.")
-
-            except ValueError as e:
-                logger.error(f"[I2C] Failed to parse readback output: {res_read.stdout.strip()}")
-                return ValidatorResult(passed=False, error_msg=f"Corrupt readback data: {e}", context=context_data)
-
-            # 5. Logical Evaluation
-            passed = (read_bytes == random_bytes)
-            if not passed:
-                logger.critical("="*60)
-                logger.critical(f"[I2C] FATAL: VERIFICATION FAILED! SILICON CORRUPTED OR NOISY BUS.")
-                logger.critical(f"[I2C] Wrote: {random_bytes}")
-                logger.critical(f"[I2C] Read:  {read_bytes}")
-                logger.critical(f"[I2C] Check I2C pull-up resistors and bus capacitance.")
-                logger.critical("="*60)
-                return ValidatorResult(passed=False, error_msg="I2C Readback mismatch (Silicon corrupted).", context=context_data)
-
-            logger.info("[I2C] Readback matches cryptographic payload exactly.")
-            return ValidatorResult(
-                passed=True,
-                metrics={"t_i2c_write_s": res_write.duration_s, "t_i2c_read_s": res_read.duration_s},
-                context=context_data
-            )
-
-        except TransportTimeoutError:
-            logger.critical(f"[I2C] FATAL: DUT hung during I2C transaction. SDA/SCL lines shorted?")
-            return ValidatorResult(passed=False, error_msg="DUT hung during I2C transaction. Bus locked?", context=context_data)
-        except TransportConnectionError as e:
-            logger.critical(f"[I2C] FATAL: Transport dropped during I2C transaction: {e}")
-            return ValidatorResult(passed=False, error_msg=f"Transport dropped during I2C transaction: {e}", context=context_data)
-
-
-class MtdFlashValidator:
-    """Validates SPI NOR/NAND Flash via the Linux MTD subsystem."""
-
-    @staticmethod
-    def verify_scratch_sector(dut: DutTransport, cfg: MtdFlashConfig) -> ValidatorResult:
-        logger.warning(f"[MTD] Initiating destructive write on {cfg.mtd_dev} at {cfg.sector_offset_hex}...")
-        context_data: Dict[str, Any] = {"mtd_device": cfg.mtd_dev, "offset": cfg.sector_offset_hex}
-
-        # Calculate blocks pre-flight
-        logger.debug(f"[MTD] Calculating flash block alignment...")
-        if cfg.test_bytes % cfg.page_size_bytes != 0:
-            err_msg = "Test Configuration Error: test_bytes must be a multiple of page_size_bytes."
-            logger.error(f"[MTD] {err_msg}")
-            return ValidatorResult(passed=False, error_msg=err_msg)
-
-        block_count = cfg.test_bytes // cfg.page_size_bytes
-        offset_dec = int(cfg.sector_offset_hex, 16) // cfg.page_size_bytes
-        payload = secrets.token_bytes(cfg.test_bytes)
-        b64_payload = base64.b64encode(payload).decode('utf-8')
-
-        try:
-            # ==========================================
-            # 1. PHYSICAL ERASE
-            # ==========================================
-            logger.debug(f"[MTD] Erasing {cfg.erase_blocks} hardware blocks at {cfg.sector_offset_hex}...")
-            erase_cmd = f"flash_erase {cfg.mtd_dev} {cfg.sector_offset_hex} {cfg.erase_blocks}"
-            res_erase = dut.safe_run(erase_cmd, timeout_s=10.0)
-
-            if not res_erase.ok:
-                logger.critical("="*60)
-                logger.critical(f"[MTD] FATAL: flash_erase failed! SPI Flash chip locked or dead.")
-
-                dmesg_res = dut.safe_run("dmesg | grep -iE 'mtd|spi|nand' | tail -n 5", timeout_s=3.0)
-                if dmesg_res.ok and dmesg_res.stdout:
-                    logger.critical(f"[MTD] Kernel SPI/MTD Trace:\n{dmesg_res.stdout.strip()}")
-                logger.critical("="*60)
-                return ValidatorResult(passed=False, error_msg=f"flash_erase failed: {res_erase.stderr.strip()}", context=context_data)
-
-            time.sleep(0.1) # Charge pump settling
-
-            # ==========================================
-            # 2. PHYSICAL WRITE
-            # ==========================================
-            write_cmd = (
-                f"echo '{b64_payload}' | base64 -d | "
-                # We add fsync here to guarantee the kernel commits the write to NAND before returning!
-                f"dd of={cfg.mtd_dev} bs={cfg.page_size_bytes} seek={offset_dec} count={block_count} conv=notrunc,fsync"
-            )
-
-            logger.debug(f"[MTD] Transmitting {cfg.test_bytes} bytes via base64 dd pipeline...")
+            # 3. Write payload to hardware
+            # We use 'cat' because it relies on standard POSIX write(), avoiding the ioctl traps of 'dd' on sysfs.
+            # We chain 'sync' to guarantee the kernel flushes the page cache to physical silicon.
+            logger.debug(f"[Memory] Streaming {total_size_bytes} bytes to silicon via VFS...")
+            write_cmd = f"sh -c 'cat /tmp/test_payload.bin > {device_path} && sync'"
             res_write = dut.safe_run(write_cmd, timeout_s=15.0)
 
             if not res_write.ok:
-                logger.critical(f"[MTD] FATAL: Flash write rejected: {res_write.stderr.strip()}")
-                return ValidatorResult(passed=False, error_msg=f"MTD write rejected: {res_write.stderr.strip()}", context=context_data)
+                return ValidatorResult(passed=False, error_msg=f"VFS Write failed: {res_write.stderr.strip()}", context=context_data)
 
-            # ==========================================
-            # 3. PHYSICAL READBACK & VERIFY
-            # ==========================================
-            logger.debug(f"[MTD] Executing hardware readback...")
-            abs_offset = int(cfg.sector_offset_hex, 16)
-            read_cmd = f"hexdump -v -e '1/1 \"%02X\"' -s {abs_offset} -n {cfg.test_bytes} {cfg.mtd_dev}"
-            res_read = dut.safe_run(read_cmd, timeout_s=10.0)
+            # 4. Read back from hardware
+            # 'dd' is safe for reading because we just want a strict byte-count stream.
+            logger.debug("[Memory] Reading back from silicon...")
+            read_cmd = f"dd if={device_path} of=/tmp/readback.bin bs=1 count={total_size_bytes} 2>/dev/null"
+            res_read = dut.safe_run(read_cmd, timeout_s=15.0)
 
             if not res_read.ok:
-                 logger.critical(f"[MTD] FATAL: Flash readback failed: {res_read.stderr.strip()}")
-                 return ValidatorResult(passed=False, error_msg=f"MTD readback failed: {res_read.stderr.strip()}", context=context_data)
+                return ValidatorResult(passed=False, error_msg=f"VFS Read failed: {res_read.stderr.strip()}", context=context_data)
 
-            actual_hex = res_read.stdout.strip()
+            # 5. Bit-level comparison
+            logger.debug("[Memory] Verifying bit-integrity...")
+            res_cmp = dut.safe_run("cmp -l /tmp/test_payload.bin /tmp/readback.bin", timeout_s=10.0)
 
-            if payload.hex().upper() != actual_hex:
+            if res_cmp.exited != 0:
+                error_out = res_cmp.stdout.strip().split('\n')
+                error_count = len(error_out)
                 logger.critical("="*60)
-                logger.critical(f"[MTD] FATAL: MEMORY CORRUPTION DETECTED!")
-                logger.critical(f"[MTD] Wrote: {payload.hex().upper()}")
-                logger.critical(f"[MTD] Read:  {actual_hex}")
-                logger.critical(f"[MTD] Flash wearout (bad block) or severe SPI bus EMI detected.")
+                logger.critical(f"[Memory] FATAL: {error_count} byte mismatches detected on {device_path}!")
+                # Show the first few errors (Octal byte offset, Expected Octal, Got Octal)
+                logger.critical(f"[Memory] First few errors:\n" + "\n".join(error_out[:5]))
                 logger.critical("="*60)
-                return ValidatorResult(passed=False, error_msg="MTD Payload mismatch (Flash wearout / bad block).", context=context_data)
+                return ValidatorResult(passed=False, error_msg=f"{error_count} byte mismatches detected.", context=context_data)
 
-            logger.info(f"[MTD] Verified {cfg.test_bytes} bytes successfully in {res_write.duration_s}s.")
+            logger.info(f"[Memory] SUCCESS: All {total_size_bytes} bytes matched perfectly on {device_path}!")
             return ValidatorResult(
                 passed=True,
-                metrics={"t_mtd_write_s": res_write.duration_s, "t_mtd_read_s": res_read.duration_s},
+                metrics={"t_write_s": res_write.duration_s, "t_read_s": res_read.duration_s},
                 context=context_data
             )
 
         except TransportTimeoutError:
-            logger.critical(f"[MTD] FATAL: Silicon Lockup. DUT hung entirely during MTD flash operation.")
-            return ValidatorResult(passed=False, error_msg="Silicon Lockup: DUT hung during MTD flash operation.", context=context_data)
+            logger.critical(f"[Memory] FATAL: DUT hung during transaction. Bus locked?")
+            return ValidatorResult(passed=False, error_msg="DUT hung during memory transaction.", context=context_data)
         except TransportConnectionError as e:
-            logger.critical(f"[MTD] FATAL: Transport pipe shattered. (Brownout during flash erase/write charge pump activation?): {e}")
-            return ValidatorResult(passed=False, error_msg=f"Transport pipe shattered (Brownout during flash erase/write?): {e}", context=context_data)
+            logger.critical(f"[Memory] FATAL: Transport dropped (Brownout?): {e}")
+            return ValidatorResult(passed=False, error_msg=f"Transport pipe shattered: {e}", context=context_data)
 
         finally:
             # ==========================================
-            # 4. ZERO-LEAKAGE TEARDOWN
+            # ZERO-LEAKAGE TEARDOWN
             # ==========================================
             if dut.is_connected:
-                try:
-                    logger.debug(f"[MTD] ZERO-LEAKAGE: Wiping scratch sector {cfg.sector_offset_hex} on {cfg.mtd_dev}...")
-                    dut.safe_run(f"flash_erase {cfg.mtd_dev} {cfg.sector_offset_hex} {cfg.erase_blocks}", timeout_s=10.0)
-                except Exception as cleanup_err:
-                    logger.debug(f"[MTD] Final wipe skipped (Transport likely dead): {cleanup_err}")
+                logger.debug("[Memory] ZERO-LEAKAGE: Cleaning up temporary payloads from DUT RAM...")
+                dut.safe_run("rm -f /tmp/test_payload.bin /tmp/readback.bin", timeout_s=5.0)

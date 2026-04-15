@@ -112,6 +112,7 @@ class EphemeralSSHClient:
     def safe_run(self, cmd: str, timeout_s: float = 30.0, **kwargs: Any) -> CommandResult:
         """
         Synchronous execution mapped to exact Domain Exceptions.
+        Logs every command execution directly to the target's systemd journal for forensic auditing.
         Contains ZERO internal auto-healing to allow external Failover architectures to function.
         """
         if not self.is_connected:
@@ -122,17 +123,22 @@ class EphemeralSSHClient:
         kwargs.setdefault('hide', True)
         kwargs.setdefault('warn', True)
 
-        # Matrix Tracing: Expose the exact shell command to the Pytest artifacts
+        # 1. Forensic Journal Interceptor
+        # Escape single quotes so complex commands don't break the logger syntax
+        escaped_cmd = cmd.replace("'", "'\\''")
+        # Use ';' instead of '&&' to guarantee execution even if the journal daemon is busy
+        wrapped_cmd = f"logger -t MES_Factory 'EXEC: {escaped_cmd}' ; {cmd}"
+
+        # Matrix Tracing: Expose the clean shell command to Pytest (not the wrapped one)
         logger.debug(f"[SSH] TX -> {cmd}")
         t0 = time.perf_counter()
 
         try:
-            # 1. Execute via Fabric
-            res = self.conn.run(cmd, timeout=timeout_s, **kwargs)
+            # 2. Execute via Fabric using the wrapped command
+            res = self.conn.run(wrapped_cmd, timeout=timeout_s, **kwargs)
             duration = round(time.perf_counter() - t0, 3)
 
-            # 2. Catch the "Silent Closure" bug inherent to Paramiko
-            # Sometimes paramiko doesn't raise, it just dumps to stderr and exits with -1.
+            # 3. Catch the "Silent Closure" bug inherent to Paramiko
             if not res.ok and ("closed" in str(res.stderr).lower() or res.exited == -1):
                 self.disconnect()
                 err_msg = "SSH Socket silently closed during execution."
@@ -142,7 +148,7 @@ class EphemeralSSHClient:
             # Matrix Tracing
             logger.debug(f"[SSH] RX <- Exited {res.exited} in {duration}s")
 
-            # 3. Return the Immutable Contract
+            # 4. Return the Immutable Contract (Using original 'cmd')
             return CommandResult(
                 command=cmd,
                 stdout=res.stdout.strip() if res.stdout else "",
@@ -153,9 +159,6 @@ class EphemeralSSHClient:
             )
 
         except CommandTimedOut as e:
-            # Application Hang: Command took longer than timeout_s.
-            # The physical pipe is fine, the OS is just slow or the command blocked.
-            # We return a failed result so the test fails, but we DO NOT raise a connection error.
             duration = round(time.perf_counter() - t0, 3)
             logger.warning(f"[SSH] Execution timed out after {timeout_s}s: {cmd}")
 
@@ -169,7 +172,6 @@ class EphemeralSSHClient:
             )
 
         except (SSHException, socket.error, EOFError, ThreadException) as e:
-            # THE SURVIVAL EVENT: The physical pipe shattered.
             self.disconnect()
             err_msg = f"Physical TCP/SSH link severed during execution of '{cmd}': {e}"
             logger.critical(f"[SSH] FATAL: {err_msg}")

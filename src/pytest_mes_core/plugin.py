@@ -60,12 +60,18 @@ def pytest_configure(config: pytest.Config) -> None:
     if verbosity == 0:
         # 'pytest': Total Silence. Only operator actions and hardware failures.
         config.option.log_cli_level = "WARNING"
+        logging.getLogger("transitions").setLevel(logging.WARNING)
+        logging.getLogger("paramiko").setLevel(logging.WARNING)
     elif verbosity == 1:
         # 'pytest -v': High-Level Progress (Milestones, Tool executions)
         config.option.log_cli_level = "INFO"
+        logging.getLogger("transitions").setLevel(logging.INFO)
+        logging.getLogger("paramiko").setLevel(logging.INFO)
     else:
         # 'pytest -vv': The Matrix (Raw UART bytes, SSH traces, Hex dumps)
         config.option.log_cli_level = "DEBUG"
+        logging.getLogger("transitions").setLevel(logging.DEBUG)
+        logging.getLogger("paramiko").setLevel(logging.DEBUG)
 
     toml_path = Path(config.getoption("--env-config"))
     if toml_path.exists():
@@ -240,18 +246,23 @@ def enforce_physical_state(request: pytest.FixtureRequest, dut_state_machine: Op
         return
 
     marker = request.node.get_closest_marker("requires_state")
-    target_state = marker.args[0].name if marker else 'OS_USERLAND'
 
-    # State Resolution via 'transitions' library
-    if dut_state_machine.state == target_state:
-        pass # Already there
-    elif target_state == 'POWER_OFF':
+    # 1. Safely extract the Target State as a String
+    target_state_name = marker.args[0].name if marker else 'OS_USERLAND'
+
+    # 2. Safely extract the Current State from the FSM Enum as a String
+    current_state_name = dut_state_machine.state.name if hasattr(dut_state_machine.state, 'name') else str(dut_state_machine.state)
+
+    # 3. String-to-String comparison
+    if current_state_name == target_state_name:
+        logger.debug(f"[Router] Board is already in {current_state_name}. Bypassing boot sequence.")
+    elif target_state_name == 'POWER_OFF':
         dut_state_machine.power_off()
-    elif target_state == 'ENERGIZED':
+    elif target_state_name == 'ENERGIZED':
         dut_state_machine.energize()
-    elif target_state == 'BOOTLOADER':
+    elif target_state_name == 'BOOTLOADER':
         dut_state_machine.boot_to_bootloader()
-    elif target_state == 'OS_USERLAND':
+    elif target_state_name == 'OS_USERLAND':
         dut_state_machine.boot_to_os()
 
     yield # TEST EXECUTES HERE
