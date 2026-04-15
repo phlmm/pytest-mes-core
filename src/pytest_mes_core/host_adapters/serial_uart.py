@@ -46,8 +46,10 @@ class HostSerialAdapter(BaseHostAdapter):
 
     def __enter__(self) -> 'HostSerialAdapter':
         if not HAS_SERIAL:
-            err_msg = "pyserial library is not installed on the Host PC."
+            err_msg = "pyserial library is not installed on the Host PC environment."
+            logger.critical("="*60)
             logger.critical(f"[Host Serial] FATAL: {err_msg}")
+            logger.critical("="*60)
             raise HostAdapterError(err_msg)
 
         logger.debug(f"[Host Serial] Attempting exclusive OS lock on {self.cfg.port} at {self.cfg.baudrate} baud...")
@@ -61,7 +63,7 @@ class HostSerialAdapter(BaseHostAdapter):
             )
 
             # Matrix Tracing: Explicitly log the FIFO buffer purge
-            logger.debug(f"[Host Serial] Lock acquired. Flushing residual hardware FIFO buffers...")
+            logger.debug(f"[Host Serial] OS Lock acquired. Flushing residual hardware FIFO buffers...")
             self.ser.reset_input_buffer()
             self.ser.reset_output_buffer()
 
@@ -74,22 +76,30 @@ class HostSerialAdapter(BaseHostAdapter):
                 # Ask the Kernel who owns the port
                 owner = ResourceDiagnostics.get_device_owner(self.cfg.port)
 
+                logger.critical("="*60)
                 if owner:
-                    error_msg = f"Serial port {self.cfg.port} is locked by {owner}!"
-                    logger.critical(f"[Host Serial] FATAL: {error_msg} Please close it and retry.")
-                    raise HostResourceBusyError(error_msg)
+                    error_msg = f"Serial port {self.cfg.port} is locked by PID/Process: {owner}!"
+                    logger.critical(f"[Host Serial] FATAL: {error_msg}")
+                    logger.critical("[Host Serial] Please close the competing application (minicom, Putty) and retry.")
                 else:
                     error_msg = f"Serial port {self.cfg.port} is busy (OS refused to identify owner)."
                     logger.critical(f"[Host Serial] FATAL: {error_msg}")
-                    raise HostResourceBusyError(error_msg)
+                logger.critical("="*60)
+
+                raise HostResourceBusyError(error_msg)
 
             elif "file not found" in err_str or "no such file" in err_str:
                 error_msg = f"Serial port physically disconnected or missing: {self.cfg.port}"
+                logger.critical("="*60)
                 logger.critical(f"[Host Serial] FATAL: {error_msg}")
+                logger.critical(f"[Host Serial] Check the USB/FTDI connection to the Host PC.")
+                logger.critical("="*60)
                 raise HostHardwareDisconnectError(error_msg)
             else:
                 error_msg = f"Hardware failure on {self.cfg.port}: {e}"
+                logger.critical("="*60)
                 logger.critical(f"[Host Serial] FATAL: {error_msg}")
+                logger.critical("="*60)
                 raise HostSerialError(error_msg)
 
         return self
@@ -98,7 +108,7 @@ class HostSerialAdapter(BaseHostAdapter):
         """ZERO-LEAKAGE: Safely releases the COM port and OS locks."""
         if self.ser and self.ser.is_open:
             try:
-                logger.debug(f"[Host Serial] ZERO-LEAKAGE: Releasing {self.cfg.port}.")
+                logger.debug(f"[Host Serial] ZERO-LEAKAGE: Releasing OS lock on {self.cfg.port}.")
                 self.ser.close()
             except Exception as e:
                 # Downgraded to warning to avoid masking primary test exceptions

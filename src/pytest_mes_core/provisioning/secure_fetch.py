@@ -6,6 +6,7 @@ import urllib.error
 import logging
 from pathlib import Path
 from tenacity import retry, stop_after_attempt, wait_fixed, before_sleep_log
+from typing import Optional
 
 from pytest_mes_core.provisioning.base import ProvisioningError, ImageVerificationError
 
@@ -126,3 +127,44 @@ class SecureAssetFetcher:
 
         logger.info(f"[Fetch] Asset verified successfully (SHA256: {actual_hash[:8]}...).")
         return dest
+
+    @classmethod
+    def resolve_payload(cls, uri: str, expected_sha256: Optional[str] = None) -> Path:
+        """
+        The Master Entrypoint: Handles both Local Paths and Remote URLs.
+        Routes to the appropriate verification or download logic.
+        """
+        # Scenario A: Local Developer Desk File
+        if not uri.startswith(("http://", "https://")):
+            local_path = Path(uri).expanduser().resolve()
+            if not local_path.exists():
+                raise FileNotFoundError(f"FATAL: Local payload not found at {local_path}")
+
+            if expected_sha256:
+                actual_hash = cls._calculate_local_hash(local_path)
+                if actual_hash != expected_sha256.lower():
+                    logger.critical("="*60)
+                    logger.critical(f"[Fetch] FATAL: Local File Hash Mismatch!")
+                    logger.critical(f"[Fetch] Expected: {expected_sha256}")
+                    logger.critical(f"[Fetch] Got:      {actual_hash}")
+                    logger.critical("="*60)
+                    raise ImageVerificationError("Local payload checksum failed.")
+            else:
+                logger.warning(f"[Fetch] Using local payload {local_path.name} WITHOUT checksum verification.")
+
+            return local_path
+
+        # Scenario B: Factory Floor Remote URL
+        cache_dir = Path(".mes_cache/artifacts")
+        cache_dir.mkdir(parents=True, exist_ok=True)
+
+        # Extract filename from URL (e.g., 'EVSE-Image-Tezi.tar')
+        filename = uri.split("/")[-1]
+        dest_file = cache_dir / filename
+
+        # We mandate SHA256 for remote downloads to prevent MITM attacks or corrupted transit
+        if not expected_sha256:
+            raise ValueError(f"FATAL: Remote URL {uri} requires a 'payload_sha256' in TOML for integrity.")
+
+        # Dispatch to your brilliant Tenacity-powered streaming downloader!
+        return cls.fetch_and_verify(url=uri, expected_sha256=expected_sha256, dest=dest_file)

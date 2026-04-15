@@ -17,7 +17,7 @@ from .executable import CustomPayloadValidator
 # 3. Networking & Communications
 from .ethernet import EthernetValidator
 from .can_bus import CanBusValidator
-from .serial_uart import UartEchoValidator
+from .uart_loopback import UartEchoValidator
 
 # 4. Silicon & Memory
 from .memory import MemoryValidator, MtdFlashValidator

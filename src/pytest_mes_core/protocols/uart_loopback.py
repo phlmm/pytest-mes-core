@@ -1,37 +1,38 @@
-# src/pytest_mes_core/protocols/serial_uart.py
+# src/pytest_mes_core/protocols/uart_loopback.py
 import time
 import logging
 from typing import Dict, Any
 
 from pytest_mes_core.transports import (
     DutTransport,
+    EphemeralSerialClient,
     TransportConnectionError,
     TransportTimeoutError
 )
 from pytest_mes_core.protocols import ValidatorResult
-from pytest_mes_core.host_adapters import HostSerialAdapter
 
-logger = logging.getLogger("mes_core.protocols.uart")
+logger = logging.getLogger("mes_core.protocols.uart_loopback")
 
 class UartEchoValidator:
     """
-    Validates physical UART/RS-232/RS-485 interfaces.
+    Validates physical UART/RS-232/RS-485 interfaces via hardware loopback.
     Features surgical background process management, EMI-resistant host buffering,
     and hardware-level framing error detection.
     """
 
     @staticmethod
     def verify_echo(
-        host_ser: HostSerialAdapter,
+        host_ser: EphemeralSerialClient,
         dut: DutTransport,
         dut_device: str,
         test_string: str = "MES_UART_SYNC"
     ) -> ValidatorResult:
 
-        context_data: Dict[str, Any] = {"dut_device": dut_device, "baudrate": host_ser.baudrate}
+        baudrate = host_ser.cfg.baudrate
+        context_data: Dict[str, Any] = {"dut_device": dut_device, "baudrate": baudrate}
         pid_file = f"/tmp/mes_uart_echo_{dut_device.replace('/', '_')}.pid"
 
-        logger.info(f"[UART] Initiating hardware loopback test on {dut_device} at {host_ser.baudrate} baud...")
+        logger.info(f"[UART] Initiating hardware loopback test on {dut_device} at {baudrate} baud...")
 
         try:
             # ==========================================
@@ -40,10 +41,10 @@ class UartEchoValidator:
             # raw: Disables kernel line-editing (canonical mode) so bytes pass through untouched
             # -echo: Prevents the kernel from automatically echoing, avoiding double-echo infinite loops
             logger.debug(f"[UART] Forcing DUT port {dut_device} into raw/no-echo mode...")
-            stty_cmd = f"stty -F {dut_device} {host_ser.baudrate} raw -echo"
+            stty_cmd = f"stty -F {dut_device} {baudrate} raw -echo"
             res_stty = dut.safe_run(stty_cmd, timeout_s=3.0)
 
-            if not res_stty.ok:
+            if res_stty.exited != 0:
                 logger.critical("="*60)
                 logger.critical(f"[UART] FATAL: Failed to configure DUT port {dut_device}!")
                 logger.critical(f"[UART] Does the port exist? Is the kernel UART driver loaded?")
@@ -64,37 +65,34 @@ class UartEchoValidator:
             # ==========================================
             # 3. HOST PC: FLUSH & TRANSMIT
             # ==========================================
-            if not host_ser.ser or not host_ser.ser.is_open:
+            if not host_ser.is_connected:
                 err_msg = "Host PC Serial Adapter is closed or physically disconnected."
                 logger.error(f"[UART] {err_msg}")
                 return ValidatorResult(passed=False, error_msg=err_msg, context=context_data)
 
             try:
-                # Defensive: Hardware lines floating during jig insertion inject EMI garbage. Flush it.
-                logger.debug("[UART] Flushing physical FTDI/UART hardware buffers on Host PC...")
-                host_ser.ser.reset_input_buffer()
-                host_ser.ser.reset_output_buffer()
+                # Lock the serial port so no background MES tasks steal our bytes
+                with host_ser.exclusive_raw_access() as raw_uart:
 
-                payload = (test_string + "\n").encode('utf-8')
+                    raw_uart.reset_input_buffer()
+                    raw_uart.reset_output_buffer()
 
-                logger.debug(f"[UART] TX -> '{test_string}'")
-                t0 = time.perf_counter()
+                    payload = (test_string + "\n").encode('utf-8')
+                    logger.debug(f"[UART Loopback] TX -> '{test_string}'")
+                    t0 = time.perf_counter()
 
-                host_ser.ser.write(payload)
-                host_ser.ser.flush() # Block until OS physically shifts out the last bit on the FTDI chip
+                    raw_uart.write(payload)
+                    raw_uart.flush()
 
-                # ==========================================
-                # 4. HOST PC: RECEIVE & DECODE
-                # ==========================================
-                # errors='replace' prevents a single electrical bit-flip from crashing pytest with UnicodeDecodeError
-                raw_response = host_ser.ser.readline()
-                latency = round((time.perf_counter() - t0) * 1000.0, 2)
+                    # 4. HOST PC: RECEIVE & DECODE
+                    raw_response = raw_uart.readline()
+                    latency = round((time.perf_counter() - t0) * 1000.0, 2)
 
-                response = raw_response.decode('utf-8', errors='replace').strip()
-                context_data["raw_rx_bytes"] = raw_response.hex()
-                context_data["decoded_rx"] = response
+                    response = raw_response.decode('utf-8', errors='replace').strip()
+                    context_data["raw_rx_bytes"] = raw_response.hex()
+                    context_data["decoded_rx"] = response
 
-                logger.debug(f"[UART] RX <- '{response}' (Raw Hex: {context_data['raw_rx_bytes']})")
+                    logger.debug(f"[UART Loopback] RX <- '{response}'")
 
             except Exception as host_err:
                 # Catch pyserial exceptions (e.g., operator unplugs the USB to UART cable mid-test)
@@ -154,4 +152,4 @@ class UartEchoValidator:
                     dut.safe_run(f"kill -9 $(cat {pid_file} 2>/dev/null) >/dev/null 2>&1 || true", timeout_s=3.0)
                     dut.safe_run(f"rm -f {pid_file} >/dev/null 2>&1 || true", timeout_s=3.0)
                 except Exception as cleanup_err:
-                    logger.debug(f"[UART] Loopback cleanup failed: {cleanup_err}")
+                    logger.debug(f"[UART] Loopback cleanup failed (Transport likely dead): {cleanup_err}")

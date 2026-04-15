@@ -38,6 +38,24 @@ class TelemetryConfig(BaseHardwareConfig):
     log_directory: str = Field(default="/var/log/mes_core")
     influx_url: Optional[str] = None
 
+# --- DUT State Machine ---
+class StateMachineConfig(BaseHardwareConfig):
+    """Defines the temporal and string-matching rules for navigating boot states."""
+    # Bootloader (e.g., U-Boot, Barebox)
+    bootloader_prompt: str = Field(default="=> ", description="The prompt indicating the bootloader is ready.")
+    bootloader_interrupt_pattern: str = Field(default="stop autoboot", description="Substring to look for to interrupt boot.")
+    bootloader_interrupt_char: str = Field(default="\n", description="Character to blast to stop autoboot (e.g., \\n or \\x03).")
+    bootloader_boot_cmd: str = Field(default="boot", description="Command to proceed to the OS.")
+
+    # OS Userland (Linux)
+    os_login_prompt: str = Field(default="login: ")
+    os_password_prompt: str = Field(default="Password: ")
+    os_shell_prompt: str = Field(default="root@")
+    os_user: str = Field(default="root")
+    os_password: Optional[str] = Field(default=None)
+
+    # Timing
+    cold_boot_timeout_s: float = Field(default=60.0, description="Max time from Power ON to OS Shell.")
 # --- COTS PSU Configs ---
 class RigolPsuConfig(BaseHardwareConfig):
     vendor: Literal["rigol"]
@@ -180,6 +198,13 @@ class TeziProvisioningConfig(BaseHardwareConfig):
     tezi_folder_path: str = Field(description="Path to the extracted TEZI image folder containing uuu.auto")
     usb_recovery_timeout_s: int = Field(default=30, gt=0, description="Time to wait for operator to put board in Recovery Mode")
     flash_timeout_s: int = Field(default=300, gt=0)
+    payload_uri: str = Field(
+        description="Local absolute path, OR a remote URL (https://) to the Yocto TEZI tarball."
+    )
+    payload_sha256: Optional[str] = Field(
+        default=None,
+        description="Optional: Enforce cryptographic integrity before flashing."
+    )
 
 class MicrochipIcpConfig(BaseHardwareConfig):
     """Configuration for In-Circuit Programming via Microchip IPECMD."""
@@ -280,6 +305,11 @@ class StationEnvironment(BaseHardwareConfig):
     telemetry: TelemetryConfig = Field(
         default_factory=TelemetryConfig,
         description="Routing rules for Grafana/JSONL telemetry."
+    )
+
+    state_machine: Optional[StateMachineConfig] = Field(
+        default=None,
+        description="Defines the string-matching rules and timeouts for FSM boot state transitions."
     )
 
     psu_hardware: Optional[PsuVendorConfig] = Field(

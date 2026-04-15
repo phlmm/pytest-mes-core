@@ -20,8 +20,8 @@ class BaseProvisioner(ABC):
     Abstract Base Class for all factory provisioning tools (JTAG, Fastboot, TEZI, UUU).
     """
     @abstractmethod
-    def provision(self, image_path: Path) -> None:
+    def provision(self, image_path: Path) -> bool:
         """
-        Executes the flash sequence. Must raise ProvisioningError on failure.
+        Returns True if successful, raises ProvisioningError or returns False on failure.
         """
         pass
