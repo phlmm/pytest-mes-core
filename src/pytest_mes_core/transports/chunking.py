@@ -31,9 +31,25 @@ class HostSideBuffer:
 
     def start(self) -> None:
         """Spawns the background daemon to begin data extraction."""
+        # THREAD SAFETY FIX: Prevent Ghost Threads
+        if self._thread and self._thread.is_alive():
+            logger.warning(f"[HostBuffer] Vacuum for {self.remote_path} is already running. Ignoring start request.")
+            return
+
+        # CPU PROTECTION FIX: Floor the polling interval
+        if self.poll_interval_s < 0.5:
+            logger.warning(f"[HostBuffer] Poll interval {self.poll_interval_s}s is too fast. Flooring to 0.5s to protect DUT CPU.")
+            self.poll_interval_s = 0.5
+
         logger.info(f"[HostBuffer] Arming asynchronous vacuum for {self.remote_path}...")
         self._stop_event.clear()
         self._t0 = time.perf_counter()
+
+        # Reset state on fresh start
+        with self._lock:
+            self._buffer.clear()
+            self._lines_read = 0
+
         self._thread = threading.Thread(target=self._poll_loop, daemon=True)
         self._thread.start()
 

@@ -33,6 +33,10 @@ class EphemeralSerialClient:
                 timeout=self.cfg.timeout_s,
                 exclusive=True
             )
+        self.ser.reset_input_buffer()
+        self.ser.reset_output_buffer()
+        self.parser.clear_buffer()
+        logger.debug(f"[UART] Bound to {self.cfg.port} and flushed stale OS buffers.")
         except serial.SerialException as e:
             raise TransportConnectionError(f"Failed to bind Host UART {self.cfg.port}: {e}")
 
@@ -85,7 +89,14 @@ class EphemeralSerialClient:
         self.ser.write(f"{cmd}\n".encode('utf-8'))
         self.ser.flush()
 
-    def safe_run(self, cmd: str, timeout_s: float = 30.0, check_exit_code: bool = False, **kwargs: Any) -> CommandResult:
+    def safe_run(
+        self,
+        cmd: str,
+        timeout_s: float = 30.0,
+        check_exit_code: bool = False,
+        auto_retry: bool = False,
+        **kwargs: Any
+    ) -> CommandResult:
         """
         Executes a command and mathematically parses the exit code over a raw serial line.
         Mirrors SSH transport: dynamically raises RuntimeErrors if check_exit_code is True.

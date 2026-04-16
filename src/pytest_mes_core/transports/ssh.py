@@ -109,7 +109,14 @@ class EphemeralSSHClient:
     # ==========================================
     # COMMAND EXECUTION
     # ==========================================
-    def safe_run(self, cmd: str, timeout_s: float = 30.0, check_exit_code: bool = False, **kwargs: Any) -> CommandResult:
+    def safe_run(
+        self,
+        cmd: str,
+        timeout_s: float = 30.0,
+        check_exit_code: bool = False,
+        auto_retry: bool = False,
+        **kwargs: Any
+    ) -> CommandResult:
         """
         Synchronous execution mapped to exact Domain Exceptions.
         Logs every command execution directly to the target's systemd journal for forensic auditing.

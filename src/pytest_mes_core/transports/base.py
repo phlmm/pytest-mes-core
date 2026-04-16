@@ -1,4 +1,3 @@
-# src/pytest_mes_core/transports/base.py
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -27,12 +26,12 @@ class CommandResult:
     A unified, IMMUTABLE wrapper bridging various transport outputs.
     Guarantees strict data integrity between the physical layer and the parsing protocols.
     """
-    command: str        # The exact payload transmitted to the DUT
+    command: str
     stdout: str
     stderr: str
     exited: int
     ok: bool
-    duration_s: float   # High-precision execution time tracked by the transport layer
+    duration_s: float
 
 
 # ==========================================
@@ -57,7 +56,14 @@ class DutTransport(Protocol):
         """Safely tears down the interface and flushes buffers (Zero-Leakage)."""
         ...
 
-    def safe_run(self, cmd: str, timeout_s: float = 30.0, **kwargs: Any) -> CommandResult:
+    def safe_run(
+        self,
+        cmd: str,
+        timeout_s: float = 30.0,
+        check_exit_code: bool = False,
+        auto_retry: bool = False,
+        **kwargs: Any
+    ) -> CommandResult:
         """
         Executes a command synchronously on the target.
         Must raise TransportConnectionError if the pipe shatters.
