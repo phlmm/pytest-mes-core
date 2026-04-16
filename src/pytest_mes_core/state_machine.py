@@ -11,6 +11,7 @@ from pytest_mes_core.config import StateMachineConfig, BootProfilerConfig
 from pytest_mes_core.instruments import ScpiPowerSupply
 from pytest_mes_core.transports import EphemeralSerialClient, EphemeralSSHClient
 from pytest_mes_core.transports import TransportTimeoutError, TransportConnectionError
+from pytest_mes_core.telemetry.manifest import HardwareManifest
 
 logger = logging.getLogger("mes_core.state_machine")
 
@@ -19,6 +20,9 @@ class DeviceContext:
     active_rootfs: str = "UNKNOWN"
     crypto_data_mounted: bool = False
     active_boot_medium: str = "default"
+
+    manifest: Optional[HardwareManifest] = None
+
     custom_data: Dict[str, Any] = field(default_factory=dict)
 
 class DutState(Enum):
@@ -33,7 +37,8 @@ class BaseDutStateMachine(ABC):
     STATES = [DutState.POWER_OFF, DutState.ENERGIZED, DutState.BOOTLOADER, DutState.OS_USERLAND, DutState.RECOVERY, DutState.DIRTY]
     PANIC_WATCHDOG: Pattern[bytes] = re.compile(br"(Kernel panic - not syncing|Out of memory: Killed process|synchronous external abort)")
     ANSI_ESCAPE_B: Pattern[bytes] = re.compile(br'\x1b\[[0-9;]*[a-zA-Z]')
-    state: DutState
+    # Use 'Any' here so type checkers don't yell when a project uses its own Enum
+    state: Any
 
     def __init__(
         self,
@@ -53,7 +58,6 @@ class BaseDutStateMachine(ABC):
 
         self.boot_metrics: Dict[str, float] = {}
         self.context = DeviceContext()
-
         self.context_validators: List[Callable[['BaseDutStateMachine'], None]] = []
 
         logger.debug(f"[State Machine] Initializing FSM. PSU: {self.psu is not None} | GPIO: {self.gpio is not None}")
@@ -71,6 +75,25 @@ class BaseDutStateMachine(ABC):
         self.machine.add_transition('boot_to_os', '*', DutState.OS_USERLAND, before='_hw_boot_to_os')
         self.machine.add_transition('boot_to_recovery', '*', DutState.RECOVERY, before='_hw_to_recovery')
         self.machine.add_transition('mark_dirty', '*', DutState.DIRTY, before=lambda e: logger.warning(f"[State Machine] Marked DIRTY."))
+
+        self._register_custom_states()
+
+        def _register_custom_states(self) -> None:
+            """Override this in project subclasses to add custom states andtransitions.
+            This runs automatically during __init__ to patch the FSM.
+            logger.info("[EVSE FSM] Injecting custom EVSE hardware states...")
+            # Add the new states to the existing machine
+            self.machine.add_state(EvseState.CALIBRATION_MODE)
+            self.machine.add_state(EvseState.FACTORY_FLASH_MODE)
+            # Map the transition triggers to your custom physical hooks
+            self.machine.add_transition(
+                trigger='boot_to_calibration',
+                source='*', # Can transition from anywhere
+                dest=EvseState.CALIBRATION_MODE,
+                before='_hw_to_calibration'
+            )
+            """
+        pass
 
     def register_context_validator(self, validator_func: Callable[['BaseDutStateMachine'], None]) -> None:
         """Allows test fixtures to seamlessly inject custom OS validation methods."""
