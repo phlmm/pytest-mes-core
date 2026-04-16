@@ -3,8 +3,8 @@ import logging
 from typing import Optional, Any
 from pathlib import Path
 
-from pytest_mes_core.host_adapters.base import BaseHostAdapter, HostAdapterError
-from pytest_mes_core.utils.daemon import DaemonProcess, DaemonStartupError
+from pytest_mes_core.host_adapters import BaseHostAdapter, HostAdapterError
+from pytest_mes_core.utils import DaemonProcess, DaemonStartupError
 
 logger = logging.getLogger("mes_core.host_adapters.openocd")
 

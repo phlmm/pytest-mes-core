@@ -13,7 +13,7 @@ except ImportError:
     serial = None
 
 from pytest_mes_core.config import HostSerialConfig
-from pytest_mes_core.host_adapters.base import (
+from pytest_mes_core.host_adapters import (
     BaseHostAdapter,
     HostAdapterError,
     HostResourceBusyError,

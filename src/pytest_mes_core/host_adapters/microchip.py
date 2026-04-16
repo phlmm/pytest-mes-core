@@ -2,8 +2,8 @@ import logging
 from typing import Any
 from contextlib import contextmanager
 
-from pytest_mes_core.host_adapters.base import BaseHostAdapter, HostAdapterError
-from pytest_mes_core.host_adapters.mutex import hardware_mutex, HostMutexTimeoutError
+from pytest_mes_core.host_adapters import BaseHostAdapter, HostAdapterError
+from pytest_mes_core.host_adapters import hardware_mutex, HostMutexTimeoutError
 
 logger = logging.getLogger("mes_core.host_adapters.microchip")
 
