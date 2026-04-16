@@ -1,0 +1,139 @@
+"""
+Hardware Transports Plugin
+
+This module manages the physical connections to the Device Under Test (DUT).
+It provisions Power Supplies, Serial TTYs, and SSH sockets, wrapping them in
+robust failover mechanisms. This ensures tests can communicate with the hardware
+regardless of whether it is sitting at a U-Boot prompt or a fully booted Linux OS.
+"""
+
+import pytest
+import logging
+from typing import Generator, Optional
+
+from pytest_mes_core.config import StationEnvironment
+from pytest_mes_core.instruments.power_supplies import ScpiPowerSupply
+from pytest_mes_core.transports import (
+    EphemeralSSHClient,
+    EphemeralSerialClient,
+    FailoverTransport,
+    TransportConnectionError,
+    TransportTimeoutError
+)
+
+logger = logging.getLogger("mes_core.hardware")
+
+@pytest.fixture(scope="session")
+def psu_hardware(mes_env: StationEnvironment) -> Generator[Optional[ScpiPowerSupply], None, None]:
+    """
+    Initializes and manages the Programmable Power Supply (PSU) for the jig.
+
+    This fixture reads the SCPI configuration from the TOML environment. If a PSU
+    is defined and enabled, it connects via TCP/RS232, yields the instrument for
+    the State Machine to control, and guarantees the connection is closed during teardown.
+
+    Returns:
+        Generator[Optional[ScpiPowerSupply], None, None]: The PSU controller, or None if disabled.
+
+    Example:
+        def test_sleep_current_draw(psu_hardware, dut_transport):
+            if not psu_hardware:
+                pytest.skip("Test requires a physical PSU to measure current.")
+
+            dut_transport.safe_run("rtcwake -m mem -s 10")
+            current_amps = psu_hardware.measure_current()
+            assert current_amps < 0.050, "Sleep current exceeds 50mA limit!"
+    """
+    if not mes_env.psu_hardware or not mes_env.psu_hardware.enabled:
+        yield None
+        return
+
+    psu = ScpiPowerSupply(mes_env.psu_hardware)
+    psu.connect()
+    yield psu
+    psu.close()
+
+@pytest.fixture(scope="session")
+def ssh_client(mes_env: StationEnvironment) -> Optional[EphemeralSSHClient]:
+    """
+    Initializes the high-speed Ethernet/SSH transport client.
+
+    Returns:
+        Optional[EphemeralSSHClient]: The SSH client configured with the DUT's IP, or None.
+    """
+    if "primary" in mes_env.ssh_targets and mes_env.ssh_targets["primary"].enabled:
+        return EphemeralSSHClient(mes_env.ssh_targets["primary"])
+    return None
+
+@pytest.fixture(scope="session")
+def serial_client(mes_env: StationEnvironment) -> Optional[EphemeralSerialClient]:
+    """
+    Initializes the low-level UART/Serial transport client.
+
+    Returns:
+        Optional[EphemeralSerialClient]: The Serial client configured with the debug COM port, or None.
+    """
+    if "debug_port" in mes_env.host_serial and mes_env.host_serial["debug_port"].enabled:
+        return EphemeralSerialClient(mes_env.host_serial["debug_port"])
+    return None
+
+@pytest.fixture(scope="session")
+def dut_transport(
+    mes_env: StationEnvironment,
+    ssh_client: Optional[EphemeralSSHClient],
+    serial_client: Optional[EphemeralSerialClient]
+) -> Generator[Any, None, None]:
+    """
+    The Master Hardware Transport Abstraction.
+
+    This is the primary fixture test engineers should use to interact with the board.
+    It wraps both the SSH and Serial clients into a 'FailoverTransport'.
+
+    If the board is in OS_USERLAND, the FailoverTransport routes commands over high-speed SSH.
+    If the network stack crashes or the board is sitting in the Bootloader, it seamlessly
+    routes the commands over the raw UART byte-stream using the exact same API.
+
+    Returns:
+        Generator[FailoverTransport | EphemeralSSHClient | EphemeralSerialClient, None, None]:
+        The active transport mechanism.
+
+    Example:
+        def test_read_temperature(dut_transport):
+            # The engineer doesn't care if this goes over SSH or Serial.
+            # safe_run handles the routing and exit-code validation automatically.
+            res = dut_transport.safe_run("cat /sys/class/thermal/thermal_zone0/temp", check_exit_code=True)
+            temp_c = int(res.stdout.strip()) / 1000.0
+            assert temp_c < 85.0
+    """
+    if ssh_client and serial_client:
+        transport = FailoverTransport(primary=ssh_client, fallback=serial_client)
+    elif ssh_client:
+        transport = ssh_client
+    elif serial_client:
+        transport = serial_client
+    else:
+        pytest.skip("No enabled transport targets found in the TOML configuration.")
+        return
+
+    # Split-Brain Prevention:
+    # If the State Machine is enabled, it completely owns the connection timing.
+    # It must power cycle the board before connecting. Therefore, we defer connection.
+    # If the FSM is disabled (e.g., pure software testing), we blind-connect immediately.
+    fsm_active = hasattr(mes_env, "state_machine") and mes_env.state_machine and mes_env.state_machine.enabled
+
+    if not fsm_active:
+        try:
+            transport.connect()
+            logger.info("[Fixture] DUT Transport Matrix connected successfully (Legacy Mode).")
+        except (TransportConnectionError, TransportTimeoutError) as e:
+            logger.warning(f"[Fixture] DUT Transport offline during setup. Reason: {e}")
+        except Exception as e:
+            logger.error(f"[Fixture] Unexpected transport failure: {e}")
+    else:
+        logger.info("[Fixture] FSM is active. Deferring Transport socket binding to State Machine.")
+
+    # Yield the transport wrapper to the test session
+    try:
+        yield transport
+    finally:
+        transport.disconnect()
