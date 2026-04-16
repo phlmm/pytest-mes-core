@@ -1,0 +1,60 @@
+# How to extend HW manifests
+
+In your projects/evse_board/conftest.py (or a local plugin.py for the custom project), add this:
+
+```python
+import pytest
+import logging
+from dataclasses import dataclass, field
+from pytest_mes_core.telemetry.manifest import HardwareManifest, ComponentIdentity
+
+logger = logging.getLogger("evse_project")
+
+# 1. Define the Project-Specific Schema
+@dataclass
+class EvseManifest(HardwareManifest):
+    som: ComponentIdentity = field(default_factory=lambda: ComponentIdentity("Toradex iMX8 SOM"))
+    carrier_board: ComponentIdentity = field(default_factory=lambda: ComponentIdentity("EVSE Mainboard"))
+    pic_mcu: ComponentIdentity = field(default_factory=lambda: ComponentIdentity("PIC18 Coprocessor"))
+    plc_modem: ComponentIdentity = field(default_factory=lambda: ComponentIdentity("GreenPHY PLC Modem"))
+
+    def check_completeness(self) -> list[str]:
+        missing = []
+        for attr_name in ["som", "carrier_board", "pic_mcu", "plc_modem"]:
+            comp = getattr(self, attr_name)
+            if not comp.is_identified:
+                missing.append(comp.name)
+        return missing
+
+# 2. Automatically inject and scrape during OS boot
+@pytest.fixture(autouse=True)
+def inject_evse_manifest(dut_state_machine):
+    if not dut_state_machine:
+        return
+
+    def evse_manifest_parser(fsm):
+        logger.info("[EVSE] Injecting project-specific manifest schema...")
+
+        # DEPENDENCY INJECTION: We hand the core FSM our specific class
+        fsm.context.manifest = EvseManifest()
+
+        # Scrape Toradex Serial
+        som_dump = fsm.serial.safe_run("cat /proc/device-tree/serial-number", timeout_s=2.0)
+        if som_dump.ok:
+            fsm.context.manifest.som.serial_number = som_dump.stdout.strip()
+
+        # Scrape PIC Serial
+        pic_dump = fsm.serial.safe_run("i2cget -y 1 0x42 0x10 w", timeout_s=3.0)
+        if pic_dump.ok:
+            fsm.context.manifest.pic_mcu.serial_number = pic_dump.stdout.strip()
+
+        # Validate
+        missing = fsm.context.manifest.check_completeness()
+        if missing:
+            logger.warning(f"[EVSE] Missing serials: {', '.join(missing)}")
+        else:
+            logger.info("[EVSE] Board Genealogy successfully assembled!")
+
+    # Register our project logic with the core framework
+    dut_state_machine.register_context_validator(evse_manifest_parser)
+```

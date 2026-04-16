@@ -4,29 +4,49 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pytest-mes-core"
-version = "0.1.0"
+version = "0.1.1"
 description = "Enterprise MES framework core for hardware testing. Strict typing, JSONL telemetry, and zero-leakage."
 authors = [{name = "Filip Milev"}]
 requires-python = ">=3.11"
 dependencies = [
+    # --- Core Test Engine ---
     "pytest>=8.0.0",
     "pytest-html>=4.1.0",
     "pytest-timeout>=2.3.0",
-    "pytest-dependency",
-    "pytest-repeat",
+    "pytest-repeat>=0.9.3",
+    "pytest-rerunfailures>=13.0",  # Added for hardware-aware retries
+    "pytest-order>=1.2.0",         # Replaced abandoned pytest-dependency
+    "pytest-xdist>=3.5.0",         # Added for parallel jig execution
+
+    # --- Core Data & State ---
     "pydantic>=2.7.0",
-    "fabric",
-    "paramiko[all]",
+    "transitions>=0.9.0",
+    "graphviz>=0.20.1",            # Added for FSM crash visualizer
+    "tenacity>=8.2.3",
+
+    # --- Universal Transports ---
+    "fabric>=3.2.2",
+    "paramiko[all]>=3.4.0",
     "pyserial>=3.5",
-    "python-can>=4.3.0",
-    "tenacity",
-    # --- Hardware & Instrument Drivers ---
+]
+
+[project.optional-dependencies]
+# Optional hardware drivers.
+# Install on Linux jigs via: pip install pytest-mes-core[linux-hardware]
+linux-hardware = [
     "evdev>=1.7.0",
+    "gpiod>=2.1.3",
+    "python-can>=4.3.0",
+]
+# Install on Lab PCs via: pip install pytest-mes-core[instruments]
+instruments = [
     "pyvisa>=1.14.0",
     "pyvisa-py>=0.7.1",
-    "gpiod>=2.1.3",
-    "transitions",
-    "usbsdmux"
+    "usbsdmux>=24.1",
+]
+# Install everything: pip install pytest-mes-core[all]
+all = [
+    "pytest-mes-core[linux-hardware,instruments]"
 ]
 
 [project.entry-points.pytest11]
@@ -36,14 +56,37 @@ mes_core = "pytest_mes_core.plugin"
 [tool.hatch.build.targets.wheel]
 packages = ["src/pytest_mes_core"]
 
+# --- LINTING & FORMATTING (Highly Recommended) ---
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+select = ["E", "F", "I", "W"] # Flake8, Pyflakes, Isort, Warnings
+ignore = ["E501"] # Allow long strings (handled by line-length mostly)
+
 [tool.mypy]
 strict = true
+warn_return_any = true
+warn_unused_configs = true
+
+# Ignore missing stubs for hardware libraries that don't provide them
+[[tool.mypy.overrides]]
+module = [
+    "evdev.*",
+    "gpiod.*",
+    "pyvisa.*",
+    "usbsdmux.*",
+    "transitions.*",
+    "graphviz.*",
+    "fabric.*"
+]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 log_cli = true
 log_cli_level = "WARNING"  # Default to quiet unless something breaks
 log_cli_format = "%(asctime)s [%(levelname)8s] %(name)s: %(message)s"
 log_cli_date_format = "%H:%M:%S"
+
 # 1. Defeat the src/ layout trap by explicitly forcing it into the Python path
 pythonpath = ["src", "."]
 
@@ -51,5 +94,10 @@ pythonpath = ["src", "."]
 testpaths = ["tests"]
 
 # 3. Lobotomize the factory plugin during unit testing so it doesn't demand an Operator ID.
-# (We will manually test the plugin logic later using pytester).
 addopts = "-p no:mes_core -v --tb=short"
+
+# 4. Register custom markers to prevent pytest warnings during unit tests
+markers = [
+    "requires_state(state): Enforces physical hardware state (DutState).",
+    "hardware_retry(retries): Forces a dirty hard-reboot on failure before retrying."
+]

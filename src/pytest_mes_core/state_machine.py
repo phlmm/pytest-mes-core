@@ -13,6 +13,13 @@ from pytest_mes_core.transports import EphemeralSerialClient, EphemeralSSHClient
 from pytest_mes_core.transports import TransportTimeoutError, TransportConnectionError
 from pytest_mes_core.telemetry.manifest import HardwareManifest
 
+try:
+    from transitions.extensions import GraphMachine as Machine
+    HAS_GRAPHVIZ = True
+except ImportError:
+    from transitions import Machine
+    HAS_GRAPHVIZ = False
+
 logger = logging.getLogger("mes_core.state_machine")
 
 @dataclass
@@ -62,11 +69,13 @@ class BaseDutStateMachine(ABC):
 
         logger.debug(f"[State Machine] Initializing FSM. PSU: {self.psu is not None} | GPIO: {self.gpio is not None}")
 
-        self.machine = Machine(
+self.machine = Machine(
             model=self,
             states=self.STATES,
             initial=DutState.DIRTY,
-            send_event=True
+            send_event=True,
+            title="MES Hardware State Graph",
+            show_conditions=True
         )
 
         self.machine.add_transition('power_off', '*', DutState.POWER_OFF, before='_hw_power_off')
