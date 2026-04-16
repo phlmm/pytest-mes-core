@@ -1,0 +1,51 @@
+#Functional Gaps (What is Missing?)
+
+##    Bootloader (U-Boot/Barebox) REPL Abstraction:
+
+        Gap: You have uart_parser.py, but there is no explicit module for stateful bootloader interaction.
+
+        Impact: A standard V&V workflow requires interrupting the autoboot sequence to test fallback OS images, modify bootargs, switch A/B partitions, or test TFTP/NFS network booting before the Linux kernel even loads.
+
+##    OTA (Over-The-Air) & System Update Validation:
+
+        Gap: There is deep focus on bare-metal block flashing, but no high-level protocols for testing atomic partition updates in the field (e.g., RAUC, SWUpdate, Mender).
+
+        Impact: You must be able to trigger updates, cut power exactly at 50%, and verify that the system successfully rolls back via the hardware watchdog.
+
+##    Wireless Interfaces & Network Impairment:
+
+        Gap: The framework supports ethernet.py and can_bus.py, but completely lacks Wi-Fi (wpa_supplicant/NetworkManager), Bluetooth (bluetoothctl), or Cellular Modems (AT commands).
+
+        Impact: IoT edge devices are wireless. Validating RF interface states, connection roaming, and network degradation (via Linux tc/netem to simulate dropped packets/latency) is critical.
+
+##   Low-Speed Serial Buses (I2C / SPI):
+
+        Gap: Missing specific protocols for I2C and SPI buses (e.g., wrapping i2c-tools or spi-tools). Testing EEPROMs, external RTCs, or discrete ADCs often requires direct bus manipulation.
+
+##  Power Management (Suspend/Resume):
+
+        Gap: No protocol modules exist for testing Linux PM sleep states (Suspend-to-RAM, Suspend-to-Idle) and wake sources (e.g., waking the board via an RTC alarm or CAN frame).
+
+# What Can Be Improved (Strategic Recommendations)
+
+1. Asynchronous Real-Time Log Watchdogs (Kernel Panic Detection)
+
+    Current State: telemetry/post_mortem.py likely fetches logs after a test fails. Pytest is inherently synchronous.
+
+    Improvement: If the embedded device experiences a Kernel Panic while Pytest is waiting on an SSH command, the test just hangs until a timeout occurs. You should combine daemon.py and uart_parser.py into a background watcher that continuously tails the UART buffer. If Kernel panic - not syncing or Out of memory: Killed process appears, the test should fail instantly and trigger the post-mortem dump.
+
+2. Distributed Resource Locking for CI/CD Test Farms
+
+    Current State: host_adapters/mutex.py indicates local, file/thread-based locking for hardware access.
+
+    Improvement: If you scale this framework to a Jenkins/GitLab rack with 20 CI runners and 5 physical test boards, a local mutex will fail. You need a networked device reservation system (e.g., Redis-based distributed locks or integration with Labgrid/LAVA) so tests can dynamically request "any available i.MX8 board" without collisions.
+
+3. Fault Injection Extensibility
+
+    Improvement: Extend safety.py (assuming it controls relays) to actively introduce hardware faults. Validating how the software reacts to shorting CAN lines to ground, disconnecting USB data lines dynamically, or creating precise voltage drops on the power supply is mandatory for safety-critical (ISO 26262/IEC 62304) V&V.
+
+4. Emulation & Digital Twin Integration
+
+    Current State: You have tests/mocks/virtual_transport.py.
+
+    Improvement: Expand this to natively bridge with QEMU, Renode, or Verilator. This allows application software engineers to run the exact same pytest-mes-core test suite in a cloud CI pipeline without needing physical hardware, saving your lab resources for the final MES stages.
