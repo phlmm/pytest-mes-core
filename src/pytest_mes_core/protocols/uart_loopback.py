@@ -1,155 +1,98 @@
-# src/pytest_mes_core/protocols/uart_loopback.py
-import time
 import logging
-from typing import Dict, Any
+import time
+from typing import List, Dict
+from pytest_mes_core.transports import DutTransport
+from pytest_mes_core.host_adapters import HostPeripheralSerialAdapter
 
-from pytest_mes_core.transports import (
-    DutTransport,
-    EphemeralSerialClient,
-    TransportConnectionError,
-    TransportTimeoutError
-)
-from pytest_mes_core.protocols import ValidatorResult
+logger = logging.getLogger("mes_core.protocols.uart")
 
-logger = logging.getLogger("mes_core.protocols.uart_loopback")
+class UartTopologyValidator:
+    def __init__(self, dut: DutTransport, host_adapters: Dict[str, HostPeripheralSerialAdapter] = None):
+        self.dut = dut
+        self.host_adapters = host_adapters or {}
 
-class UartEchoValidator:
-    """
-    Validates physical UART/RS-232/RS-485 interfaces via hardware loopback.
-    Features surgical background process management, EMI-resistant host buffering,
-    and hardware-level framing error detection.
-    """
+    def configure_dut_interface(self, interface: str, baudrate: int = 115200) -> None:
+        logger.info(f"[DUT UART] Configuring Target Interface '{interface}' @ {baudrate}bps...")
 
-    @staticmethod
-    def verify_echo(
-        host_ser: EphemeralSerialClient,
-        dut: DutTransport,
-        dut_device: str,
-        test_string: str = "MES_UART_SYNC"
-    ) -> ValidatorResult:
+        # 1. TTY Configuration: Disable echo, ignore modem pins (clocal), enable rx (cread), disable flow control
+        stty_cmd = f"stty -F {interface} {baudrate} raw -echo -echoe -echok -icrnl -onlcr clocal cread -crtscts"
+        res = self.dut.safe_run(stty_cmd)
 
-        baudrate = host_ser.cfg.baudrate
-        context_data: Dict[str, Any] = {"dut_device": dut_device, "baudrate": baudrate}
-        pid_file = f"/tmp/mes_uart_echo_{dut_device.replace('/', '_')}.pid"
+        if not res.ok:
+            raise RuntimeError(f"Failed to configure {interface}: {res.stderr or res.stdout}")
 
-        logger.info(f"[UART] Initiating hardware loopback test on {dut_device} at {baudrate} baud...")
+    def _fire_and_reap(self, tx_node: str, rx_nodes: List[str], payload: bytes, timeout_s: float) -> bool:
+        hex_str = payload.hex().upper()
+        logger.debug(f"[RS485 TRACE] --- Preparing Payload [{hex_str}] ---")
 
-        try:
-            # ==========================================
-            # 1. CLEAN SLATE & STTY CONFIGURATION
-            # ==========================================
-            # raw: Disables kernel line-editing (canonical mode) so bytes pass through untouched
-            # -echo: Prevents the kernel from automatically echoing, avoiding double-echo infinite loops
-            logger.debug(f"[UART] Forcing DUT port {dut_device} into raw/no-echo mode...")
-            stty_cmd = f"stty -F {dut_device} {baudrate} raw -echo"
-            res_stty = dut.safe_run(stty_cmd, timeout_s=3.0)
+        # Arm RX Nodes
+        for rx in rx_nodes:
+            owner, iface = rx.split(":")
+            logger.debug(f"[RS485 TRACE] Arming RX Listener on {rx}...")
 
-            if res_stty.exited != 0:
-                logger.critical("="*60)
-                logger.critical(f"[UART] FATAL: Failed to configure DUT port {dut_device}!")
-                logger.critical(f"[UART] Does the port exist? Is the kernel UART driver loaded?")
-                logger.critical(f"[UART] Kernel Stderr: {res_stty.stderr.strip()}")
-                logger.critical("="*60)
-                return ValidatorResult(passed=False, error_msg=f"stty configuration failed: {res_stty.stderr.strip()}", context=context_data)
+            if owner == "host":
+                self.host_adapters[iface].clear_rx_buffer()
+            elif owner == "dut":
+                clean_iface = iface.replace("/", "_")
+                log = f"/tmp/uart_rx{clean_iface}.log"
+                self.dut.safe_run("killall -9 cat")
+                self.dut.safe_run(f"rm -f {log}")
+                self.dut.safe_run(f"setsid sh -c 'cat {iface} > {log}' >/dev/null 2>&1 &")
 
-            # ==========================================
-            # 2. SURGICAL BACKGROUND LOOPBACK
-            # ==========================================
-            # We spawn the echo process and capture its EXACT process ID into a temporary file.
-            # >/dev/null 2>&1 prevents open POSIX pipes from hanging the transport.
-            logger.debug(f"[UART] Spawning isolated background echo daemon on DUT...")
-            loopback_cmd = f"cat {dut_device} > {dut_device} 2>/dev/null & echo $! > {pid_file}"
-            dut.safe_run(loopback_cmd, timeout_s=3.0)
-            time.sleep(0.2) # Allow OS to context-switch and bind the file descriptor
+        time.sleep(0.3)
 
-            # ==========================================
-            # 3. HOST PC: FLUSH & TRANSMIT
-            # ==========================================
-            if not host_ser.is_connected:
-                err_msg = "Host PC Serial Adapter is closed or physically disconnected."
-                logger.error(f"[UART] {err_msg}")
-                return ValidatorResult(passed=False, error_msg=err_msg, context=context_data)
+        # Fire TX
+        logger.debug(f"[RS485 TRACE] Firing TX from {tx_node}...")
+        tx_owner, tx_iface = tx_node.split(":")
 
-            try:
-                # Lock the serial port so no background MES tasks steal our bytes
-                with host_ser.exclusive_raw_access() as raw_uart:
+        if tx_owner == "host":
+            self.host_adapters[tx_iface].send(payload)
+        elif tx_owner == "dut":
+            bash_hex = "".join([f"\\x{b:02X}" for b in payload])
+            self.dut.safe_run(f"printf '{bash_hex}' > {tx_iface}")
 
-                    raw_uart.reset_input_buffer()
-                    raw_uart.reset_output_buffer()
+        # Reap RX
+        all_passed = True
+        for rx in rx_nodes:
+            owner, iface = rx.split(":")
+            logger.debug(f"[RS485 TRACE] Reaping results from {rx}...")
 
-                    payload = (test_string + "\n").encode('utf-8')
-                    logger.debug(f"[UART Loopback] TX -> '{test_string}'")
-                    t0 = time.perf_counter()
+            if owner == "host":
+                if not self.host_adapters[iface].expect(payload, timeout_s):
+                    logger.error(f"[RS485 FAIL] {rx} failed to capture payload [{hex_str}] from {tx_node}.")
+                    all_passed = False
+                else:
+                    logger.info(f"[RS485 OK] {rx} successfully captured [{hex_str}]")
 
-                    raw_uart.write(payload)
-                    raw_uart.flush()
+            elif owner == "dut":
+                time.sleep(0.5)
+                # Kill the background cat stream safely
+                self.dut.safe_run("killall -9 cat")
 
-                    # 4. HOST PC: RECEIVE & DECODE
-                    raw_response = raw_uart.readline()
-                    latency = round((time.perf_counter() - t0) * 1000.0, 2)
+                clean_iface = iface.replace("/", "_")
+                res = self.dut.safe_run(f"hexdump -v -e '/1 \"%02X\"' /tmp/uart_rx{clean_iface}.log")
 
-                    response = raw_response.decode('utf-8', errors='replace').strip()
-                    context_data["raw_rx_bytes"] = raw_response.hex()
-                    context_data["decoded_rx"] = response
+                if hex_str not in res.stdout.upper():
+                    logger.error(f"[RS485 FAIL] {rx} failed to capture [{hex_str}] from {tx_node}. Hex Buffer: '{res.stdout}'")
+                    all_passed = False
+                else:
+                    logger.info(f"[RS485 OK] {rx} successfully captured [{hex_str}]")
 
-                    logger.debug(f"[UART Loopback] RX <- '{response}'")
+        return all_passed
 
-            except Exception as host_err:
-                # Catch pyserial exceptions (e.g., operator unplugs the USB to UART cable mid-test)
-                logger.critical("="*60)
-                logger.critical(f"[UART] FATAL: Host PC Adapter shattered during physical transmission!")
-                logger.critical(f"[UART] Was the FTDI/USB cable physically unplugged? Err: {host_err}")
-                logger.critical("="*60)
-                return ValidatorResult(passed=False, error_msg=f"Host PC Serial Fault: {host_err}", context=context_data)
+    def validate_topology(self, nodes: List[str], base_payload: bytes, timeout_s: float = 2.0) -> bool:
+        logger.info(f"[RS485 Topology] Validating Full Matrix for Nodes: {nodes}")
+        all_passed = True
 
-            # ==========================================
-            # 5. LOGICAL EVALUATION
-            # ==========================================
-            if not response:
-                logger.critical("="*60)
-                logger.critical(f"[UART] FATAL: Timeout! Zero bytes echoed back from DUT.")
-                logger.critical(f"[UART] Check physical TX/RX wiring, crossover cables (Null Modem), and voltage levels.")
-                logger.critical("="*60)
-                return ValidatorResult(passed=False, error_msg="Timeout: No echo received (Check TX/RX wiring).", context=context_data)
+        for index, tx_node in enumerate(nodes):
+            rx_nodes = [n for n in nodes if n != tx_node]
+            # Mutate the payload slightly for each pass to ensure we aren't reading stale buffers
+            current_payload = base_payload + bytes([index])
 
-            if test_string in response:
-                logger.info(f"[UART] Loopback synchronization verified in {latency}ms.")
-                return ValidatorResult(
-                    passed=True,
-                    metrics={"uart_latency_ms": latency},
-                    context=context_data
-                )
+            logger.info(f"[RS485 Topology] -> Round-Robin Pass {index+1}: TX: {tx_node} -> RX: {rx_nodes}")
 
-            # 🚨 FORENSIC EMI / FRAMING INTERCEPTOR 🚨
-            logger.critical("="*60)
-            logger.critical(f"[UART] FATAL: GARBAGE DATA RECEIVED! (Framing Error / EMI)")
-            logger.critical(f"[UART] Sent: {test_string}")
-            logger.critical(f"[UART] Read: {response}")
-            logger.critical(f"[UART] Raw Hex: {context_data['raw_rx_bytes']}")
-            logger.critical(f"[UART] Check for baudrate mismatches, missing ground pins, or severe EMI noise.")
-            logger.critical("="*60)
-            return ValidatorResult(
-                passed=False,
-                error_msg=f"Garbage response received: '{response}' (Check baudrate/EMI)",
-                context=context_data
-            )
+            if not self._fire_and_reap(tx_node, rx_nodes, current_payload, timeout_s):
+                all_passed = False
+            time.sleep(0.2)
 
-        except TransportTimeoutError:
-            logger.critical("[UART] FATAL: DUT hung while configuring UART loopback. Kernel locked?")
-            return ValidatorResult(passed=False, error_msg="DUT hung while configuring UART loopback.", context=context_data)
-        except TransportConnectionError as e:
-            logger.critical(f"[UART] FATAL: Transport pipe shattered during UART setup: {e}")
-            return ValidatorResult(passed=False, error_msg=f"Transport pipe shattered during UART setup: {e}", context=context_data)
-
-        finally:
-            # ==========================================
-            # 6. SURGICAL ZERO-LEAKAGE TEARDOWN
-            # ==========================================
-            if dut.is_connected:
-                try:
-                    logger.debug(f"[UART] ZERO-LEAKAGE: Releasing DUT loopback on {dut_device}.")
-                    # Surgically kill ONLY the specific background process we spawned
-                    dut.safe_run(f"kill -9 $(cat {pid_file} 2>/dev/null) >/dev/null 2>&1 || true", timeout_s=3.0)
-                    dut.safe_run(f"rm -f {pid_file} >/dev/null 2>&1 || true", timeout_s=3.0)
-                except Exception as cleanup_err:
-                    logger.debug(f"[UART] Loopback cleanup failed (Transport likely dead): {cleanup_err}")
+        return all_passed

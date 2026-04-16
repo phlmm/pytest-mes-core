@@ -109,7 +109,7 @@ class EphemeralSSHClient:
     # ==========================================
     # COMMAND EXECUTION
     # ==========================================
-    def safe_run(self, cmd: str, timeout_s: float = 30.0, **kwargs: Any) -> CommandResult:
+    def safe_run(self, cmd: str, timeout_s: float = 30.0, check_exit_code: bool = False, **kwargs: Any) -> CommandResult:
         """
         Synchronous execution mapped to exact Domain Exceptions.
         Logs every command execution directly to the target's systemd journal for forensic auditing.
@@ -123,14 +123,15 @@ class EphemeralSSHClient:
         kwargs.setdefault('hide', True)
         kwargs.setdefault('warn', True)
 
-        # 1. Forensic Journal Interceptor
-        # Escape single quotes so complex commands don't break the logger syntax
-        escaped_cmd = cmd.replace("'", "'\\''")
+        # 1. Forensic Journal Interceptor (Truncated to prevent Base64 spam)
+        log_cmd = cmd if len(cmd) < 256 else cmd[:253] + "..."
+        escaped_cmd = log_cmd.replace("'", "'\\''")
+
         # Use ';' instead of '&&' to guarantee execution even if the journal daemon is busy
         wrapped_cmd = f"logger -t MES_Factory 'EXEC: {escaped_cmd}' ; {cmd}"
 
-        # Matrix Tracing: Expose the clean shell command to Pytest (not the wrapped one)
-        logger.debug(f"[SSH] TX -> {cmd}")
+        # Matrix Tracing: Expose the clean shell command to Pytest
+        logger.debug(f"[SSH] TX -> {log_cmd}")
         t0 = time.perf_counter()
 
         try:
@@ -148,8 +149,8 @@ class EphemeralSSHClient:
             # Matrix Tracing
             logger.debug(f"[SSH] RX <- Exited {res.exited} in {duration}s")
 
-            # 4. Return the Immutable Contract (Using original 'cmd')
-            return CommandResult(
+            # 4. Construct the Immutable Contract
+            result = CommandResult(
                 command=cmd,
                 stdout=res.stdout.strip() if res.stdout else "",
                 stderr=res.stderr.strip() if res.stderr else "",
@@ -158,11 +159,17 @@ class EphemeralSSHClient:
                 duration_s=duration
             )
 
+            # 5. Handle the explicit check_exit_code contract
+            if check_exit_code and not result.ok:
+                raise RuntimeError(f"Command '{log_cmd}' failed with exit code {result.exited}: {result.stderr}")
+
+            return result
+
         except CommandTimedOut as e:
             duration = round(time.perf_counter() - t0, 3)
-            logger.warning(f"[SSH] Execution timed out after {timeout_s}s: {cmd}")
+            logger.warning(f"[SSH] Execution timed out after {timeout_s}s: {log_cmd}")
 
-            return CommandResult(
+            result = CommandResult(
                 command=cmd,
                 stdout=e.result.stdout if hasattr(e, 'result') and e.result else "",
                 stderr=f"Command timed out after {timeout_s}s",
@@ -171,8 +178,13 @@ class EphemeralSSHClient:
                 duration_s=duration
             )
 
+            if check_exit_code:
+                raise RuntimeError(f"Command '{log_cmd}' timed out after {timeout_s}s")
+
+            return result
+
         except (SSHException, socket.error, EOFError, ThreadException) as e:
             self.disconnect()
-            err_msg = f"Physical TCP/SSH link severed during execution of '{cmd}': {e}"
+            err_msg = f"Physical TCP/SSH link severed during execution of '{log_cmd}': {e}"
             logger.critical(f"[SSH] FATAL: {err_msg}")
             raise TransportConnectionError(err_msg) from e

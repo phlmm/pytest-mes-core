@@ -1,225 +1,115 @@
-# src/pytest_mes_core/protocols/can_bus.py
-import time
-import re
 import logging
-from typing import Dict, Any, List
-
-from pytest_mes_core.transports import (
-    DutTransport,
-    TransportConnectionError,
-    TransportTimeoutError
-)
-from pytest_mes_core.protocols import ValidatorResult
-
-# Assuming HostCanAdapter is defined elsewhere in your framework
+import time
+from typing import List, Dict
+from pytest_mes_core.transports import DutTransport
 from pytest_mes_core.host_adapters import HostCanAdapter
 
 logger = logging.getLogger("mes_core.protocols.can")
 
-class CanBusValidator:
-    """
-    Validates physical CAN/CAN-FD interfaces.
-    Features isolated TX/RX testing, race-condition-free background polling,
-    and deep hardware error counter scraping.
-    """
+class CanTopologyValidator:
+    def __init__(self, dut: DutTransport, host_adapters: Dict[str, HostCanAdapter] = None):
+        self.dut = dut
+        self.host_adapters = host_adapters or {}
 
-    @staticmethod
-    def verify_bidirectional_link(
-        dut: DutTransport,
-        host_can: HostCanAdapter,
-        dut_interface: str = "can0",
-        test_id: int = 0x123,
-        payload: List[int] = [0xDE, 0xAD, 0xBE, 0xEF],
-        timeout_s: float = 2.0
-    ) -> ValidatorResult:
+    def configure_dut_interface(self, interface: str, bitrate: int = 500000) -> None:
+        logger.info(f"[DUT CAN] Configuring Target Interface '{interface}' @ {bitrate}bps...")
 
-        logger.info(f"[CAN] Initializing Host <-> DUT link on {dut_interface} @ {host_can.bitrate}bps")
-        context_data: Dict[str, Any] = {}
-        metrics: Dict[str, float] = {}
+        # 1. Self-Healing: Clear hardware error states
+        self.dut.safe_run(f"ip link set {interface} down")
+        time.sleep(0.1)
 
-        # Format payload for `cansend` (e.g., "DE.AD.BE.EF")
-        payload_str = ".".join([f"{b:02X}" for b in payload])
-        dump_file = f"/tmp/can_rx_{test_id}.log"
+        # 2. Apply Bitrate
+        res_cfg = self.dut.safe_run(f"ip link set {interface} type can bitrate {bitrate}")
+        if not res_cfg.ok:
+            raise RuntimeError(f"Failed to set bitrate {bitrate} on {interface}: {res_cfg.stderr or res_cfg.stdout}")
 
-        try:
-            if not host_can.bus:
-                err_msg = "Host PC CAN adapter is not initialized."
-                logger.error(f"[CAN] {err_msg}")
-                return ValidatorResult(passed=False, error_msg=err_msg)
+        # 3. Bring UP
+        res_up = self.dut.safe_run(f"ip link set {interface} up")
+        if not res_up.ok:
+            raise RuntimeError(f"Failed to bring {interface} UP: {res_up.stderr or res_up.stdout}")
 
-            # ==========================================
-            # 1. ZERO-STATE INITIALIZATION
-            # ==========================================
-            # Force the link down before attempting to change the bitrate
-            logger.debug(f"[CAN] Forcing {dut_interface} down to reset state...")
-            dut.safe_run(f"ip link set {dut_interface} down", timeout_s=5.0)
+        # 4. Mathematical Verification
+        verify = self.dut.safe_run(f"ip link show {interface}")
+        if "UP" not in verify.stdout:
+            raise RuntimeError(f"Hardware Fault: {interface} refused to transition to UP state.")
 
-            logger.debug(f"[CAN] Bringing up {dut_interface} at {host_can.bitrate} bps...")
-            res_up = dut.safe_run(
-                f"ip link set {dut_interface} up type can bitrate {host_can.bitrate}",
-                timeout_s=5.0
-            )
+    def teardown_dut_interface(self, interface: str) -> None:
+        """Zero-leakage teardown. Returns the Target PCB to a clean state."""
+        logger.debug(f"[DUT CAN] Tearing down Target '{interface}'...")
+        self.dut.safe_run(f"ip link set {interface} down")
 
-            if not res_up.ok:
-                err_msg = f"Failed to configure {dut_interface}. Missing kernel driver?"
-                logger.error(f"[CAN] {err_msg}")
-                return ValidatorResult(
-                    passed=False,
-                    error_msg=err_msg,
-                    context={"ip_link_stderr": res_up.stderr, "ip_link_stdout": res_up.stdout}
-                )
+    def _fire_and_reap(self, tx_node: str, rx_nodes: List[str], can_id: int, payload: bytes, timeout_s: float) -> bool:
+        hex_data = "".join([f"{b:02X}" for b in payload])
+        linux_frame = f"{can_id:03X}#{hex_data}"
 
-            # ==========================================
-            # 2. ISOLATED TEST: DUT TX -> HOST RX
-            # ==========================================
-            logger.debug("[CAN] Phase 1: Testing DUT Transmission...")
+        logger.debug(f"[CAN TRACE] --- Preparing Frame [{linux_frame}] ---")
 
-            # Flush stale frames from the Host PC Python buffer
-            flushed = 0
-            while host_can.bus.recv(timeout=0.01):
-                flushed += 1
-            if flushed > 0:
-                logger.debug(f"[CAN] Flushed {flushed} stale frames from host buffer.")
+        # 1. Arm RX Nodes
+        for rx in rx_nodes:
+            owner, iface = rx.split(":")
+            logger.debug(f"[CAN TRACE] Arming RX Listener on {rx}...")
+            if owner == "host":
+                self.host_adapters[iface].clear_rx_buffer()
+            elif owner == "dut":
+                log = f"/tmp/can_rx_{iface}.log"
+                # 🚨 THE FIX: Kill old daemons, use setsid to escape SSH termination!
+                self.dut.safe_run("killall -9 candump")
+                self.dut.safe_run(f"rm -f {log}")
+                self.dut.safe_run(f"setsid sh -c 'candump {iface} -n 1 > {log}' >/dev/null 2>&1 &")
 
-            # Command DUT to send the frame
-            logger.debug(f"[CAN] Commanding DUT to transmit test frame: {test_id:03X}#{payload_str}")
-            dut.safe_run(f"cansend {dut_interface} {test_id:03X}#{payload_str}")
+        # Give the daemon time to bind to the socket
+        time.sleep(0.3)
 
-            # Host awaits reception
-            t_end = time.perf_counter() + timeout_s
-            rx_msg = None
-            while time.perf_counter() < t_end:
-                rx_msg = host_can.bus.recv(timeout=0.1)
-                if rx_msg and rx_msg.arbitration_id == test_id:
-                    break
+        # 2. Fire TX
+        logger.debug(f"[CAN TRACE] Firing TX from {tx_node}...")
+        tx_owner, tx_iface = tx_node.split(":")
+        if tx_owner == "host":
+            self.host_adapters[tx_iface].send(can_id, payload)
+        elif tx_owner == "dut":
+            res = self.dut.safe_run(f"cansend {tx_iface} {linux_frame}")
+            if not res.ok:
+                logger.error(f"[DUT CAN FAIL] cansend failed on {tx_iface}. stderr: {res.stderr}")
 
-            dut_tx_passed = rx_msg is not None
-            if dut_tx_passed:
-                logger.debug("[CAN] Host successfully received DUT transmission.")
+        # 3. Reap RX
+        all_passed = True
+        for rx in rx_nodes:
+            owner, iface = rx.split(":")
+            logger.debug(f"[CAN TRACE] Reaping results from {rx}...")
 
-            # ==========================================
-            # 3. ISOLATED TEST: HOST TX -> DUT RX
-            # ==========================================
-            logger.debug("[CAN] Phase 2: Testing DUT Reception...")
+            if owner == "host":
+                if not self.host_adapters[iface].expect(can_id, payload, timeout_s):
+                    logger.error(f"[CAN FAIL] {rx} failed to capture [{linux_frame}] from {tx_node}.")
+                    all_passed = False
+                else:
+                    logger.info(f"[CAN OK] {rx} successfully captured [{linux_frame}]")
 
-            # RACE CONDITION FIX:
-            # We use a hardware filter (,<ID>~7FF) so candump ONLY captures the exact packet we want.
-            # We run it in the background, but we will cleanly SIGINT it later to force a buffer flush.
-            logger.debug(f"[CAN] Arming DUT background listener (candump) for ID {test_id + 1:03X}...")
-            dut.safe_run(f"candump {dut_interface},{test_id + 1:03X}~7FF > {dump_file} 2>/dev/null &")
-            time.sleep(0.2) # Allow process to spawn and bind to the CAN socket
+            elif owner == "dut":
+                # Wait for file flush, then explicitly kill the listener if it didn't auto-exit
+                time.sleep(0.5)
+                self.dut.safe_run("killall -9 candump")
 
-            # Host transmits
-            import can # Lazy import to avoid global dependency issues
-            host_msg = can.Message(arbitration_id=test_id + 1, data=payload, is_extended_id=False)
-            logger.debug(f"[CAN] Host PC transmitting frame {test_id + 1:03X} to DUT...")
-            host_can.bus.send(host_msg)
+                res = self.dut.safe_run(f"cat /tmp/can_rx_{iface}.log")
+                stdout_clean = res.stdout.strip()
 
-            time.sleep(0.5) # Allow DUT kernel to process the interrupt
+                if hex_data.upper() not in stdout_clean.replace(" ", "").upper() or f"{can_id:03X}" not in stdout_clean.upper():
+                    logger.error(f"[CAN FAIL] {rx} failed to capture [{linux_frame}] from {tx_node}. Buffer: '{stdout_clean}'")
+                    all_passed = False
+                else:
+                    logger.info(f"[CAN OK] {rx} successfully captured [{linux_frame}]")
 
-            # RACE CONDITION FIX: Cleanly terminate candump.
-            # SIGINT (2) forces candump to flush its file buffer to disk before dying. SIGKILL (9) does not.
-            logger.debug("[CAN] Sending SIGINT to candump to flush file buffers to disk...")
-            dut.safe_run("killall -2 candump >/dev/null 2>&1 || true", timeout_s=3.0)
+        return all_passed
 
-            # Check DUT dump file
-            dump_res = dut.safe_run(f"cat {dump_file} 2>/dev/null", timeout_s=5.0)
+    def validate_topology(self, nodes: List[str], can_id_base: int, payload: bytes, timeout_s: float = 2.0) -> bool:
+        logger.info(f"[CAN Topology] Validating Full Matrix for Nodes: {nodes}")
+        all_passed = True
+        for index, tx_node in enumerate(nodes):
+            rx_nodes = [n for n in nodes if n != tx_node]
+            current_id = can_id_base + index
 
-            # Use upper() to make sure hex casing ("124" vs "124") doesn't cause a false negative
-            dut_rx_passed = f"{test_id + 1:03X}" in dump_res.stdout.upper() if dump_res.ok else False
-            if dut_rx_passed:
-                logger.debug("[CAN] DUT successfully captured Host transmission.")
+            logger.info(f"[CAN Topology] -> Round-Robin Pass {index+1}: TX: {tx_node} -> RX: {rx_nodes}")
 
-            # ==========================================
-            # 4. KERNEL STATISTICS SCRAPING
-            # ==========================================
-            stats = CanBusValidator._scrape_can_stats(dut, dut_interface)
-            context_data.update(stats["context"])
-            metrics.update(stats["metrics"])
+            if not self._fire_and_reap(tx_node, rx_nodes, current_id, payload, timeout_s):
+                all_passed = False
+            time.sleep(0.2)
 
-            metrics["dut_tx_ok"] = 1.0 if dut_tx_passed else 0.0
-            metrics["dut_rx_ok"] = 1.0 if dut_rx_passed else 0.0
-
-            # ==========================================
-            # 5. LOGICAL EVALUATION
-            # ==========================================
-            if not dut_tx_passed or not dut_rx_passed:
-                err = []
-                if not dut_tx_passed: err.append("DUT failed to Transmit (Check TX pin/transceiver)")
-                if not dut_rx_passed: err.append("DUT failed to Receive (Check RX pin/transceiver)")
-
-                # 🚨 FORENSIC HARDWARE INTERCEPTOR 🚨
-                # Check for physical bus faults (e.g., CAN_H and CAN_L shorted together or missing termination)
-                bus_state = stats["context"].get("bus_state", "UNKNOWN")
-                if bus_state in ["ERROR-PASSIVE", "BUS-OFF"]:
-                    err.append(f"Bus entered fatal physical state: {bus_state}")
-                    logger.critical("="*60)
-                    logger.critical(f"[CAN] FATAL: Electrical fault detected on CAN bus! State: {bus_state}")
-                    logger.critical("[CAN] Check wiring harness, termination resistors, and transceiver power.")
-                    logger.critical("="*60)
-
-                final_error = " | ".join(err)
-                logger.error(f"[CAN] Link verification failed: {final_error}")
-                return ValidatorResult(passed=False, error_msg=final_error, metrics=metrics, context=context_data)
-
-            logger.info("[CAN] Bidirectional link verified successfully. Zero physical errors detected.")
-            return ValidatorResult(passed=True, metrics=metrics, context=context_data)
-
-        except TransportTimeoutError:
-            logger.critical(f"[CAN] FATAL: DUT completely unresponsive (Transport Timeout). Kernel Panic?")
-            return ValidatorResult(passed=False, error_msg="DUT completely unresponsive (Transport Timeout).", context=context_data)
-
-        except TransportConnectionError as e:
-            logger.critical(f"[CAN] FATAL: CATASTROPHIC FAULT. Transport pipe shattered during CAN test: {e}")
-            return ValidatorResult(passed=False, error_msg=f"Transport pipe shattered during CAN test: {e}", context=context_data)
-
-        finally:
-            # ==========================================
-            # 6. ZERO-LEAKAGE TEARDOWN
-            # ==========================================
-            try:
-                logger.debug(f"[CAN] ZERO-LEAKAGE: Tearing down interface {dut_interface} and cleaning artifacts.")
-                # We use SIGKILL (-9) here just in case the SIGINT didn't work earlier
-                dut.safe_run("killall -9 candump >/dev/null 2>&1 || true", timeout_s=3.0)
-                dut.safe_run(f"rm -f {dump_file} >/dev/null 2>&1 || true", timeout_s=3.0)
-                dut.safe_run(f"ip link set {dut_interface} down >/dev/null 2>&1 || true", timeout_s=5.0)
-            except Exception as teardown_err:
-                logger.warning(f"[CAN] Teardown skipped (Transport likely dead): {teardown_err}")
-
-    @staticmethod
-    def _scrape_can_stats(dut: DutTransport, interface: str) -> Dict[str, Any]:
-        """
-        Scrapes `ip -details -statistics link show can0` to extract
-        hardware-level CAN frame drops, overruns, and bus states.
-        """
-        result = {"metrics": {}, "context": {}}
-        res = dut.safe_run(f"ip -details -statistics link show {interface}", timeout_s=5.0)
-
-        if not res.ok or not res.stdout:
-            return result
-
-        output = res.stdout.strip()
-        result["context"]["ip_link_dump"] = output
-
-        # Extract Bus State (e.g., ERROR-ACTIVE, ERROR-PASSIVE, BUS-OFF)
-        state_match = re.search(r'can state (\S+)', output)
-        if state_match:
-            result["context"]["bus_state"] = state_match.group(1)
-
-        # Extract RX/TX Error counters (Standard Linux format)
-        try:
-            lines = output.split('\n')
-            for i, line in enumerate(lines):
-                if line.strip().startswith("RX:"):
-                    rx_vals = lines[i+1].split()
-                    result["metrics"]["can_rx_errors"] = float(rx_vals[2])
-                    result["metrics"]["can_rx_dropped"] = float(rx_vals[3])
-                    result["metrics"]["can_rx_overrun"] = float(rx_vals[4])
-                elif line.strip().startswith("TX:"):
-                    tx_vals = lines[i+1].split()
-                    result["metrics"]["can_tx_errors"] = float(tx_vals[2])
-                    result["metrics"]["can_tx_dropped"] = float(tx_vals[3])
-        except (IndexError, ValueError) as e:
-            logger.debug(f"[CAN] Failed to parse iproute2 stats: {e}")
-
-        return result
+        return all_passed

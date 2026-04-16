@@ -16,8 +16,8 @@ from .executable import CustomPayloadValidator
 
 # 3. Networking & Communications
 from .ethernet import EthernetValidator
-from .can_bus import CanBusValidator
-from .uart_loopback import UartEchoValidator
+from .can_bus import CanTopologyValidator
+from .uart_loopback import UartTopologyValidator
 
 # 4. Silicon & Memory
 from .memory import NativeMemoryValidator
@@ -48,8 +48,8 @@ __all__ = [
 
     # Networking & Communications
     "EthernetValidator",
-    "CanBusValidator",
-    "UartEchoValidator",
+    "CanTopologyValidator",
+    "UartTopologyValidator",
 
     # Silicon & Memory
     "NativeMemoryValidator",

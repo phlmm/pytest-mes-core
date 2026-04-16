@@ -115,6 +115,7 @@ class EthernetConfig(BaseHardwareConfig):
 
 class CanConfig(BaseHardwareConfig):
     dut_interface: str = "can0"
+    bitrate: int = Field(default=500000, gt=0) # 🚨 Added to sync with Host
     test_id: int = Field(default=0x123)
     payload: List[int] = Field(default=[0xDE, 0xAD, 0xBE, 0xEF])
     timeout_s: float = Field(default=2.0, gt=0)
@@ -246,8 +247,16 @@ class BootProfilerConfig(BaseHardwareConfig):
     milestones: Dict[str, str] = Field(default_factory=dict)
 
 class HostCanConfig(BaseHardwareConfig):
-    interface: str = Field(default="can0", description="Host socketcan interface")
+    interface: str = Field(description="e.g., 'can0' (SocketCAN) or '/dev/ttyUSB0' (SLCAN)")
+    bustype: Literal["socketcan", "slcan"] = Field(
+        default="socketcan",
+        description="Backend for python-can. Use 'slcan' for virtual serial CAN dongles."
+    )
     bitrate: int = Field(default=500000, gt=0)
+    tty_baudrate: int = Field(
+        default=2000000,
+        description="Required for 'slcan' to talk to the FTDI/CH340 chip. WeAct Studio uses 2000000."
+    )
 
 class HostSerialConfig(BaseHardwareConfig):
     port: str = Field(description="Host PC physical UART port (e.g., /dev/ttyUSB0)")

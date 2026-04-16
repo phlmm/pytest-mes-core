@@ -15,9 +15,10 @@ from .base import (
 )
 
 from .mutex import hardware_mutex, HostMutexTimeoutError
-from .can_bus import HostCanAdapter, HostCanError
+from .host_can_bus import HostCanAdapter
 from .hid_scanner import HeadlessBarcodeScanner, HidScannerTimeoutError
 from .serial_uart import HostSerialAdapter, HostSerialError
+from .peripheral_serial import HostPeripheralSerialAdapter
 from .safety import EStopWatchdog
 from .openocd import OpenOcdDaemonAdapter, HostOpenOcdError
 from .microchip import HostPickitAdapter
@@ -30,7 +31,6 @@ __all__ = [
     "HostResourceBusyError",
     "HostHardwareDisconnectError",
     "HostMutexTimeoutError",
-    "HostCanError",
     "HidScannerTimeoutError",
     "HostSerialError",
 
@@ -41,6 +41,7 @@ __all__ = [
     "HostCanAdapter",
     "HeadlessBarcodeScanner",
     "HostSerialAdapter",
+    "HostPeripheralSerialAdapter",
     "EStopWatchdog",
 
     # JTAG

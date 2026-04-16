@@ -85,13 +85,12 @@ class EphemeralSerialClient:
         self.ser.write(f"{cmd}\n".encode('utf-8'))
         self.ser.flush()
 
-    # 🚨 SOTA FIX: Signature now perfectly matches DutTransport API
-    def safe_run(self, cmd: str, timeout_s: float = 30.0, **kwargs: Any) -> CommandResult:
+    def safe_run(self, cmd: str, timeout_s: float = 30.0, check_exit_code: bool = False, **kwargs: Any) -> CommandResult:
         """
         Executes a command and mathematically parses the exit code over a raw serial line.
+        Mirrors SSH transport: dynamically raises RuntimeErrors if check_exit_code is True.
         """
         expected_prompt = kwargs.get("expected_prompt", getattr(self.cfg, "os_shell_prompt", "~#"))
-        check_exit_code = kwargs.get("check_exit_code", True)
 
         if not self.is_connected or self.ser is None:
             raise TransportConnectionError("Serial port is closed.")
@@ -112,8 +111,9 @@ class EphemeralSerialClient:
 
         is_uboot = any(p in expected_prompt for p in ["=>", "U-Boot", "barebox", "Verdin"])
 
-        # 🚨 SOTA Trick: Inject an echo to parse the actual Linux exit code over serial!
-        if check_exit_code and not is_uboot:
+        # 🚨 SOTA Trick: Always inject the echo so we can build an accurate CommandResult,
+        # even if check_exit_code is False (so the caller can inspect result.exited later).
+        if not is_uboot:
             magic_delim = "MES_EXIT_CODE:"
             injected_cmd = f"{cmd} ; echo {magic_delim}$?"
             self.write_line(injected_cmd)
@@ -126,15 +126,16 @@ class EphemeralSerialClient:
             duration = round(time.perf_counter() - t0, 3)
 
             clean_lines = []
-            exited = 0 if check_exit_code else 0
+            exited = -1 if is_uboot else 0
 
             for line in raw_output.split('\n'):
                 clean = line.strip()
+
                 # Strip echoed command and prompt
                 if not clean or clean == cmd or clean == injected_cmd or expected_prompt in clean:
                     continue
 
-                if check_exit_code and not is_uboot and "MES_EXIT_CODE:" in clean:
+                if not is_uboot and "MES_EXIT_CODE:" in clean:
                     try:
                         exited = int(clean.split("MES_EXIT_CODE:")[1])
                     except ValueError:
@@ -148,8 +149,10 @@ class EphemeralSerialClient:
             # Heuristic failure fallback for U-Boot since we can't echo $?
             if is_uboot and ("Unknown command" in stdout or "Error" in stdout):
                 exited = 1
+            elif is_uboot:
+                exited = 0
 
-            return CommandResult(
+            result = CommandResult(
                 command=cmd,
                 stdout=stdout,
                 stderr="", # UART physically multiplexes stderr into stdout
@@ -158,10 +161,17 @@ class EphemeralSerialClient:
                 duration_s=duration
             )
 
+            # 🚨 THE FIX: Enforce the explicit API Contract
+            if check_exit_code and not result.ok:
+                raise RuntimeError(f"UART Command '{cmd}' failed with exit code {result.exited}:\n{result.stdout}")
+
+            return result
+
         except TransportTimeoutError as e:
             duration = round(time.perf_counter() - t0, 3)
             logger.warning(f"[UART] Execution timed out after {timeout_s}s: {cmd}")
-            return CommandResult(
+
+            result = CommandResult(
                 command=cmd,
                 stdout=self.live_buffer,
                 stderr=str(e),
@@ -169,6 +179,12 @@ class EphemeralSerialClient:
                 ok=False,
                 duration_s=duration
             )
+
+            # 🚨 THE FIX: Enforce the explicit API Contract on Timeouts
+            if check_exit_code:
+                raise RuntimeError(f"UART Command '{cmd}' timed out after {timeout_s}s")
+
+            return result
 
     def flush_buffers(self) -> None:
         if self.ser and self.ser.is_open:
