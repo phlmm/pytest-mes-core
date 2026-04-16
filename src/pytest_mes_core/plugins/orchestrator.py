@@ -119,5 +119,41 @@ def enforce_physical_state(
     # Forensic Check: Intercept failures and poison the FSM state
     rep_call = getattr(request.node, "rep_call", None)
     if rep_call and rep_call.failed:
+
+        # Dump the State Graph on Failure
+        if hasattr(dut_state_machine.machine, 'get_graph'):
+            try:
+                import os
+                os.makedirs("artifacts", exist_ok=True)
+
+                # Clean the test name for the filesystem
+                clean_name = request.node.name.replace("/", "_").replace(":", "_").replace("[", "_").replace("]", "")
+                graph_path = f"artifacts/fsm_crash_{clean_name}.png"
+
+                # Generate and save the flowchart
+                dut_state_machine.machine.get_graph().draw(graph_path, prog='dot')
+                logger.critical(f"[FSM] Crash graph generated: {graph_path}")
+            except Exception as e:
+                logger.debug(f"[FSM] Failed to generate graphviz image: {e}")
+
+        # Force a hard reset before the next test
         dut_state_machine.mark_dirty()
         logger.warning(f"[Router] Test '{request.node.name}' failed. State marked DIRTY.")
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """
+    Translates the MES-specific hardware_retry marker into the pytest-rerunfailures engine.
+    This keeps the core framework API decoupled from third-party plugins.
+    """
+    for item in items:
+        retry_marker = item.get_closest_marker("hardware_retry")
+        if retry_marker:
+            # Extract the number of retries (default to 1 if not specified)
+            retries = 1
+            if retry_marker.args:
+                retries = retry_marker.args[0]
+            elif "retries" in retry_marker.kwargs:
+                retries = retry_marker.kwargs["retries"]
+
+            # Inject the backend flaky marker
+            item.add_marker(pytest.mark.flaky(reruns=retries))

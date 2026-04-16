@@ -83,6 +83,7 @@ def mes_record(
     # Use nodeid to capture parameterized variants perfectly (e.g., test_uart[ttymxc3])
     test_node_id = request.node.nodeid
 
+    execution_count = getattr(request.node, "execution_count", 1)
     ctx = telemetry_sink.context if telemetry_sink else None
     record = TestRecord(test_name=test_node_id, iteration=iteration, station_context=ctx)
 
@@ -90,6 +91,15 @@ def mes_record(
     setattr(request.node, "mes_telemetry_record", record)
 
     t0 = time.perf_counter()
+
+    # Update our TestRecord to track the specific execution attempt
+    record = TestRecord(test_name=test_node_id, iteration=execution_count, station_context=ctx)
+    record.context["is_retry"] = execution_count > 1
+
+    if execution_count > 1:
+        logger.warning("="*60)
+        logger.warning(f"[FSM Router] EXECUTING HARDWARE RETRY (Attempt {execution_count})")
+        logger.warning("="*60)
 
     # STRICT ZERO-LEAKAGE TRY/FINALLY CONTRACT
     try:

@@ -9,7 +9,8 @@ regardless of whether it is sitting at a U-Boot prompt or a fully booted Linux O
 
 import pytest
 import logging
-from typing import Generator, Optional
+from typing import  Optional, Any
+from dataclasses import dataclass
 
 from pytest_mes_core.config import StationEnvironment
 from pytest_mes_core.instruments.power_supplies import ScpiPowerSupply
@@ -22,6 +23,60 @@ from pytest_mes_core.transports import (
 )
 
 logger = logging.getLogger("mes_core.hardware")
+
+@dataclass
+class CommandResult:
+    command: str
+    exited: int
+    stdout: str
+    stderr: str
+    ok: bool
+
+class MockTransport:
+    """
+    A synthetic transport layer for Dry-Run CI/CD testing.
+    Intercepts bash commands and returns fake responses based on regex matching.
+    """
+    def __init__(self):
+        self.is_connected = False
+
+        # Dictionary of command substrings to fake stdout responses
+        self._mock_responses = {
+            "cat /proc/device-tree/serial-number": "MOCK-TORADEX-9999",
+            "swupdate -g": "testing\nswupdate\nB",
+            "echo MES_HEARTBEAT": "MES_HEARTBEAT",
+            "i2cget -y 1 0x42": "0xABCD"
+        }
+
+    def connect(self):
+        self.is_connected = True
+        logger.info("[Mock Transport] Virtual socket bound.")
+
+    def disconnect(self):
+        self.is_connected = False
+
+    def safe_run(self, cmd: str, timeout_s: float = 5.0, check_exit_code: bool = False) -> CommandResult:
+        logger.debug(f"[Mock] Executing: {cmd}")
+
+        # Search our mock registry for a match
+        stdout = "MOCK_OK"
+        for key, response in self._mock_responses.items():
+            if key in cmd:
+                stdout = response
+                break
+
+        # Simulate a slight execution delay
+        import time; time.sleep(0.05)
+
+        res = CommandResult(command=cmd, exited=0, stdout=stdout, stderr="", ok=True)
+        if check_exit_code and not res.ok:
+            raise RuntimeError(f"Mock command failed: {cmd}")
+        return res
+
+    def register_mock_response(self, command_substring: str, stdout: str):
+        """Allows test projects to inject their own fake hardware responses."""
+        self._mock_responses[command_substring] = stdout
+
 
 @pytest.fixture(scope="session")
 def psu_hardware(mes_env: StationEnvironment) -> Generator[Optional[ScpiPowerSupply], None, None]:
@@ -79,6 +134,7 @@ def serial_client(mes_env: StationEnvironment) -> Optional[EphemeralSerialClient
 
 @pytest.fixture(scope="session")
 def dut_transport(
+    request: pytest.FixtureRequest,
     mes_env: StationEnvironment,
     ssh_client: Optional[EphemeralSSHClient],
     serial_client: Optional[EphemeralSerialClient]
@@ -105,6 +161,15 @@ def dut_transport(
             temp_c = int(res.stdout.strip()) / 1000.0
             assert temp_c < 85.0
     """
+    if request.config.getoption("--mock-hardware"):
+        logger.warning("="*60)
+        logger.warning("[WARNING] --mock-hardware ENABLED. Bypassing physical connections!")
+        logger.warning("="*60)
+        transport = MockTransport()
+        transport.connect()
+        yield transport
+        transport.disconnect()
+        return
     if ssh_client and serial_client:
         transport = FailoverTransport(primary=ssh_client, fallback=serial_client)
     elif ssh_client:

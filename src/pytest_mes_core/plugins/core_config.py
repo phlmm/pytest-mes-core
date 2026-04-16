@@ -141,6 +141,10 @@ def pytest_configure(config: pytest.Config) -> None:
     config.option.log_cli_format = "%(asctime)s [%(levelname)7s] %(name)s: %(message)s"
     config.option.log_cli_date_format = "%H:%M:%S"
 
+    config.addinivalue_line(
+        "markers", "hardware_retry(retries): If a test fails, marks hardware DIRTY, forces a cold-boot, and retries."
+    )
+
     verbosity = config.getoption("verbose")
     if verbosity == 0:
         config.option.log_cli_level = "WARNING"
