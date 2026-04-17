@@ -151,7 +151,6 @@ class UuuTeziProvisioner(BaseProvisioner):
                 raw_uart.timeout = 0.5
                 raw_uart.write_timeout = 1.0
 
-                # 🚨 Use the new native method to clear everything
                 serial_client.flush_buffers()
 
                 t_end = time.perf_counter() + self.flash_timeout_s
@@ -161,14 +160,18 @@ class UuuTeziProvisioner(BaseProvisioner):
                 while time.perf_counter() < t_end:
 
                     # 1. LIVE LINE EXTRACTION
-                    # The client automatically reads hardware, sanitizes ANSI, and yields complete lines
                     for line in serial_client.read_clean_stream():
-                        print(f"\033[90m[DUT UART]\033[0m {line}", flush=True)
+                        logger.debug(f"[DUT UART] {line}")
                         last_ping_time = time.perf_counter()
+
+                        # 🚨 THE FIX: Check for the success signature on COMPLETED lines BEFORE they disappear!
+                        if "Successfully installed" in line or "Rebooting" in line or (success_prompt and success_prompt in line):
+                            logger.info("\n[TEZI] Installation Success Signature detected on completed line!")
+                            return True
 
                     # 2. PROMPT DETECTION (Using the client's live fragment buffer)
                     if not tail_command_sent and ("~ #" in serial_client.live_buffer or "root@" in serial_client.live_buffer):
-                        print(f"\033[90m[DUT UART]\033[0m {serial_client.live_buffer.strip()}", flush=True)
+                        logger.debug(f"[DUT UART] {serial_client.live_buffer.strip()}")
                         logger.info("\n[TEZI] TEZI Shell acquired! Injecting live log tracker...")
                         try:
                             raw_uart.write(b"tail -f /var/volatile/tezi.log\n")
@@ -180,10 +183,10 @@ class UuuTeziProvisioner(BaseProvisioner):
                         last_ping_time = time.perf_counter()
                         continue
 
-                    # 3. SUCCESS DETECTION
+                    # 3. SUCCESS DETECTION (For incomplete fragments, e.g., "login: " without a newline)
                     if "Successfully installed" in serial_client.live_buffer or "Rebooting" in serial_client.live_buffer or (success_prompt and success_prompt in serial_client.live_buffer):
-                        print(f"\033[90m[DUT UART]\033[0m {serial_client.live_buffer.strip()}", flush=True)
-                        logger.info(f"\n[TEZI] Installation Success Signature detected!")
+                        logger.debug(f"[DUT UART] {serial_client.live_buffer.strip()}")
+                        logger.info("\n[TEZI] Installation Success Signature detected in fragment!")
                         return True
 
                     # 4. ACTIVE PING (If the OS is silent)

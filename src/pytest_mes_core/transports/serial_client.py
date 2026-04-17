@@ -48,13 +48,24 @@ class EphemeralSerialClient:
     def is_connected(self) -> bool:
         return bool(self.ser and self.ser.is_open)
 
-    def expect(self, pattern: str, timeout_s: float = 5.0, blast_char: str = "") -> str:
+    def expect(
+        self,
+        pattern: str,
+        timeout_s: float = 5.0,
+        blast_char: str = "",
+        active_redraw: bool = True
+    ) -> str:
+        """
+        Active Hunter Expect Engine.
+        Scans for regex patterns while dynamically hitting [ENTER] to rescue buried prompts.
+        """
         if not self.is_connected or self.ser is None:
             raise TransportConnectionError("Serial port is closed.")
         if self._is_locked:
             raise RuntimeError("Cannot use expect() while UART is locked.")
 
-        pattern_bytes = pattern.encode('utf-8')
+        # Upgrade to Regex matching for highly flexible parsing
+        search_regex = re.compile(pattern)
         blast_bytes = blast_char.encode('utf-8') if blast_char else b""
 
         if blast_bytes:
@@ -66,18 +77,33 @@ class EphemeralSerialClient:
         logger.debug(f"[UART] Expecting '{pattern}' (Timeout: {timeout_s}s)...")
 
         t_end = time.perf_counter() + timeout_s
+        last_redraw_time = time.perf_counter()
         raw_buffer = bytearray()
 
         while time.perf_counter() < t_end:
+            # 1. Ingest available bytes
             if self.ser.in_waiting > 0:
                 raw_buffer.extend(self.ser.read(self.ser.in_waiting))
                 clean_buffer = self.ANSI_ESCAPE_B.sub(b'', raw_buffer)
+                decoded_buffer = clean_buffer.decode('utf-8', errors='replace')
 
-                if pattern_bytes in clean_buffer:
-                    return clean_buffer.decode('utf-8', errors='replace')
+                # 2. Regex search (handles fragmented/interleaved lines perfectly)
+                if search_regex.search(decoded_buffer):
+                    return decoded_buffer
 
-            time.sleep(0.01)
+            # 3. 🚨 THE FIX: Active Redraw Mechanism
+            # If we haven't seen the prompt in 1.5 seconds, the OS might be waiting
+            # for us, but the prompt was overwritten by kernel spam. Hit ENTER to redraw it.
+            now = time.perf_counter()
+            if active_redraw and (now - last_redraw_time) > 1.5:
+                self.ser.write(b"\n")
+                self.ser.flush()
+                last_redraw_time = now
 
+            # Sleep briefly to prevent CPU thrashing
+            time.sleep(0.05)
+
+        # 4. Timeout Failure Formatting
         dump = self.ANSI_ESCAPE_B.sub(b'', raw_buffer)[-200:].decode('utf-8', errors='replace').strip()
         logger.error(f"[UART] Timeout expecting '{pattern}'. Buffer yielded: {dump}")
         raise TransportTimeoutError(f"UART Expect Timeout: '{pattern}' not found.")
@@ -99,7 +125,6 @@ class EphemeralSerialClient:
     ) -> CommandResult:
         """
         Executes a command and mathematically parses the exit code over a raw serial line.
-        Mirrors SSH transport: dynamically raises RuntimeErrors if check_exit_code is True.
         """
         expected_prompt = kwargs.get("expected_prompt", getattr(self.cfg, "os_shell_prompt", "~#"))
 
@@ -114,7 +139,7 @@ class EphemeralSerialClient:
             self.ser.write(cmd.encode('utf-8'))
             self.ser.flush()
             try:
-                self.expect(expected_prompt, timeout_s=timeout_s)
+                self.expect(expected_prompt, timeout_s=timeout_s, active_redraw=False)
             except TransportTimeoutError:
                 pass
             duration = round(time.perf_counter() - t0, 3)
@@ -122,8 +147,7 @@ class EphemeralSerialClient:
 
         is_uboot = any(p in expected_prompt for p in ["=>", "U-Boot", "barebox", "Verdin"])
 
-        # 🚨 SOTA Trick: Always inject the echo so we can build an accurate CommandResult,
-        # even if check_exit_code is False (so the caller can inspect result.exited later).
+        # SOTA Trick: Always inject the echo so we can build an accurate CommandResult
         if not is_uboot:
             magic_delim = "MES_EXIT_CODE:"
             injected_cmd = f"{cmd} ; echo {magic_delim}$?"
@@ -133,7 +157,8 @@ class EphemeralSerialClient:
             self.write_line(cmd)
 
         try:
-            raw_output = self.expect(expected_prompt, timeout_s)
+            # Active redraw is safe here because safe_run expects the shell to return.
+            raw_output = self.expect(expected_prompt, timeout_s, active_redraw=True)
             duration = round(time.perf_counter() - t0, 3)
 
             clean_lines = []
@@ -172,7 +197,6 @@ class EphemeralSerialClient:
                 duration_s=duration
             )
 
-            # 🚨 THE FIX: Enforce the explicit API Contract
             if check_exit_code and not result.ok:
                 raise RuntimeError(f"UART Command '{cmd}' failed with exit code {result.exited}:\n{result.stdout}")
 
@@ -191,7 +215,6 @@ class EphemeralSerialClient:
                 duration_s=duration
             )
 
-            # 🚨 THE FIX: Enforce the explicit API Contract on Timeouts
             if check_exit_code:
                 raise RuntimeError(f"UART Command '{cmd}' timed out after {timeout_s}s")
 

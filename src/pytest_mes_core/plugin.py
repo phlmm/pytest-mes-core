@@ -4,4 +4,5 @@ pytest_plugins = [
     "pytest_mes_core.plugins.telemetry_hooks",
     "pytest_mes_core.plugins.hardware",
     "pytest_mes_core.plugins.orchestrator",
+    "pytest_mes_core.plugins.manifest",
 ]

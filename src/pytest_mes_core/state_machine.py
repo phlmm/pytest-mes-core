@@ -558,7 +558,16 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
     def _hw_boot_to_os(self, event: EventData) -> None:
         self._sync_physical_state()
 
-        # 🚨 THE FIX: Zombie OS_USERLAND Trap
+        target_medium = event.kwargs.get("medium", self.context.active_boot_medium)
+        needs_strap_change = target_medium != self.context.active_boot_medium
+
+        if needs_strap_change:
+            logger.info(f"[State Machine] Boot medium change requested ({target_medium}). Forcing hard reboot.")
+            self.state = DutState.DIRTY
+
+        # ==========================================================
+        #  TRAP 1: ZOMBIE OS_USERLAND
+        # ==========================================================
         if self.state == DutState.OS_USERLAND:
             logger.debug("[State Machine] Verifying UART heartbeat for existing OS_USERLAND state...")
             res = self.serial.safe_run("echo MES_HEARTBEAT", timeout_s=2.0, check_exit_code=False)
@@ -574,12 +583,29 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
             # If heartbeat or SSH fails, we fall through and force a hard power cycle
             self.state = DutState.DIRTY
             self._do_power_off()
-            # Note: We continue executing below to bring it back up
 
-        target_medium = event.kwargs.get("medium", self.context.active_boot_medium)
-        needs_strap_change = target_medium != self.context.active_boot_medium
+        # ==========================================================
+        #  TRAP 2: THE HOT-LOGIN (The Ultimate Fix)
+        # ==========================================================
+        if self.state == DutState.ENERGIZED:
+            logger.info("[State Machine] Device is ENERGIZED (At Login Prompt). Attempting Hot-Login...")
+            # Tap ENTER to force the OS to redraw the prompt so _do_wait_for_os catches it instantly
+            self.serial.ser.write(b"\n")
+            self.serial.ser.flush()
+            try:
+                # _do_wait_for_os handles the full user/pass/shell authentication natively!
+                self._do_wait_for_os()
+                self._finalize_os_boot()
+                return
+            except TransportTimeoutError:
+                logger.warning("[State Machine] Hot-login failed. Device is stuck. Marking DIRTY.")
+                self.state = DutState.DIRTY
+                self._do_power_off()
 
-        if needs_strap_change or self.state == DutState.RECOVERY or self.state == DutState.DIRTY:
+        # ==========================================================
+        #  TRAP 3: FULL REBOOT SEQUENCE
+        # ==========================================================
+        if self.state in [DutState.RECOVERY, DutState.DIRTY, DutState.POWER_OFF]:
             if self.state != DutState.POWER_OFF: self._do_power_off()
             self._do_apply_bootstrap(target_medium)
             self.context.active_boot_medium = target_medium
@@ -593,29 +619,14 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
             self._finalize_os_boot()
             return
 
+        # ==========================================================
+        #  TRAP 4: BOOTLOADER RESUME
+        # ==========================================================
         if self.state == DutState.BOOTLOADER:
             if not getattr(self.cfg, 'autoboot_enabled', True): self._restore_uboot_trap()
             self._do_boot_from_bootloader_to_os()
             self._finalize_os_boot()
             return
-
-        if getattr(self.cfg, 'autoboot_enabled', True):
-            if self.state in [DutState.ENERGIZED] and not self.psu:
-                # 🚨 THE FIX: Replaced 8 lines of code with our DRY helper
-                self._do_soft_reboot()
-                self._do_wait_for_bootloader(spam_interrupt=True)
-                self._do_boot_from_bootloader_to_os()
-            else:
-                if self.state in [DutState.ENERGIZED]: self._do_power_off()
-                self._do_energize()
-                self._do_wait_for_bootloader(spam_interrupt=True)
-                self._do_boot_from_bootloader_to_os()
-        else:
-            if self.state in [DutState.ENERGIZED]: self._do_power_off()
-            self._do_energize()
-            self._do_wait_for_os()
-
-        self._finalize_os_boot()
 
     def _hw_to_recovery(self, event: EventData) -> None:
         self._sync_physical_state()
