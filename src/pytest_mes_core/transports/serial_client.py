@@ -42,6 +42,8 @@ class EphemeralSerialClient:
 
     def disconnect(self) -> None:
         if self.ser and self.ser.is_open:
+            logger.debug(f"[UART] Disconnecting {self.cfg.port}. Flushing residual buffers...")
+            self.flush_buffers() # FIX: Purge all hardware caches before relinquishing the port
             self.ser.close()
 
     @property
@@ -80,28 +82,32 @@ class EphemeralSerialClient:
         last_redraw_time = time.perf_counter()
         raw_buffer = bytearray()
 
-        while time.perf_counter() < t_end:
-            # 1. Ingest available bytes
-            if self.ser.in_waiting > 0:
-                raw_buffer.extend(self.ser.read(self.ser.in_waiting))
-                clean_buffer = self.ANSI_ESCAPE_B.sub(b'', raw_buffer)
-                decoded_buffer = clean_buffer.decode('utf-8', errors='replace')
+        try:
+            while time.perf_counter() < t_end:
+                # 1. Ingest available bytes
+                if self.ser.in_waiting > 0:
+                    raw_buffer.extend(self.ser.read(self.ser.in_waiting))
+                    clean_buffer = self.ANSI_ESCAPE_B.sub(b'', raw_buffer)
+                    decoded_buffer = clean_buffer.decode('utf-8', errors='replace')
 
-                # 2. Regex search (handles fragmented/interleaved lines perfectly)
-                if search_regex.search(decoded_buffer):
-                    return decoded_buffer
+                    # 2. Regex search
+                    if search_regex.search(decoded_buffer):
+                        return decoded_buffer
 
-            # 3. 🚨 THE FIX: Active Redraw Mechanism
-            # If we haven't seen the prompt in 1.5 seconds, the OS might be waiting
-            # for us, but the prompt was overwritten by kernel spam. Hit ENTER to redraw it.
-            now = time.perf_counter()
-            if active_redraw and (now - last_redraw_time) > 1.5:
-                self.ser.write(b"\n")
-                self.ser.flush()
-                last_redraw_time = now
+                # 3. Active Redraw Mechanism
+                now = time.perf_counter()
+                if active_redraw and (now - last_redraw_time) > 1.5:
+                    self.ser.write(b"\n")
+                    self.ser.flush()
+                    last_redraw_time = now
 
-            # Sleep briefly to prevent CPU thrashing
-            time.sleep(0.05)
+                time.sleep(0.05)
+
+        except KeyboardInterrupt:
+            # 🚨 THE FIX: Catch the user pressing Ctrl+C mid-wait
+            logger.warning(f"\n[UART] ⚠️ Ctrl+C Detected! Force-flushing hardware buffers on {self.cfg.port} before aborting...")
+            self.flush_buffers()
+            raise
 
         # 4. Timeout Failure Formatting
         dump = self.ANSI_ESCAPE_B.sub(b'', raw_buffer)[-200:].decode('utf-8', errors='replace').strip()
@@ -221,8 +227,13 @@ class EphemeralSerialClient:
             return result
 
     def flush_buffers(self) -> None:
+        """Aggressively flushes OS-level hardware buffers and internal software buffers."""
         if self.ser and self.ser.is_open:
-            self.ser.reset_input_buffer()
+            try:
+                self.ser.reset_input_buffer()
+                self.ser.reset_output_buffer()
+            except Exception:
+                pass # Ignore if the USB cable was physically yanked
         self.parser.clear_buffer()
 
     def read_clean_stream(self) -> Generator[str, None, None]:
