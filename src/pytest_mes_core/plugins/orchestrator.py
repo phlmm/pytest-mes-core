@@ -8,6 +8,7 @@ that enforces physical hardware states before a test is allowed to execute.
 
 import pytest
 import logging
+from datetime import datetime, timezone
 from typing import Generator, Optional
 
 from pytest_mes_core.config import StationEnvironment
@@ -19,6 +20,7 @@ logger = logging.getLogger("mes_core.orchestrator")
 
 @pytest.fixture(scope="session")
 def dut_state_machine(
+    request: pytest.FixtureRequest,
     mes_env: StationEnvironment,
     psu_hardware: Optional[ScpiPowerSupply],
     serial_client: Optional[EphemeralSerialClient],
@@ -65,6 +67,18 @@ def dut_state_machine(
     # Teardown: Print boot metrics for the run, then secure the hardware
     if sm.boot_metrics:
         logger.info(f"[Metrics] Final Boot Performance: {sm.boot_metrics}")
+        sink = getattr(request.config, "_mes_telemetry_sink", None)
+        if sink:
+            from pytest_mes_core.telemetry.models import TestRecord
+            record = TestRecord(
+                test_name="mes_fsm_boot_profiler",
+                outcome="passed",
+                duration_s=sm.boot_metrics.get("t_boot_total_to_shell_s", 0.0),
+                metrics=sm.boot_metrics,
+                context={},
+                timestamp=datetime.now(timezone.utc).isoformat()
+            )
+            sink.export(record)
 
     sm.power_off()
 

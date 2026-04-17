@@ -42,7 +42,7 @@ class DutState(Enum):
 
 class BaseDutStateMachine(ABC):
     STATES = [DutState.POWER_OFF, DutState.ENERGIZED, DutState.BOOTLOADER, DutState.OS_USERLAND, DutState.RECOVERY, DutState.DIRTY]
-    PANIC_WATCHDOG: Pattern[bytes] = re.compile(br"(Kernel panic - not syncing|Out of memory: Killed process|synchronous external abort)")
+    PANIC_WATCHDOG: Pattern[bytes] = re.compile(br"(Kernel panic - not syncing|Out of memory: Killed process|synchronous external abort|HAB Events|SEC_ERR|Signature Verification Failed)")
     ANSI_ESCAPE_B: Pattern[bytes] = re.compile(br'\x1b\[[0-9;]*[a-zA-Z]')
     # Use 'Any' here so type checkers don't yell when a project uses its own Enum
     state: Any
@@ -239,6 +239,19 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
             try: input(">>> Press [ENTER] once configured... ")
             except EOFError: time.sleep(2.0)
 
+    def _do_hardware_reset(self) -> None:
+        reset_pin = getattr(self.cfg, "gpio_reset_pin", None)
+        if self.gpio and reset_pin:
+            logger.warning(f"[State Machine] JTAG/GPIO: Firing physical hardware RESET pin ({reset_pin})...")
+            self.gpio.set_pin(reset_pin, True)
+            time.sleep(0.5)
+            self.gpio.set_pin(reset_pin, False)
+            time.sleep(0.5)
+        else:
+            logger.debug("[State Machine] No hardware reset pin defined. Falling back to hard power cycle.")
+            self._do_power_off()
+            self._do_energize()
+
     def _do_power_off(self) -> None:
         logger.debug("[State Machine] Executing hard power drop...")
         if self.ssh.is_connected: self.ssh.disconnect()
@@ -262,7 +275,18 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
 
         if self.psu:
             self.psu.enable_output()
-            time.sleep(1.0)
+            if hasattr(self.psu, "measure_current"):
+                t_end = time.time() + 1.0
+                max_i = 0.0
+                while time.time() < t_end:
+                    try:
+                        i = float(self.psu.measure_current())
+                        if i > max_i: max_i = i
+                    except Exception:
+                        pass
+                self.boot_metrics["inrush_current_a"] = round(max_i, 3)
+            else:
+                time.sleep(1.0)
         else:
             logger.warning("[MANUAL ACTION] PLUG IN THE 12V POWER NOW.")
             try: input(">>> Press [ENTER] once power is applied... ")
@@ -417,6 +441,17 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
 
         # 1. Parse SWUpdate or Custom Validators
         self._verify_linux_context()
+
+        # 1.5. Harvest Kernel Boot Analytics
+        res_sysd = self.serial.safe_run("systemd-analyze time", timeout_s=5.0, check_exit_code=False)
+        if res_sysd.ok and "Startup finished in" in res_sysd.stdout:
+            try:
+                k_match = re.search(r'([\d\.]+)s\s*\(kernel\)', res_sysd.stdout)
+                u_match = re.search(r'([\d\.]+)s\s*\(userspace\)', res_sysd.stdout)
+                if k_match: self.boot_metrics["t_systemd_kernel_s"] = float(k_match.group(1))
+                if u_match: self.boot_metrics["t_systemd_userspace_s"] = float(u_match.group(1))
+            except Exception:
+                pass
 
         # 2. Establish the high-speed SSH pipeline
         logger.info("[State Machine] Establishing primary SSH transport...")
@@ -584,9 +619,9 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
             else:
                 logger.warning("[State Machine] UART heartbeat failed. OS is a Zombie. Marking DIRTY.")
 
-            # If heartbeat or SSH fails, we fall through and force a hard power cycle
+            # If heartbeat or SSH fails, we fall through and force a hardware reset
             self.state = DutState.DIRTY
-            self._do_power_off()
+            self._do_hardware_reset()
 
         # ==========================================================
         #  TRAP 2: THE HOT-LOGIN (The Ultimate Fix)
@@ -604,7 +639,7 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
             except TransportTimeoutError:
                 logger.warning("[State Machine] Hot-login failed. Device is stuck. Marking DIRTY.")
                 self.state = DutState.DIRTY
-                self._do_power_off()
+                self._do_hardware_reset()
 
         # ==========================================================
         #  TRAP 3: FULL REBOOT SEQUENCE

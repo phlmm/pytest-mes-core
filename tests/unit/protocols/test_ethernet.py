@@ -58,4 +58,4 @@ def test_iperf3_json_parsing_success():
     assert result.passed is True
     assert result.metrics["throughput_mbps"] == 945.0  # Proves bps -> Mbps math is correct
     assert result.context["retransmits"] == 12
-    assert "iperf3 -c 192.168.100.1" in v_transport.command_history[-1] # Proves the correct bash command was sent!
+    assert any("iperf3 -c 192.168.100.1" in cmd for cmd in v_transport.command_history) # Proves the correct bash command was sent!

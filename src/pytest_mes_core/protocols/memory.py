@@ -129,3 +129,80 @@ class NativeMemoryValidator:
                     dut.safe_run("rm -f /tmp/test_payload.bin /tmp/readback.bin /tmp/original_backup.bin", timeout_s=5.0)
                 except Exception:
                     pass # Ignore cleanup errors if transport is dead
+
+class RamValidator:
+    """
+    Validates physical RAM utilizing memtester and hardware EDAC (Error Detection and Correction) registers.
+    """
+
+    @staticmethod
+    def verify_ram_health(dut: DutTransport, size_mb: int, loops: int = 1) -> ValidatorResult:
+        logger.info(f"[RAM] Initiating physical memory stress test: {size_mb}MB for {loops} loops...")
+        context_data: Dict[str, Any] = {"size_mb": size_mb, "loops": loops}
+        metrics: Dict[str, float] = {}
+
+        try:
+            # 1. Clear EDAC counters (if they exist) so we only measure faults during the test
+            has_edac = False
+            edac_ce_path = "/sys/devices/system/edac/mc/mc0/ce_count"
+            edac_ue_path = "/sys/devices/system/edac/mc/mc0/ue_count"
+
+            edac_check = dut.safe_run(f"test -e {edac_ce_path}")
+            if edac_check.ok:
+                has_edac = True
+                logger.debug("[RAM] Hardware EDAC controller detected. Resetting parity fault counters...")
+                dut.safe_run(f"echo 0 > {edac_ce_path}")
+                dut.safe_run(f"echo 0 > {edac_ue_path}")
+            else:
+                logger.debug("[RAM] No EDAC controller found. Relying solely on memtester bit-integrity.")
+
+            # 2. Run memtester
+            # Note: memtester will run exactly {loops} times and then exit cleanly
+            # We assign a generous timeout: assume ~10 seconds per 100MB per loop
+            max_wait_s = max(60.0, (size_mb / 100.0) * 10.0 * loops)
+            logger.debug(f"[RAM] Executing memtester payload (Max timeout: {max_wait_s}s)...")
+            
+            # Use safe_run to capture the return code and stdout
+            res = dut.safe_run(f"memtester {size_mb}M {loops}", timeout_s=max_wait_s)
+            
+            context_data["memtester_stdout"] = res.stdout[-1000:] if res.stdout else ""
+            
+            if not res.ok:
+                err_msg = "memtester failed or killed by OOM."
+                logger.error(f"[RAM] {err_msg} Exit code: {res.exited}")
+                return ValidatorResult(passed=False, error_msg=err_msg, context=context_data)
+
+            metrics["memtester_passed"] = 1.0
+
+            # 3. Harvest EDAC Faults
+            if has_edac:
+                logger.debug("[RAM] Harvesting EDAC parity fault counts post-test...")
+                ce_res = dut.safe_run(f"cat {edac_ce_path}", timeout_s=2.0)
+                ue_res = dut.safe_run(f"cat {edac_ue_path}", timeout_s=2.0)
+
+                ce_count = int(ce_res.stdout.strip()) if ce_res.ok and ce_res.stdout.strip().isdigit() else 0
+                ue_count = int(ue_res.stdout.strip()) if ue_res.ok and ue_res.stdout.strip().isdigit() else 0
+
+                metrics["edac_ce_count"] = float(ce_count)
+                metrics["edac_ue_count"] = float(ue_count)
+
+                if ue_count > 0:
+                    logger.critical("="*60)
+                    logger.critical(f"[RAM] FATAL: {ue_count} Uncorrectable EDAC ECC Errors detected during stress!")
+                    logger.critical("="*60)
+                    return ValidatorResult(passed=False, metrics=metrics, error_msg="Uncorrectable ECC Errors detected.", context=context_data)
+
+                if ce_count > 0:
+                    logger.warning("="*60)
+                    logger.warning(f"[RAM] WARNING: {ce_count} Correctable EDAC ECC Errors detected.")
+                    logger.warning("="*60)
+
+            logger.info(f"[RAM] Stress test passed perfectly.")
+            return ValidatorResult(passed=True, metrics=metrics, context=context_data)
+
+        except TransportTimeoutError:
+            logger.critical("[RAM] FATAL: DUT completely locked up during memtester. OOM Killer freeze or bus lockup.")
+            return ValidatorResult(passed=False, error_msg="DUT frozen during RAM stress.", context=context_data)
+        except TransportConnectionError as e:
+            logger.critical(f"[RAM] FATAL: Transport shattered during RAM stress. {e}")
+            return ValidatorResult(passed=False, error_msg=f"Transport dropped (OOM reboot?): {e}", context=context_data)

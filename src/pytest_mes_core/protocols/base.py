@@ -43,3 +43,20 @@ class ValidatorResult(BaseModel):
         # Format metrics cleanly. If empty, return a clean string rather than '{}'
         metrics_str = " | ".join(f"{k}: {v}" for k, v in self.metrics.items())
         return f"[{status}] {metrics_str}".strip()
+
+def collect_soc_health(dut) -> Dict[str, float]:
+    """Helper to collect physical CPU temperature and clock frequency."""
+    health: Dict[str, float] = {}
+    try:
+        res_temp = dut.safe_run("cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null", timeout_s=1.0)
+        if res_temp.ok and res_temp.stdout.strip().isdigit():
+            # Thermal zone temp is usually in millidegrees Celsius
+            health["soc_temp_c"] = round(float(res_temp.stdout.strip()) / 1000.0, 1)
+
+        res_freq = dut.safe_run("cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq 2>/dev/null", timeout_s=1.0)
+        if res_freq.ok and res_freq.stdout.strip().isdigit():
+            # freq is usually in KHz, convert to MHz
+            health["cpu_freq_mhz"] = round(float(res_freq.stdout.strip()) / 1000.0, 1)
+    except Exception:
+        pass  # Transport dropped or missing sensors
+    return health

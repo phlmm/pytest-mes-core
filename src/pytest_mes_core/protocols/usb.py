@@ -9,6 +9,7 @@ from pytest_mes_core.transports import (
     TransportTimeoutError
 )
 from pytest_mes_core.protocols import ValidatorResult
+from pytest_mes_core.protocols.base import collect_soc_health
 from pytest_mes_core.config import UsbStorageConfig
 
 logger = logging.getLogger("mes_core.protocols.usb")
@@ -78,10 +79,18 @@ class UsbMassStorageValidator:
 
             test_file = f"{self.mount_point}/factory_test.bin"
 
+            # Pre-test thermal baseline
+            baseline_health = collect_soc_health(self.transport)
+            if baseline_health:
+                context_data["pre_test_health"] = baseline_health
+
             # 4. Stress Test (Write random bytes & force sync)
             logger.debug(f"[USB] Blasting {self.cfg.test_size_mb}MB payload to stress VBUS power delivery (fsync enabled)...")
             write_cmd = f"dd if=/dev/urandom of={test_file} bs=1M count={self.cfg.test_size_mb} conv=fsync"
             write_res = self.transport.safe_run(write_cmd, timeout_s=45.0)
+
+            # Post-test thermal state
+            post_health = collect_soc_health(self.transport)
 
             if write_res.exited != 0:
                 logger.error(f"[USB] Payload write failed: {write_res.stderr.strip()}")
@@ -130,9 +139,12 @@ class UsbMassStorageValidator:
                 return ValidatorResult(passed=False, error_msg="USB switch brownout or EMI reset detected during load.", context=context_data)
 
             logger.info(f"[USB] Verification complete. Throughput sustained at {throughput} MB/s.")
+            metrics = {"usb_write_mbps": throughput}
+            metrics.update(post_health)
+            
             return ValidatorResult(
                 passed=True,
-                metrics={"usb_write_mbps": throughput},
+                metrics=metrics,
                 context=context_data
             )
 

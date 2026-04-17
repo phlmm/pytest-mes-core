@@ -11,6 +11,7 @@ from pytest_mes_core.transports import (
     TransportTimeoutError
 )
 from pytest_mes_core.protocols import ValidatorResult
+from pytest_mes_core.protocols.base import collect_soc_health
 from pytest_mes_core.config import EthernetConfig
 
 logger = logging.getLogger("mes_core.protocols.ethernet")
@@ -131,10 +132,18 @@ class EthernetValidator:
                 logger.critical(f"[ETH] FATAL: Host PC iperf3 server failed to bind! {stderr.strip()}")
                 return ValidatorResult(passed=False, error_msg=f"Host iperf3 server failed to bind: {stderr.strip()}")
 
+            # Pre-test thermal baseline
+            baseline_health = collect_soc_health(dut)
+            if baseline_health:
+                context_data["pre_test_health"] = baseline_health
+
             # 2. Execute Target Client
             cmd = f"iperf3 -c {cfg.host_iperf_ip} -p {cfg.iperf_port} -t {cfg.iperf_duration_s} -J"
             logger.debug(f"[ETH] Commanding DUT to initiate traffic: {cmd}")
             result = dut.safe_run(cmd, timeout_s=cfg.iperf_duration_s + 5.0)
+
+            # Post-test thermal state
+            post_health = collect_soc_health(dut)
 
             # 3. Shielded JSON Parsing
             if not result.ok:
@@ -161,9 +170,12 @@ class EthernetValidator:
                 logger.critical(f"[ETH] Clocked: {mbps} Mbps | Required Limit: {cfg.iperf_min_mbps} Mbps")
                 logger.critical("="*60)
 
+            metrics = {"throughput_mbps": mbps, "eth_retransmits": context_data["retransmits"]}
+            metrics.update(post_health)
+
             return ValidatorResult(
                 passed=passed,
-                metrics={"throughput_mbps": mbps, "eth_retransmits": context_data["retransmits"]},
+                metrics=metrics,
                 error_msg="" if passed else f"Low throughput: {mbps} Mbps",
                 context=context_data
             )

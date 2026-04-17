@@ -11,7 +11,16 @@ class MockTransport:
             "cat /proc/device-tree/serial-number": "MOCK-TORADEX-9999",
             "swupdate -g": "testing\nswupdate\nB",
             "echo MES_HEARTBEAT": "MES_HEARTBEAT",
-            "i2cget -y 1 0x42": "0xABCD"
+            "i2cget -y 1 0x42": "0xABCD",
+            "cat /sys/class/thermal/thermal_zone0/temp": "45000",
+            "cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq": "1200000",
+            "mmc extcsd read": "Device life time estimation type A [SEC_COUNT: 0x01]\nDevice life time estimation type B [SEC_COUNT: 0x02]\nPre EOL information [PRE_EOL_INFO: 0x01]",
+            "test -e /sys/devices/system/edac/mc/mc0/ce_count": "",
+            "cat /sys/devices/system/edac/mc/mc0/ce_count": "0",
+            "cat /sys/devices/system/edac/mc/mc0/ue_count": "0",
+            "memtester": "memtester version 4.5.1 (64-bit)\nDone.",
+            "echo 0 > /sys/devices/system/edac": "",
+            "systemd-analyze time": "Startup finished in 2.1s (kernel) + 4.5s (userspace) = 6.6s\ngraphical.target reached after 6.5s in userspace"
         }
         self.command_history = []
 

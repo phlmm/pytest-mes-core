@@ -9,6 +9,7 @@ from pytest_mes_core.transports import (
     TransportTimeoutError
 )
 from pytest_mes_core.protocols import ValidatorResult
+from pytest_mes_core.protocols.base import collect_soc_health
 
 logger = logging.getLogger("mes_core.protocols.block_storage")
 
@@ -65,9 +66,17 @@ class BlockDeviceValidator:
         cmd = f"dd if=/dev/urandom of={test_file} bs=1M count={test_file_size_mb} conv=fdatasync"
         logger.debug(f"[Storage] Pushing payload to bypass Linux Page Cache: {cmd}")
 
+        # Pre-test thermal baseline
+        baseline_health = collect_soc_health(dut)
+        if baseline_health:
+            context_data["pre_test_health"] = baseline_health
+
         try:
             # We strictly use safe_run to inherit transport agnosticism and socket protections
             res = dut.safe_run(cmd, timeout_s=max_wait_s)
+
+            # Post-test thermal state
+            post_health = collect_soc_health(dut)
 
             # Combine stdout and stderr. GNU dd writes to stderr, some BusyBox versions write to stdout.
             combined_output = f"{res.stdout}\n{res.stderr}".strip()
@@ -125,12 +134,16 @@ class BlockDeviceValidator:
             if not passed:
                 logger.warning(f"[Storage] THROUGHPUT FAILED. Counterfeit or degraded flash memory detected.")
 
+            # Inject thermal/freq metrics
+            metrics = {
+                "write_speed_mbps": round(actual_mbps, 2),
+                "write_duration_s": round(res.duration_s, 2)  # Inherited directly from Transport!
+            }
+            metrics.update(post_health)
+
             return ValidatorResult(
                 passed=passed,
-                metrics={
-                    "write_speed_mbps": round(actual_mbps, 2),
-                    "write_duration_s": round(res.duration_s, 2)  # Inherited directly from Transport!
-                },
+                metrics=metrics,
                 error_msg="" if passed else f"Degraded throughput: {actual_mbps} MB/s",
                 context=context_data
             )
@@ -157,3 +170,58 @@ class BlockDeviceValidator:
                     dut.safe_run("sync", timeout_s=10.0) # Ensure the deletion is actually committed
                 except Exception as cleanup_err:
                     logger.warning(f"[Storage] Cleanup failed (Transport likely destabilized): {cleanup_err}")
+
+    @staticmethod
+    def verify_emmc_health(dut: DutTransport, device_path: str = "/dev/mmcblk0") -> ValidatorResult:
+        """
+        Parses S.M.A.R.T data directly from the eMMC controller's EXTCSD registers via mmc-utils.
+        """
+        logger.info(f"[Storage] Interrogating S.M.A.R.T EXTCSD registers on {device_path}...")
+        context_data: Dict[str, Any] = {}
+        metrics: Dict[str, float] = {}
+
+        try:
+            res = dut.safe_run(f"mmc extcsd read {device_path}", timeout_s=5.0)
+            if not res.ok:
+                err_msg = f"mmc-utils failed or {device_path} is invalid: {res.stderr.strip()}"
+                logger.error(f"[Storage] {err_msg}")
+                return ValidatorResult(passed=False, error_msg=err_msg, context={"stdout": res.stdout, "stderr": res.stderr})
+
+            context_data["extcsd_dump"] = res.stdout
+
+            # Parse "Device life time estimation type A [SEC_COUNT: 0x01]" (0x01 = 0-10%, 0x02 = 10-20%...)
+            life_match_a = re.search(r'Device life time estimation type A[^:]*:\s*0x([0-9A-Fa-f]+)', res.stdout)
+            life_match_b = re.search(r'Device life time estimation type B[^:]*:\s*0x([0-9A-Fa-f]+)', res.stdout)
+
+            life_a_pct = int(life_match_a.group(1), 16) * 10 if life_match_a else 0
+            life_b_pct = int(life_match_b.group(1), 16) * 10 if life_match_b else 0
+            max_used_pct = max(life_a_pct, life_b_pct)
+
+            if max_used_pct > 0:
+                metrics["emmc_life_used_percent"] = float(max_used_pct)
+
+            # Parse "Pre EOL information [PRE_EOL_INFO: 0x01]"
+            # 0x01 = Normal, 0x02 = Warning (80% used), 0x03 = Urgent (EOL)
+            eol_match = re.search(r'Pre EOL information[^:]*:\s*0x([0-9A-Fa-f]+)', res.stdout)
+            eol_val = int(eol_match.group(1), 16) if eol_match else 0x01
+            context_data["pre_eol_val"] = eol_val
+
+            passed = True
+            error_msg = ""
+            if eol_val >= 0x02:
+                passed = False
+                error_msg = "eMMC S.M.A.R.T Pre-EOL warning active. Flash is dying!"
+                logger.critical("="*60)
+                logger.critical(f"[Storage] FATAL: {error_msg}")
+                logger.critical("="*60)
+
+            return ValidatorResult(
+                passed=passed,
+                metrics=metrics,
+                error_msg=error_msg,
+                context=context_data
+            )
+        except TransportTimeoutError:
+            return ValidatorResult(passed=False, error_msg="DUT hung during EXTCSD read.", context=context_data)
+        except TransportConnectionError as e:
+            return ValidatorResult(passed=False, error_msg=f"Transport dropped during EXTCSD read: {e}", context=context_data)
