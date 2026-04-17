@@ -17,6 +17,7 @@ class BaseHardwareConfig(BaseModel):
 class StationMetaConfig(BaseHardwareConfig):
     facility: str = Field(description="Factory location (e.g., 'Shenzhen-Line-1')")
     jig_id: str = Field(description="Unique ID of this specific test fixture")
+    environment: str = "lab"
 
 class TelemetryConfig(BaseHardwareConfig):
     exporter_type: str = Field(default="jsonl")

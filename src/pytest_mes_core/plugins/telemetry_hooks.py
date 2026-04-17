@@ -60,7 +60,7 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]) ->
 # CORE TELEMETRY FIXTURE
 # ==========================================
 
-@pytest.fixture(scope="function")
+@pytest.fixture(scope="function", autouse=True)
 def mes_record(
     request: pytest.FixtureRequest,
     mes_env: StationEnvironment,
@@ -77,29 +77,35 @@ def mes_record(
     harvests the physical state of the board and emits the JSONL record.
     """
 
-    callspec = getattr(request.node, "callspec", None)
-    iteration = int((callspec.params.get("_pytest_repeat_step_number", 0) + 1) if callspec else 1)
-
-    # Use nodeid to capture parameterized variants perfectly (e.g., test_uart[ttymxc3])
     test_node_id = request.node.nodeid
 
+    # Distinguish between intentional stress-test loops and hardware failure retries
+    callspec = getattr(request.node, "callspec", None)
+    loop_iteration = int((callspec.params.get("_pytest_repeat_step_number", 0) + 1) if callspec else 1)
     execution_count = getattr(request.node, "execution_count", 1)
+
     ctx = telemetry_sink.context if telemetry_sink else None
-    record = TestRecord(test_name=test_node_id, iteration=iteration, station_context=ctx)
 
-    # Attach to the Pytest node so `makereport` can find it
-    setattr(request.node, "mes_telemetry_record", record)
+    #  THE FIX: Instantiate EXACTLY ONE TestRecord
+    record = TestRecord(
+        test_name=test_node_id,
+        iteration=execution_count, # Use the retry attempt as the primary iteration tracker
+        station_context=ctx
+    )
 
-    t0 = time.perf_counter()
-
-    # Update our TestRecord to track the specific execution attempt
-    record = TestRecord(test_name=test_node_id, iteration=execution_count, station_context=ctx)
+    # Add deep context
     record.context["is_retry"] = execution_count > 1
+    record.context["stress_loop_iteration"] = loop_iteration
+
+    # Attach the single instance to the Pytest node so `makereport` can read HTML metrics
+    setattr(request.node, "mes_telemetry_record", record)
 
     if execution_count > 1:
         logger.warning("="*60)
         logger.warning(f"[FSM Router] EXECUTING HARDWARE RETRY (Attempt {execution_count})")
         logger.warning("="*60)
+
+    t0 = time.perf_counter()
 
     # STRICT ZERO-LEAKAGE TRY/FINALLY CONTRACT
     try:
@@ -150,21 +156,23 @@ def mes_record(
                     logger.critical("[Post-Mortem] Engaging automated hardware forensic dumper...")
                     logger.critical("="*60)
 
-                    if not dut_transport.is_connected:
-                        logger.warning("[Post-Mortem] Transport dead. Attempting recovery to scrape crash logs...")
-                        try:
-                            dut_transport.connect()
-                        except Exception:
-                            logger.error("[Post-Mortem] OS failed to recover. Aborting forensic dumps.")
+                    #  SAFETY ENHANCEMENT: Don't crash the telemetry hook if dut_transport doesn't exist
+                    if dut_transport:
+                        if not dut_transport.is_connected:
+                            logger.warning("[Post-Mortem] Transport dead. Attempting recovery to scrape crash logs...")
+                            try:
+                                dut_transport.connect()
+                            except Exception:
+                                logger.error("[Post-Mortem] OS failed to recover. Aborting forensic dumps.")
 
-                    dump_context = {}
-                    if dut_transport.is_connected:
-                        for cmd in commands_to_run:
-                            res = dut_transport.safe_run(cmd, timeout_s=5.0, check_exit_code=False)
-                            dump_context[cmd] = res.stdout if res.exited == 0 else f"NO DATA: {res.stderr}"
+                        dump_context = {}
+                        if dut_transport.is_connected:
+                            for cmd in commands_to_run:
+                                res = dut_transport.safe_run(cmd, timeout_s=5.0, check_exit_code=False)
+                                dump_context[cmd] = res.stdout if res.exited == 0 else f"NO DATA: {res.stderr}"
 
-                    record.context["post_mortem"] = dump_context
-                    logger.info("[Post-Mortem] Forensic data successfully attached to telemetry payload.")
+                        record.context["post_mortem"] = dump_context
+                        logger.info("[Post-Mortem] Forensic data successfully attached to telemetry payload.")
 
         # Emit to JSONL
         if telemetry_sink:
@@ -175,3 +183,9 @@ def mes_record(
                 logger.critical(f"[Telemetry] FATAL: FAILED TO ROUTE TELEMETRY FOR {record.test_name}!")
                 logger.critical(f"[Telemetry] Exception: {e}")
                 logger.critical("="*60)
+
+                pytest.fail(
+                        f"CRITICAL MES FAILURE: Telemetry payload was dropped! "
+                        f"The board may have passed, but the data did not reach the disk. Reason: {e}",
+                        pytrace=False
+                )

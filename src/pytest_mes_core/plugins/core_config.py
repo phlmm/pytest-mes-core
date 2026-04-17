@@ -6,6 +6,7 @@ It manages command-line argument parsing, hardware configuration validation (via
 and the global execution lifecycle, including safety systems and telemetry.
 """
 
+import os
 import pytest
 import logging
 import uuid
@@ -15,7 +16,10 @@ from typing import Any, Optional
 
 from pytest_mes_core.config import StationEnvironment, load_toml_config
 from pytest_mes_core.host_adapters.safety import EStopWatchdog
-from pytest_mes_core.telemetry import StationContext, JsonlTelemetryExporter, TelemetryExporter
+from pytest_mes_core.telemetry import (
+    StationContext, TelemetryExporter, JsonlTelemetryExporter,
+    OperatorReceiptExporter, DeveloperMarkdownExporter, CompositeTelemetryExporter
+)
 
 logger = logging.getLogger("mes_core.config")
 
@@ -53,20 +57,27 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         action="store_true",
         help="Ergonomic debugging flag. Pauses execution and keeps hardware powered on if a test fails."
     )
+    group.addoption(
+        "--mock-hardware",
+        action="store_true",
+        default=False,
+        help="Bypasses physical transports. Injects a Mock Transport for CI/CD pipeline testing."
+    )
+
+def pytest_load_initial_conftests(early_config: pytest.Config, parser: pytest.Parser, args: list[str]) -> None:
+    """
+    The Pre-Parse Hook.
+    Intercepts the raw CLI arguments and injects the pytest-html flags BEFORE
+    the plugin manager initializes, forcing pytest-html to wake up.
+    """
+    # Only inject if the user didn't manually pass a custom --html flag
+    if not any(arg.startswith("--html") for arg in args):
+        args.extend(["--html=.mes_tmp_report.html", "--self-contained-html"])
 
 @pytest.fixture(scope="session")
 def operator_id(request: pytest.FixtureRequest) -> str:
     """
     Retrieves the operator identifier passed via the command-line interface.
-
-    In a Manufacturing Execution System (MES), traceability is paramount. This
-    fixture captures the '--operator-id' argument to track exactly who (or which
-    CI/CD pipeline) executed the test batch. This ID is automatically injected into
-    the telemetry context, allowing factory managers to correlate yield drops with
-    specific shifts or personnel.
-
-    Returns:
-        str: The alphanumeric string representing the active operator or pipeline runner.
     """
     return str(request.config.getoption("--operator-id"))
 
@@ -74,23 +85,6 @@ def operator_id(request: pytest.FixtureRequest) -> str:
 def mes_env(request: pytest.FixtureRequest) -> StationEnvironment:
     """
     Parses the hardware TOML configuration into a strongly typed Python object.
-
-    This fixture is the single source of truth for the entire physical test setup.
-    It reads the TOML file passed via the '--env-config' CLI argument and validates
-    it against the StationEnvironment model. By injecting this fixture into your tests,
-    you avoid hardcoding IP addresses, baud rates, or GPIO pins directly into test scripts.
-
-    Returns:
-        StationEnvironment: The validated hardware Bill of Materials (BOM).
-
-    Example:
-        def test_rs485_communication(mes_env, dut_transport):
-            # Fetch parameters dynamically from the TOML configuration
-            baud = mes_env.uart["onboard_rs485_0"].baudrate
-            port = mes_env.uart["onboard_rs485_0"].port
-
-            assert baud == 115200, "Jig configuration error: Expected 115200 baud."
-            dut_transport.safe_run(f"stty -F {port} {baud}")
     """
     toml_path = Path(request.config.getoption("--env-config"))
     return load_toml_config(toml_path, StationEnvironment)
@@ -99,51 +93,23 @@ def mes_env(request: pytest.FixtureRequest) -> StationEnvironment:
 def telemetry_sink() -> Optional[TelemetryExporter]:
     """
     Provides direct access to the active telemetry pipeline exporter.
-
-    While standard pass/fail and execution duration metrics are automatically
-    captured by the 'mes_record' wrapper, test engineers often need to attach
-    highly specific, non-standard payload data to the JSONL record mid-test.
-
-    Returns:
-        Optional[TelemetryExporter]: The active exporter session, or None if disabled.
-
-    Example:
-        def test_mac_address_programming(telemetry_sink, dut_transport):
-            res = dut_transport.safe_run("cat /sys/class/net/eth0/address")
-            mac_address = res.stdout.strip()
-
-            # Dynamically attach this custom data to the active test record
-            if telemetry_sink:
-                telemetry_sink.context.custom_data["provisioned_mac"] = mac_address
-
-            assert len(mac_address) == 17
     """
     return _global_telemetry_sink
 
 def pytest_configure(config: pytest.Config) -> None:
     """
     The Master Setup Hook. Executes once before any test collection begins.
-
-    Responsibilities:
-    1. Registers the 'requires_state' marker to prevent Pytest warnings.
-    2. Dynamically routes CLI verbosity (-v, -vv) to live logging outputs.
-    3. Engages the EStopWatchdog to safely apply mains power to the jig.
-    4. Generates a unique Run UUID and initializes the JSONL artifact file.
-
-    Args:
-        config (pytest.Config): The active Pytest configuration object.
     """
     config.addinivalue_line(
         "markers", "requires_state(state): Enforces physical hardware state (DutState) before test execution."
+    )
+    config.addinivalue_line(
+        "markers", "hardware_retry(retries): If a test fails, marks hardware DIRTY, forces a cold-boot, and retries."
     )
 
     config.option.log_cli = True
     config.option.log_cli_format = "%(asctime)s [%(levelname)7s] %(name)s: %(message)s"
     config.option.log_cli_date_format = "%H:%M:%S"
-
-    config.addinivalue_line(
-        "markers", "hardware_retry(retries): If a test fails, marks hardware DIRTY, forces a cold-boot, and retries."
-    )
 
     verbosity = config.getoption("verbose")
     if verbosity == 0:
@@ -179,10 +145,33 @@ def pytest_configure(config: pytest.Config) -> None:
             setattr(ctx, "run_id", session_id)
 
             if bom.telemetry.exporter_type == "jsonl":
-                log_dir = Path(bom.telemetry.log_directory) if bom.telemetry.log_directory else Path("artifacts/telemetry")
-                _global_telemetry_sink = JsonlTelemetryExporter(log_dir)
-                _global_telemetry_sink.start_session(ctx)
+                log_dir = Path(bom.telemetry.log_directory) if bom.telemetry.log_directory else Path("artifacts/evse_telemetry")
 
+                # 1. Base Exporter (Always Active)
+                active_exporters = [JsonlTelemetryExporter(log_dir)]
+
+                # 2. Contextual Exporters based on TOML
+                if bom.station_meta.environment in ["lab", "developer"]:
+                    active_exporters.append(DeveloperMarkdownExporter(log_dir))
+                else:
+                    active_exporters.append(OperatorReceiptExporter(log_dir))
+
+                # 3. Instantiate Router
+                _global_telemetry_sink = CompositeTelemetryExporter(active_exporters)
+                try:
+                    _global_telemetry_sink.start_session(ctx)
+                except Exception as e:
+                    logger.critical(f"FATAL: Telemetry sub-system failed to initialize! {e}")
+                    pytest.exit(f"MES Framework aborted. Cannot guarantee telemetry storage: {e}", returncode=1)
+
+                # 🚨 HTML EOL CERTIFICATE AUTO-CONFIG
+                date_str = datetime.now().strftime("%Y-%m-%d")
+                html_dir = log_dir / "html_reports" / date_str
+                html_dir.mkdir(parents=True, exist_ok=True)
+
+                config._mes_html_dir = html_dir
+
+            # Metadata Injection for the HTML Report Header
             if hasattr(config, "_metadata"):
                 metadata: dict[str, Any] = getattr(config, "_metadata")
                 for key in ["Python", "Platform", "Packages", "Plugins"]:
@@ -202,13 +191,6 @@ def pytest_unconfigure(config: pytest.Config) -> None:
     """
     The Master Teardown Hook. Executes unconditionally after all tests finish
     or if the framework crashes fatally.
-
-    Responsibilities:
-    1. Safely trips the EStopWatchdog to drop high voltage from the jig.
-    2. Flushes the Telemetry exporter buffers to disk to prevent data loss.
-
-    Args:
-        config (pytest.Config): The active Pytest configuration object.
     """
     global _global_watchdog, _global_telemetry_sink
 
@@ -217,4 +199,31 @@ def pytest_unconfigure(config: pytest.Config) -> None:
 
     if _global_telemetry_sink:
         tests_failed = bool(config.pluginmanager.get_plugin("session").testsfailed)
-        _global_telemetry_sink.end_session(session_passed=not tests_failed)
+        session_passed = not tests_failed
+
+        # Flush the Telemetry exporter buffers
+        _global_telemetry_sink.end_session(session_passed=session_passed)
+
+        #  DYNAMIC HTML REPORT RENAMING
+        htmlpath = getattr(config.option, "htmlpath", None)
+        if htmlpath and os.path.exists(htmlpath):
+            try:
+                ctx = _global_telemetry_sink.context if _global_telemetry_sink else None
+                status = "PASS" if session_passed else "FAIL"
+                time_str = datetime.now().strftime("%H-%M-%S")
+
+                safe_operator = ctx.operator_id.replace("/", "_") if ctx else "UNKNOWN"
+                serial = ctx.dut_serial if ctx else "PENDING"
+
+                # Fetch the stashed target directory (or fallback if it somehow failed)
+                html_dir = getattr(config, "_mes_html_dir", Path("artifacts/evse_telemetry/html_reports"))
+                html_dir.mkdir(parents=True, exist_ok=True)
+
+                final_name = f"{status}_{time_str}_{safe_operator}_SN-{serial}.html"
+                final_path = html_dir / final_name
+
+                # Move the temp file to the final Enterprise directory
+                os.rename(htmlpath, final_path)
+                logger.info(f"[MES] EOL Certificate (HTML) saved: {final_path}")
+            except Exception as e:
+                logger.error(f"[MES] Failed to rename HTML report: {e}")

@@ -3,6 +3,7 @@ import os
 import time
 import logging
 from pathlib import Path
+from datetime import datetime
 
 try:
     import fcntl
@@ -24,22 +25,29 @@ class JsonlTelemetryExporter:
     Atomically appends minified records to disk to survive hard crashes.
     Enforces strict OS-level locks and hardware syncs.
     """
-    def __init__(self, log_directory: Path):
-        self.log_dir = Path(log_directory)
+    def __init__(self, base_log_dir: Path):
+        self.base_log_dir = Path(base_log_dir)
         self.active_file: Path | None = None
-        self.context: StationContext | None = None
+        self._context: StationContext | None = None
+
+    @property
+    def context(self) -> StationContext | None:
+        return self._context
 
     # ==========================================
     # TELEMETRY EXPORTER CONTRACT
     # ==========================================
     def start_session(self, context: StationContext) -> None:
         """Initializes the session and dynamically generates the file path."""
-        self.context = context
-        self.log_dir.mkdir(parents=True, exist_ok=True)
+        self._context = context
 
-        # File format: JIG-01_20260413_104330.jsonl
-        filename = f"{context.jig_id}_{context.run_id}.jsonl"
-        self.active_file = self.log_dir / filename
+        # 🚨 STRATEGY SYNC: Route to 'jsonl_streams' grouped by day
+        date_str = datetime.now().strftime("%Y-%m-%d")
+        session_dir = self.base_log_dir / "jsonl_streams" / date_str
+        session_dir.mkdir(parents=True, exist_ok=True)
+
+        # 🚨 STRATEGY SYNC: Pure UUID filename so log shippers never double-read
+        self.active_file = session_dir / f"{context.run_id}.jsonl"
 
         logger.info(f"[Telemetry] Session armed. Streaming localized JSONL to {self.active_file}")
 
@@ -84,9 +92,7 @@ class JsonlTelemetryExporter:
 
     def end_session(self, session_passed: bool) -> None:
         """Finalizes the run. (JSONL does not require EOF markers, so we just log it)."""
-        logger.info(f"[Telemetry] Session finalized. Overall Result: {'PASS' if session_passed else 'FAIL'}")
-        self.active_file = None
-        self.context = None
+        logger.info(f"[Telemetry] Machine stream finalized. Overall Result: {'PASS' if session_passed else 'FAIL'}")
 
     # ==========================================
     # INTERNAL HARDWARE I/O HELPERS

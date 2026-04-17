@@ -33,10 +33,10 @@ class EphemeralSerialClient:
                 timeout=self.cfg.timeout_s,
                 exclusive=True
             )
-        self.ser.reset_input_buffer()
-        self.ser.reset_output_buffer()
-        self.parser.clear_buffer()
-        logger.debug(f"[UART] Bound to {self.cfg.port} and flushed stale OS buffers.")
+            self.ser.reset_input_buffer()
+            self.ser.reset_output_buffer()
+            self.parser.clear_buffer()
+            logger.debug(f"[UART] Bound to {self.cfg.port} and flushed stale OS buffers.")
         except serial.SerialException as e:
             raise TransportConnectionError(f"Failed to bind Host UART {self.cfg.port}: {e}")
 

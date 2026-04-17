@@ -7,19 +7,6 @@ Data routing, serialization, and external database integration.
 Guarantees test suites never crash due to network database outages.
 """
 
-# 1. Core Contracts & Data Structures
-from .base import (
-    StationContext,
-    TestRecord,
-    TelemetryExporter,
-    TelemetryError,
-    TelemetryDeliveryError,
-    TelemetrySerializationError
-)
-
-# 2. Data Sinks (Exporters)
-from .jsonl_exporter import JsonlTelemetryExporter
-
 # Note: Future exporters (InfluxDB, REST APIs) will be imported here.
 # from .influx_exporter import InfluxDbExporter
 # from .mes_rest_api import MesRestApiExporter
@@ -28,17 +15,31 @@ from .jsonl_exporter import JsonlTelemetryExporter
 # ==========================================
 # STRICT PUBLIC API BOUNDARY
 # ==========================================
+from .base import (
+    StationContext,
+    TestRecord,
+    TelemetryExporter,
+    TelemetryError,
+    TelemetryDeliveryError,
+    TelemetrySerializationError
+)
+from .jsonl_exporter import JsonlTelemetryExporter
+from .receipt_exporter import OperatorReceiptExporter
+from .markdown_exporter import DeveloperMarkdownExporter
+from .composite import CompositeTelemetryExporter
+
 __all__ = [
     # Contracts & Data
     "StationContext",
     "TestRecord",
-    "TelemetryExporter",
-
     # Domain Exceptions
     "TelemetryError",
     "TelemetryDeliveryError",
     "TelemetrySerializationError",
-
     # Active Sinks
-    "JsonlTelemetryExporter"
+    "TelemetryExporter",
+    "JsonlTelemetryExporter",
+    "OperatorReceiptExporter",
+    "DeveloperMarkdownExporter",
+    "CompositeTelemetryExporter"
 ]

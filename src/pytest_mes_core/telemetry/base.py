@@ -2,7 +2,7 @@
 import time
 from datetime import datetime, timezone
 from typing import Dict, Any, Protocol, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict, model_validator
 from pytest_mes_core.protocols.base import ValidatorResult
 
 # ==========================================
@@ -31,10 +31,13 @@ class StationContext(BaseModel):
     """
     jig_id: str
     operator_id: str
-    # These two might be injected later in the test if the DUT is scanned mid-setup,
-    # but defining them here sets the structural contract.
+
+    # --- DUT Identity & Genealogy ---
     dut_serial: str = "PENDING"
     firmware_version: str = "UNKNOWN"
+
+    # The Hardware BOM/Manifest of the specific board being tested
+    dut_manifest: Dict[str, Any] = Field(default_factory=dict)
 
     facility: Optional[str] = None
     environment: str = "lab"
@@ -44,18 +47,40 @@ class TestRecord(BaseModel):
     """
     The Ultimate Telemetry Payload.
     Fuses the Factory Metadata with the physical hardware evaluation.
-    Not frozen, because the Pytest setup/call/teardown hooks mutate it.
     """
+    # Allow arbitrary types so Pytest doesn't crash if an engineer injects a weird object
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     test_name: str
-    station_context: Optional[StationContext] = None
-    iteration: int = 1
     passed: bool = False
+    iteration: int = 1
     duration_s: float = 0.0
     error_message: Optional[str] = None
-    result: Optional[ValidatorResult] = None
+
+    # THE BLOAT FIX: Keep in memory, but hide from JSON
+    result: Optional[ValidatorResult] = Field(default=None, exclude=True)
+
+    station_context: Optional[StationContext] = None
     metrics: Dict[str, float] = Field(default_factory=dict)
     context: Dict[str, Any] = Field(default_factory=dict)
     timestamp_utc: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+    @model_validator(mode='after')
+    def _sanitize_context(self) -> 'TestRecord':
+        """
+        Safety net: Stringifies any non-standard Python objects in the context dictionary
+        to prevent Pydantic serialization crashes during the JSONL dump.
+        """
+        safe_context = {}
+        for k, v in self.context.items():
+            # Allow primitives and basic structures
+            if isinstance(v, (str, int, float, bool, type(None), list, dict)):
+                safe_context[k] = v
+            else:
+                # Force complex objects (Exceptions, Sockets, etc.) to strings
+                safe_context[k] = str(v)
+        self.context = safe_context
+        return self
 
     def absorb(self, validator_res: ValidatorResult, prefix: str = "") -> None:
         """Surgically flattens a ValidatorResult into the JSONL record."""
@@ -65,6 +90,7 @@ class TestRecord(BaseModel):
         self.context.update({f"{pfx}{k}": v for k, v in validator_res.context.items()})
         if not validator_res.passed and validator_res.error_msg:
             self.context[f"{pfx}error"] = validator_res.error_msg
+
 # ==========================================
 # EXPORTER PROTOCOL
 # ==========================================

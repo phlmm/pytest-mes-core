@@ -69,7 +69,7 @@ class BaseDutStateMachine(ABC):
 
         logger.debug(f"[State Machine] Initializing FSM. PSU: {self.psu is not None} | GPIO: {self.gpio is not None}")
 
-self.machine = Machine(
+        self.machine = Machine(
             model=self,
             states=self.STATES,
             initial=DutState.DIRTY,
@@ -87,22 +87,24 @@ self.machine = Machine(
 
         self._register_custom_states()
 
-        def _register_custom_states(self) -> None:
-            """Override this in project subclasses to add custom states andtransitions.
-            This runs automatically during __init__ to patch the FSM.
-            logger.info("[EVSE FSM] Injecting custom EVSE hardware states...")
-            # Add the new states to the existing machine
-            self.machine.add_state(EvseState.CALIBRATION_MODE)
-            self.machine.add_state(EvseState.FACTORY_FLASH_MODE)
-            # Map the transition triggers to your custom physical hooks
-            self.machine.add_transition(
-                trigger='boot_to_calibration',
-                source='*', # Can transition from anywhere
-                dest=EvseState.CALIBRATION_MODE,
-                before='_hw_to_calibration'
-            )
-            """
+    def _register_custom_states(self) -> None:
+        """Override this in project subclasses to add custom states andtransitions.
+        This runs automatically during __init__ to patch the FSM.
+        logger.info("[EVSE FSM] Injecting custom EVSE hardware states...")
+        # Add the new states to the existing machine
+        self.machine.add_state(EvseState.CALIBRATION_MODE)
+        self.machine.add_state(EvseState.FACTORY_FLASH_MODE)
+        # Map the transition triggers to your custom physical hooks
+        self.machine.add_transition(
+            trigger='boot_to_calibration',
+            source='*', # Can transition from anywhere
+            dest=EvseState.CALIBRATION_MODE,
+            before='_hw_to_calibration'
+        )
+        """
         pass
+
+
 
     def register_context_validator(self, validator_func: Callable[['BaseDutStateMachine'], None]) -> None:
         """Allows test fixtures to seamlessly inject custom OS validation methods."""
