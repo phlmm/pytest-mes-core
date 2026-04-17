@@ -44,9 +44,14 @@ instruments = [
     "pyvisa-py>=0.7.1",
     "usbsdmux>=24.1",
 ]
+# Testing and development
+dev = [
+    "pytest-mock>=3.10",
+    "pyvisa-sim>=0.5"
+]
 # Install everything: pip install pytest-mes-core[all]
 all = [
-    "pytest-mes-core[linux-hardware,instruments]"
+    "pytest-mes-core[linux-hardware,instruments,dev]"
 ]
 
 [project.entry-points.pytest11]

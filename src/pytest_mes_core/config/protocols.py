@@ -87,6 +87,7 @@ class SshTargetConfig(BaseHardwareConfig):
     identity_file: Optional[str] = Field(default=None)
     port: int = Field(default=22, gt=0, le=65535)
     connect_timeout_s: float = Field(default=5.0, gt=0)
+    forensic_journaling: bool = Field(default=False)
 
     def get_password(self) -> Optional[str]:
         return self.password.get_secret_value() if self.password else None

@@ -26,7 +26,7 @@ def test_host_side_buffer_survives_shattered_socket():
     buffer.start()
 
     # 2. Wait enough time for it to poll twice, then hit the exception on the 3rd poll
-    time.sleep(0.4)
+    time.sleep(1.2)
 
     # 3. Stop the buffer. IF THE THREAD DEADLOCKED, THIS TEST HANGS FOREVER!
     surviving_data = buffer.stop()

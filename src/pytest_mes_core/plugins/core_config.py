@@ -23,9 +23,8 @@ from pytest_mes_core.telemetry import (
 
 logger = logging.getLogger("mes_core.config")
 
-# Globals for Session Lifecycle
-_global_watchdog: Optional[EStopWatchdog] = None
-_global_telemetry_sink: Optional[TelemetryExporter] = None
+# Global state removed. We bind directly to the pytest Config object to support xdist
+# and avoid session bombs across multiple pytest invocations.
 
 def pytest_addoption(parser: pytest.Parser) -> None:
     """
@@ -90,11 +89,11 @@ def mes_env(request: pytest.FixtureRequest) -> StationEnvironment:
     return load_toml_config(toml_path, StationEnvironment)
 
 @pytest.fixture(scope="session")
-def telemetry_sink() -> Optional[TelemetryExporter]:
+def telemetry_sink(request: pytest.FixtureRequest) -> Optional[TelemetryExporter]:
     """
     Provides direct access to the active telemetry pipeline exporter.
     """
-    return _global_telemetry_sink
+    return getattr(request.config, "_mes_telemetry_sink", None)
 
 def pytest_configure(config: pytest.Config) -> None:
     """
@@ -131,11 +130,10 @@ def pytest_configure(config: pytest.Config) -> None:
             bom = load_toml_config(toml_path, StationEnvironment)
 
             if bom.e_stop and bom.e_stop.enabled:
-                global _global_watchdog
-                _global_watchdog = EStopWatchdog(bom.e_stop)
-                _global_watchdog.__enter__()
+                watchdog = EStopWatchdog(bom.e_stop)
+                watchdog.__enter__()
+                config._mes_watchdog = watchdog
 
-            global _global_telemetry_sink
             session_id = str(uuid.uuid4())
             ctx = StationContext(
                 facility=bom.station_meta.facility,
@@ -157,9 +155,10 @@ def pytest_configure(config: pytest.Config) -> None:
                     active_exporters.append(OperatorReceiptExporter(log_dir))
 
                 # 3. Instantiate Router
-                _global_telemetry_sink = CompositeTelemetryExporter(active_exporters)
+                telemetry_sink = CompositeTelemetryExporter(active_exporters)
                 try:
-                    _global_telemetry_sink.start_session(ctx)
+                    telemetry_sink.start_session(ctx)
+                    config._mes_telemetry_sink = telemetry_sink
                 except Exception as e:
                     logger.critical(f"FATAL: Telemetry sub-system failed to initialize! {e}")
                     pytest.exit(f"MES Framework aborted. Cannot guarantee telemetry storage: {e}", returncode=1)
@@ -192,23 +191,24 @@ def pytest_unconfigure(config: pytest.Config) -> None:
     The Master Teardown Hook. Executes unconditionally after all tests finish
     or if the framework crashes fatally.
     """
-    global _global_watchdog, _global_telemetry_sink
+    watchdog = getattr(config, "_mes_watchdog", None)
+    telemetry_sink = getattr(config, "_mes_telemetry_sink", None)
 
-    if _global_watchdog:
-        _global_watchdog.__exit__(None, None, None)
+    if watchdog:
+        watchdog.__exit__(None, None, None)
 
-    if _global_telemetry_sink:
+    if telemetry_sink:
         tests_failed = bool(config.pluginmanager.get_plugin("session").testsfailed)
         session_passed = not tests_failed
 
         # Flush the Telemetry exporter buffers
-        _global_telemetry_sink.end_session(session_passed=session_passed)
+        telemetry_sink.end_session(session_passed=session_passed)
 
         #  DYNAMIC HTML REPORT RENAMING
         htmlpath = getattr(config.option, "htmlpath", None)
         if htmlpath and os.path.exists(htmlpath):
             try:
-                ctx = _global_telemetry_sink.context if _global_telemetry_sink else None
+                ctx = telemetry_sink.context if telemetry_sink else None
                 status = "PASS" if session_passed else "FAIL"
                 time_str = datetime.now().strftime("%H-%M-%S")
 

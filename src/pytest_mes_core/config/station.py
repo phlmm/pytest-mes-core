@@ -28,7 +28,7 @@ T = TypeVar('T', bound=BaseModel)
 class StationEnvironment(BaseModel):
     """The Indisputable Hardware BOM."""
 
-    model_config = ConfigDict(extra='allow')
+    model_config = ConfigDict(extra='forbid')
 
     station_meta: StationMetaConfig
     telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)

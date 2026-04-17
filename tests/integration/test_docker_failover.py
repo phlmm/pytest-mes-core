@@ -140,7 +140,7 @@ def test_physical_tcp_shatter_triggers_failover(ssh_container: str) -> None:
     # 6. Execute a long-running command.
     # At t=1s, the container vanishes. Paramiko will throw an EOFError.
     # The Matrix MUST catch it and seamlessly reroute to Serial.
-    res_survival = matrix.safe_run("sleep 10 && echo SURVIVED", timeout_s=15.0)
+    res_survival = matrix.safe_run("sleep 10 && echo SURVIVED", timeout_s=15.0, auto_retry=True)
 
     # 7. The Mathematical Proof
     assert matrix.is_failed_over is True

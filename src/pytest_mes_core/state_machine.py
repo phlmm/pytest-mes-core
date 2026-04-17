@@ -167,12 +167,12 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
         🚨 NEW HELPER: Consolidates desk-mode soft reboots.
         """
         logger.info("[State Machine] Desk Mode: Attempting soft-login to reboot instead of manual power cycle...")
-        self.serial.ser.write(f"{getattr(self.cfg, 'os_user', 'root')}\n".encode())
+        self.serial.write_line(f"{getattr(self.cfg, 'os_user', 'root')}")
         time.sleep(0.5)
         if getattr(self.cfg, "os_password", None):
-            self.serial.ser.write(f"{self.cfg.os_password}\n".encode())
+            self.serial.write_line(f"{self.cfg.os_password}", sensitive=True)
             time.sleep(0.5)
-        self.serial.ser.write(b"reboot\n")
+        self.serial.write_line("reboot")
 
     # =========================================================================
     # STATE RESOLUTION
@@ -351,6 +351,7 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
         pending_milestones = self.boot_profiler_cfg.milestones.copy() if self.boot_profiler_cfg else {}
 
         raw_buffer = bytearray()
+        clean_buffer = b""
         shell_prompt_b = getattr(self.cfg, "os_shell_prompt", "~#").encode('utf-8')
         login_prompt_b = getattr(self.cfg, "os_login_prompt", "login:").encode('utf-8')
         password_prompt_b = getattr(self.cfg, "os_password_prompt", "Password:").encode('utf-8') if getattr(self.cfg, "os_password", None) else None
@@ -379,7 +380,6 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
                     raise RuntimeError("Device kernel panicked during OS boot sequence.")
             else:
                 time.sleep(0.01)
-                continue
 
             current_elapsed = round(time.time() - start_time, 3)
 
@@ -392,18 +392,14 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
             elif login_prompt_b in clean_buffer and not login_handled:
                 self.boot_metrics["t_boot_total_to_login_s"] = current_elapsed
                 time.sleep(0.1)
-                logger.debug(f"[UART] TX -> '{self.cfg.os_user}'")
-                self.serial.ser.write(f"{self.cfg.os_user}\n".encode())
-                self.serial.ser.flush()
+                self.serial.write_line(f"{self.cfg.os_user}")
                 login_handled = True
                 # We don't wipe raw_buffer here to avoid dropping fast shell prompts
                 self.serial.parser.clear_buffer()
 
             elif password_prompt_b and password_prompt_b in clean_buffer and getattr(self.cfg, "os_password", None) and not password_handled:
                 time.sleep(0.1)
-                logger.debug("[UART] TX -> '********'")
-                self.serial.ser.write(f"{self.cfg.os_password}\n".encode())
-                self.serial.ser.flush()
+                self.serial.write_line(f"{self.cfg.os_password}", sensitive=True)
                 password_handled = True
                 self.serial.parser.clear_buffer()
         else:
@@ -425,6 +421,14 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
         # 2. Establish the high-speed SSH pipeline
         logger.info("[State Machine] Establishing primary SSH transport...")
         self.ssh.connect()
+
+    def verify_heartbeat(self) -> bool:
+        """Ping the OS state via UART heartbeat to verify it's still alive."""
+        if not self.serial.is_connected:
+            return False
+        logger.debug("[State Machine] Verifying UART heartbeat...")
+        res = self.serial.safe_run("echo MES_HEARTBEAT", timeout_s=2.0, check_exit_code=False)
+        return "MES_HEARTBEAT" in res.stdout
 
     # =========================================================================
     # SOTA CONTEXT VALIDATION

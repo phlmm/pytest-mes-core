@@ -10,6 +10,7 @@ from typing import Generator, Optional, Any
 from pytest_mes_core.config import HostSerialConfig
 from pytest_mes_core.transports.base import CommandResult, TransportConnectionError, TransportTimeoutError
 from pytest_mes_core.utils.uart_parser import UartStreamParser
+from pytest_mes_core.transports.watchdog import UartKernelWatchdog
 
 logger = logging.getLogger("mes_core.transports.serial")
 
@@ -29,7 +30,9 @@ class EphemeralSerialClient:
         self.cfg = cfg
         self.ser: Optional[serial.Serial] = None
         self._is_locked = False
+        self._is_executing = False
         self.parser = UartStreamParser()
+        self.watchdog = UartKernelWatchdog(self)
 
     def connect(self) -> None:
         try:
@@ -41,10 +44,12 @@ class EphemeralSerialClient:
             )
             self.flush_buffers()
             logger.debug(f"[UART] Bound to {self.cfg.port} and flushed stale OS buffers.")
+            self.watchdog.start()
         except serial.SerialException as e:
             raise TransportConnectionError(f"Failed to bind Host UART {self.cfg.port}: {e}")
 
     def disconnect(self) -> None:
+        self.watchdog.stop()
         if self.ser and self.ser.is_open:
             self.ser.close()
 
@@ -71,9 +76,11 @@ class EphemeralSerialClient:
         last_rx_time = time.perf_counter()
         raw_buffer = bytearray()
 
-        while time.perf_counter() < t_end:
-            if self.ser.in_waiting > 0:
-                chunk = self.ser.read(max(1, self.ser.in_waiting))
+        self._is_executing = True
+        try:
+            while time.perf_counter() < t_end:
+                if self.ser.in_waiting > 0:
+                    chunk = self.ser.read(max(1, self.ser.in_waiting))
                 raw_buffer.extend(chunk)
 
                 # Strip ANSI codes live to prevent prompt obfuscation
@@ -96,19 +103,24 @@ class EphemeralSerialClient:
                     last_rx_time = time.perf_counter()
 
                 time.sleep(0.01) # Yield to prevent CPU thrashing
+        finally:
+            self._is_executing = False
 
         # Timeout occurred
         dump = self.ANSI_ESCAPE_B.sub(b'', raw_buffer)[-200:].decode('utf-8', errors='replace').strip()
         logger.error(f"[UART] Timeout expecting '{pattern}'. Buffer yielded: {dump}")
         raise TransportTimeoutError(f"UART Expect Timeout: '{pattern}' not found.")
 
-    def write_line(self, cmd: str) -> None:
+    def write_line(self, cmd: str, sensitive: bool = False) -> None:
         if self._is_locked or self.ser is None:
             raise RuntimeError("Cannot write while UART is locked or closed.")
 
-        # Truncate massive base64 payloads in the debug trace
-        log_cmd = cmd if len(cmd) < 256 else cmd[:253] + "..."
-        logger.debug(f"[UART] TX -> '{log_cmd}'")
+        if sensitive:
+            logger.debug("[UART] TX -> '********'")
+        else:
+            # Truncate massive base64 payloads in the debug trace
+            log_cmd = cmd if len(cmd) < 256 else cmd[:253] + "..."
+            logger.debug(f"[UART] TX -> '{log_cmd}'")
 
         self.ser.write(f"{cmd}\n".encode('utf-8'))
         self.ser.flush()

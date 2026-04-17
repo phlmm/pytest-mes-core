@@ -15,6 +15,14 @@ class FailoverTransport:
         self.fallback = fallback
         self.is_failed_over = False
 
+        if hasattr(self.fallback, "watchdog") and getattr(self.fallback, "watchdog", None):
+            self.fallback.watchdog.register_panic_callback(self._on_panic)
+
+    def _on_panic(self) -> None:
+        logger.critical("[Router] Watchdog detected panic! Severing Primary connection to fail fast...")
+        if self.primary.is_connected:
+            self.primary.disconnect()
+
     @property
     def is_connected(self) -> bool:
         return self.fallback.is_connected if self.is_failed_over else self.primary.is_connected

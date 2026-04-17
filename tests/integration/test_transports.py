@@ -23,7 +23,7 @@ def test_matrix_catches_ssh_drop_and_routes_to_serial():
     matrix.connect()
 
     # 3. Execute the fatal command
-    res = matrix.safe_run("dmesg")
+    res = matrix.safe_run("dmesg", auto_retry=True)
 
     # 4. The Assertions
     assert matrix.is_failed_over is True

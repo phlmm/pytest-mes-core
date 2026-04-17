@@ -43,7 +43,7 @@ class EphemeralSSHClient:
         }
 
         if cfg.password:
-            connect_kwargs["password"] = cfg.password
+            connect_kwargs["password"] = cfg.get_password()
 
         identity_file_path = getattr(cfg, 'identity_file', None)
 
@@ -129,13 +129,17 @@ class EphemeralSSHClient:
 
         kwargs.setdefault('hide', True)
         kwargs.setdefault('warn', True)
+        kwargs.setdefault('in_stream', False)
 
         # 1. Forensic Journal Interceptor (Truncated to prevent Base64 spam)
         log_cmd = cmd if len(cmd) < 256 else cmd[:253] + "..."
         escaped_cmd = log_cmd.replace("'", "'\\''")
 
-        # Use ';' instead of '&&' to guarantee execution even if the journal daemon is busy
-        wrapped_cmd = f"logger -t MES_Factory 'EXEC: {escaped_cmd}' ; {cmd}"
+        # MES Forensic Hook: Record every command in system journal if opt-in
+        if getattr(self.cfg, "forensic_journaling", False):
+            wrapped_cmd = f"logger -t MES_Factory 'EXEC: {escaped_cmd}' ; {cmd}"
+        else:
+            wrapped_cmd = cmd
 
         # Matrix Tracing: Expose the clean shell command to Pytest
         logger.debug(f"[SSH] TX -> {log_cmd}")

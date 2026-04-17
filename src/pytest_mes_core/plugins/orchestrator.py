@@ -103,7 +103,15 @@ def enforce_physical_state(
 
     # State Routing Logic
     if current_state_name == target_state_name:
-        logger.debug(f"[Router] Board is already in {current_state_name}. Bypassing boot sequence.")
+        if target_state_name == 'OS_USERLAND' and hasattr(dut_state_machine, 'verify_heartbeat'):
+            if not dut_state_machine.verify_heartbeat():
+                logger.warning("[Router] Target is OS_USERLAND but heartbeat failed! Marking DIRTY and rebooting.")
+                dut_state_machine.mark_dirty()
+                dut_state_machine.boot_to_os()
+            else:
+                logger.debug(f"[Router] Board is already in {current_state_name} and heartbeat OK. Bypassing boot sequence.")
+        else:
+            logger.debug(f"[Router] Board is already in {current_state_name}. Bypassing boot sequence.")
     elif target_state_name == 'POWER_OFF':
         dut_state_machine.power_off()
     elif target_state_name == 'ENERGIZED':

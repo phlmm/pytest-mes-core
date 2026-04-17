@@ -14,7 +14,7 @@ def test_bmap_provisioner_catches_non_block_devices(mock_exists, mock_stat, mock
 
     provisioner = BmapBlockDeviceProvisioner(host_block_device="/dev/fake_mmc")
 
-    with pytest.raises(ProvisioningError, match="not a block device"):
+    with pytest.raises(ProvisioningError, match="NOT a block device"):
         provisioner.provision(Path("dummy.img"))
 
     # Guarantee subprocess.run was NEVER called, mathematically protecting the Host OS
