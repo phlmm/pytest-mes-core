@@ -79,6 +79,27 @@ class HostSideBuffer:
                     start_line = self._lines_read + 1
 
                 cmd = f"tail -n +{start_line} {self.remote_path} 2>/dev/null"
+                
+                # Prevent Serial Starvation: Scrape passively if failed over
+                is_failed_over = getattr(self.transport, "is_failed_over", False)
+                if is_failed_over:
+                    try:
+                        fallback = getattr(self.transport, "fallback", None)
+                        if fallback:
+                            # If it's a serial transport, it has a parser
+                            parser = getattr(fallback, "parser", None)
+                            if parser:
+                                new_lines = parser.extract_lines()
+                                if new_lines:
+                                    with self._lock:
+                                        self._buffer.extend(new_lines)
+                                        self._lines_read += len(new_lines)
+                                    logger.debug(f"[HostBuffer] Passive RX <- {len(new_lines)} lines from Watchdog (Total: {self._lines_read})")
+                    except Exception:
+                        pass
+                    
+                    self._stop_event.wait(timeout=self.poll_interval_s)
+                    continue
 
                 # 1. Transport Agnostic Execution
                 # We use a strict timeout to avoid deadlocking the background thread.

@@ -12,9 +12,9 @@ class UartKernelWatchdog:
     Runs only when the UART is not actively locked by an expect() call.
     """
     
-    # Matches common Linux kernel panics and fatal hardware aborts
+    # Matches common Linux kernel panics and fatal hardware aborts, plus soft lockups
     PANIC_PATTERN: Pattern[bytes] = re.compile(
-        br"(Kernel panic - not syncing|Out of memory: Killed process|synchronous external abort)"
+        br"(Kernel panic - not syncing|Out of memory: Killed process|synchronous external abort|BUG: soft lockup - CPU|rcu_preempt detected stalls|task blocked for more than 120 seconds)"
     )
 
     def __init__(self, serial_client: Any):

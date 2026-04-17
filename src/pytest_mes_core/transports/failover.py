@@ -1,4 +1,5 @@
 import logging
+import threading
 from typing import Any
 from pytest_mes_core.transports.base import DutTransport, CommandResult, TransportConnectionError
 
@@ -14,9 +15,25 @@ class FailoverTransport:
         self.primary = primary
         self.fallback = fallback
         self.is_failed_over = False
+        self._recovery_thread = None
+        self._stop_recovery = threading.Event()
 
         if hasattr(self.fallback, "watchdog") and getattr(self.fallback, "watchdog", None):
             self.fallback.watchdog.register_panic_callback(self._on_panic)
+
+    def _probe_primary_recovery(self) -> None:
+        while not self._stop_recovery.is_set():
+            if self.is_failed_over:
+                try:
+                    if not self.primary.is_connected:
+                        self.primary.connect()
+                    res = self.primary.safe_run("echo MES_PING", timeout_s=2.0)
+                    if res.ok and "MES_PING" in res.stdout:
+                        logger.info("[Router] HIGH-SPEED RECOVERY: Primary transport recovered! Failing-back.")
+                        self.is_failed_over = False
+                except Exception:
+                    pass
+            self._stop_recovery.wait(timeout=5.0)
 
     def _on_panic(self) -> None:
         logger.critical("[Router] Watchdog detected panic! Severing Primary connection to fail fast...")
@@ -32,9 +49,18 @@ class FailoverTransport:
             logger.info("[Router] Arming dual-transport failover matrix...")
             self.primary.connect()
             self.fallback.connect()
+            
+            self._stop_recovery.clear()
+            self._recovery_thread = threading.Thread(target=self._probe_primary_recovery, daemon=True)
+            self._recovery_thread.start()
+            
             logger.debug("[Router] Primary and Fallback transports bound and active.")
 
     def disconnect(self) -> None:
+        self._stop_recovery.set()
+        if self._recovery_thread and self._recovery_thread.is_alive():
+            self._recovery_thread.join(timeout=1.0)
+            
         logger.debug("[Router] ZERO-LEAKAGE: Tearing down dual-transport matrix.")
         self.primary.disconnect()
         self.fallback.disconnect()
