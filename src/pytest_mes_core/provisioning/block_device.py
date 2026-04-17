@@ -116,6 +116,10 @@ class BmapBlockDeviceProvisioner(BaseProvisioner):
             # 2. Defeat OS Caching (Critical for USB-SD-Mux before switching it back to DUT)
             logger.info("\n[Provisioning] Flash successful. Forcing kernel sync to flush RAM buffers to silicon...")
             subprocess.run(["sync"], check=True)
+            
+            # 3. Partition Table Thrashing Defense
+            logger.info("[Provisioning] Forcing kernel to rescan partition table geometry...")
+            subprocess.run(["partprobe", self.host_block_device], check=False)
 
             logger.info(f"[Provisioning] Image successfully provisioned and synced in {process.duration_s}s.")
 

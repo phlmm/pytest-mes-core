@@ -61,7 +61,7 @@ class SecureAssetFetcher:
         logger.info(f"[Fetch] Downloading asset from {url}...")
 
         # We download to a temporary '.part' file so parallel workers don't read a half-written file
-        temp_dest = dest.with_suffix(".part")
+        temp_dest = dest.with_suffix(f".part.{os.getpid()}")
         hasher = hashlib.sha256()
 
         try:

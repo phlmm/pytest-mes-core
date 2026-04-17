@@ -59,7 +59,6 @@ class PkiProvisioner:
         # 3. Base64 Encode and Chunk (CRITICAL FOR UART LINE BUFFERS)
         b64_string = base64.b64encode(raw_data).decode('utf-8')
         b64_chunks = [b64_string[i:i+64] for i in range(0, len(b64_string), 64)]
-        b64_payload = "\n".join(b64_chunks)
 
         # Security: Do not log the actual payload to avoid leaking private keys into CI artifacts
         logger.debug(f"[PKI] Base64 payload formatted: {len(b64_chunks)} lines, {len(b64_string)} bytes.")
@@ -69,13 +68,27 @@ class PkiProvisioner:
         logger.debug(f"[PKI] Building remote directory tree: mkdir -p {remote_dir}")
         transport.safe_run(f"mkdir -p {remote_dir}")
 
-        # 5. Inject using POSIX Heredoc (UART & SSH Safe)
-        logger.debug(f"[PKI] Transmitting payload via POSIX Heredoc (Secrets masked in trace)...")
-        inject_cmd = f"cat << 'EOF' | base64 -d > {remote_dest}\n{b64_payload}\nEOF"
-        res_inject = transport.safe_run(inject_cmd)
+        # 5. Inject iteratively to prevent UART FIFO overflow
+        logger.debug(f"[PKI] Transmitting payload iteratively (Secrets masked in trace)...")
+        b64_temp = f"{remote_dest}.b64"
+        transport.safe_run(f"> {b64_temp}")  # Clear temp file
+        
+        for chunk in b64_chunks:
+            res_chunk = transport.safe_run(f"echo '{chunk}' >> {b64_temp}")
+            if res_chunk.exited != 0:
+                err_msg = f"Failed to write payload chunk to DUT: {res_chunk.stderr.strip()}"
+                logger.critical(f"[PKI] FATAL: {err_msg}")
+                raise ProvisioningError(err_msg)
+            
+            # UART Hardware Throttle
+            import time
+            time.sleep(0.05)
 
-        if res_inject.exited != 0:
-            err_msg = f"Failed to write payload to DUT: {res_inject.stderr.strip()}"
+        res_decode = transport.safe_run(f"base64 -d {b64_temp} > {remote_dest}")
+        transport.safe_run(f"rm -f {b64_temp}")
+
+        if res_decode.exited != 0:
+            err_msg = f"Failed to decode base64 payload on DUT: {res_decode.stderr.strip()}"
             logger.critical(f"[PKI] FATAL: {err_msg}")
             raise ProvisioningError(err_msg)
 

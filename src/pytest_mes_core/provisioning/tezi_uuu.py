@@ -31,7 +31,16 @@ class UuuTeziProvisioner(BaseProvisioner):
     def _is_device_in_recovery(self) -> bool:
         """Polls the Linux USB tree to verify the SoC BootROM is visible."""
         try:
+            if self.usb_path:
+                # STRICT USB TOPOLOGY BINDING:
+                # Do NOT poll `lsusb` globally. If Jig B's board enters recovery,
+                # Jig A must ignore it unless it's on Jig A's exact USB port.
+                res_uuu = subprocess.run(["uuu", "-lsusb"], capture_output=True, text=True, timeout=5)
+                out_uuu = res_uuu.stdout.lower() + res_uuu.stderr.lower()
+                return self.usb_path in out_uuu
+
             # 1. Native OS Radar (Bypasses uuu permission/sudo traps)
+            # Only safe to do if we are running in single-jig mode (usb_path is None)
             res_lsusb = subprocess.run(["lsusb"], capture_output=True, text=True, timeout=5)
             output = res_lsusb.stdout.lower()
 
@@ -42,9 +51,6 @@ class UuuTeziProvisioner(BaseProvisioner):
             # 2. Fallback to uuu (Check stderr as well, where uuu sometimes prints)
             res_uuu = subprocess.run(["uuu", "-lsusb"], capture_output=True, text=True, timeout=5)
             out_uuu = res_uuu.stdout.lower() + res_uuu.stderr.lower()
-
-            if self.usb_path:
-                return self.usb_path in out_uuu
 
             return "1:" in out_uuu or "nxp" in out_uuu
 
