@@ -51,10 +51,24 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]) ->
 
     if rep.when == "call":
         record: TestRecord = getattr(item, "mes_telemetry_record", None)
-        if record and record.result and record.result.metrics:
-            # Format the dictionary into HTML breaks for the report
-            html = "<br>".join([f"<b>{k}:</b> {v}" for k, v in record.result.metrics.items()])
-            rep.custom_metrics_html = html
+        if record:
+            html_parts = []
+
+            # 1. Format Physical Context (RootFS, Boot Medium)
+            if "active_rootfs" in record.context:
+                html_parts.append(f"<span style='color: gray'>RootFS: {record.context['active_rootfs']}</span>")
+            if "boot_medium" in record.context:
+                html_parts.append(f"<span style='color: gray'>Boot: {record.context['boot_medium']}</span>")
+
+            # 2. Format Physical Metrics
+            if record.result and record.result.metrics:
+                if html_parts:
+                    html_parts.append("<hr style='margin: 4px 0; border: 0; border-top: 1px solid #ccc;'>")
+                metrics_html = "<br>".join([f"<b>{k}:</b> {v}" for k, v in record.result.metrics.items()])
+                html_parts.append(metrics_html)
+
+            if html_parts:
+                rep.custom_metrics_html = "<br>".join(html_parts)
 
 # ==========================================
 # CORE TELEMETRY FIXTURE
@@ -106,6 +120,14 @@ def mes_record(
         logger.warning("="*60)
 
     t0 = time.perf_counter()
+
+    # FORENSIC POISONING DEFENSE: Clear dmesg buffer before test starts.
+    # We use >/dev/null because heavily stripped Yocto Busybox instances might not support -c.
+    if dut_transport and getattr(dut_transport, "is_connected", False):
+        try:
+            dut_transport.safe_run("dmesg -c >/dev/null 2>&1", timeout_s=2.0, check_exit_code=False)
+        except Exception:
+            pass
 
     # STRICT ZERO-LEAKAGE TRY/FINALLY CONTRACT
     try:

@@ -49,21 +49,31 @@ The machine physically wired to the test jig running the Pytest runner.
 
 The framework uses `hatchling` and isolates C-extension dependencies to allow cross-platform development. Engineers can install the core framework on Windows/macOS to write tests, while factory jigs install the full hardware suite.
 
-```shell
-# 1. Purge legacy namespace hijackers (if migrating from old setups)
-pip uninstall -y serial can
+### Setting up a Clean Environment (Recommended)
 
-# 2. Install the framework via the modern build system
+To run the unit tests and work on the module locally, it is highly recommended to use a clean Python virtual environment.
+
+```bash
+# 1. Create a clean virtual environment
+python3 -m venv .venv
+
+# 2. Activate the virtual environment
+# On Linux/macOS:
+source .venv/bin/activate
+# On Windows:
+# .venv\Scripts\activate
+
+# 3. Upgrade pip, setuptools, and wheel
+pip install --upgrade pip setuptools wheel
+
+# 4. Install the framework via the modern build system
 # For Lab PCs/Jigs (Installs physical Linux drivers like evdev/gpiod):
+pip install -e ".[linux-hardware,instruments]"
+
+# For Developer Laptops running the unit tests (Installs all mock dependencies):
 pip install -e ".[all]"
 
-# For Developer Laptops (Core framework only, bypasses Linux C-compilers):
-pip install -e .
-
-# 3. Ensure the hermetic testing simulators are installed for Unit Tests
-pip install pytest-mock pyvisa-sim
-
-# 4. Execute the proofs
+# 5. Execute the proof tests
 pytest tests/
 ```
 

@@ -9,6 +9,7 @@ and the global execution lifecycle, including safety systems and telemetry.
 import os
 import pytest
 import logging
+import shutil
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -39,6 +40,18 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         action="store",
         required=True,
         help="The ID of the technician or CI pipeline running the test (Required for traceability)."
+    )
+    group.addoption(
+        "--board-serial",
+        action="store",
+        default="UNKNOWN",
+        help="The Serial Number of the DUT for lifecycle traceability."
+    )
+    group.addoption(
+        "--work-order",
+        action="store",
+        default="UNKNOWN",
+        help="The Manufacturing Work Order string."
     )
     group.addoption(
         "--env-config",
@@ -138,12 +151,20 @@ def pytest_configure(config: pytest.Config) -> None:
             ctx = StationContext(
                 facility=bom.station_meta.facility,
                 jig_id=bom.station_meta.jig_id,
-                operator_id=config.getoption("--operator-id", default="UNKNOWN")
+                operator_id=config.getoption("--operator-id", default="UNKNOWN"),
+                dut_serial=config.getoption("--board-serial", default="UNKNOWN"),
+                work_order=config.getoption("--work-order", default="UNKNOWN")
             )
             setattr(ctx, "run_id", session_id)
 
             if bom.telemetry.exporter_type == "jsonl":
-                log_dir = Path(bom.telemetry.log_directory) if bom.telemetry.log_directory else Path("artifacts/evse_telemetry")
+                # Stash the true network drive target
+                target_dir = Path(bom.telemetry.log_directory) if bom.telemetry.log_directory else Path("artifacts/evse_telemetry")
+                config._mes_telemetry_target_dir = target_dir
+
+                # Pivot all telemetry to a local RAM/ephemeral spool
+                log_dir = Path("/tmp/mes_telemetry_spool") / session_id
+                config._mes_telemetry_spool_dir = log_dir
 
                 # 1. Base Exporter (Always Active)
                 active_exporters = [JsonlTelemetryExporter(log_dir)]
@@ -179,6 +200,8 @@ def pytest_configure(config: pytest.Config) -> None:
                 metadata["Jig ID"] = bom.station_meta.jig_id
                 metadata["Operator ID"] = ctx.operator_id
                 metadata["Run UUID"] = session_id
+                metadata["Board Serial"] = ctx.dut_serial
+                metadata["Work Order"] = ctx.work_order
                 metadata["Test Timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
             logger.info(f"[Framework] Bootstrapping MES Session for Jig: {bom.station_meta.jig_id}")
@@ -203,6 +226,20 @@ def pytest_unconfigure(config: pytest.Config) -> None:
 
         # Flush the Telemetry exporter buffers
         telemetry_sink.end_session(session_passed=session_passed)
+
+        # Sychronize local spool back to the NFS Master Log Directory
+        spool_dir = getattr(config, "_mes_telemetry_spool_dir", None)
+        target_dir = getattr(config, "_mes_telemetry_target_dir", None)
+
+        if spool_dir and target_dir and spool_dir.exists():
+            try:
+                target_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(spool_dir, target_dir, dirs_exist_ok=True)
+                logger.info(f"[MES] Telemetry spool successfully synced to {target_dir}")
+                # Optional: shutil.rmtree(spool_dir) to clean up
+            except Exception as e:
+                logger.error(f"[MES] WARNING: Failed to sync telemetry spool to NFS {target_dir}: {e}")
+                logger.error(f"[MES] Data is preserved locally in {spool_dir}")
 
         #  DYNAMIC HTML REPORT RENAMING
         htmlpath = getattr(config.option, "htmlpath", None)

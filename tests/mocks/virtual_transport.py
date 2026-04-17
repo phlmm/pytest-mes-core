@@ -20,7 +20,8 @@ class MockTransport:
             "cat /sys/devices/system/edac/mc/mc0/ue_count": "0",
             "memtester": "memtester version 4.5.1 (64-bit)\nDone.",
             "echo 0 > /sys/devices/system/edac": "",
-            "systemd-analyze time": "Startup finished in 2.1s (kernel) + 4.5s (userspace) = 6.6s\ngraphical.target reached after 6.5s in userspace"
+            "systemd-analyze time": "Startup finished in 2.1s (kernel) + 4.5s (userspace) = 6.6s\ngraphical.target reached after 6.5s in userspace",
+            "dmesg -c >/dev/null 2>&1": ""
         }
         self.command_history = []
 

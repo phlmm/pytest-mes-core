@@ -34,6 +34,7 @@ class StationContext(BaseModel):
 
     # --- DUT Identity & Genealogy ---
     dut_serial: str = "PENDING"
+    work_order: str = "UNKNOWN"
     firmware_version: str = "UNKNOWN"
 
     # The Hardware BOM/Manifest of the specific board being tested
