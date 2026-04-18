@@ -12,9 +12,31 @@ class UartKernelWatchdog:
     Runs only when the UART is not actively locked by an expect() call.
     """
     
-    # Matches common Linux kernel panics and fatal hardware aborts, plus soft lockups
+    # Matches Linux kernel panics and fatal hardware events seen on i.MX6/i.MX8 deployments.
+    # Ordered roughly by frequency of occurrence in factory floor environments.
     PANIC_PATTERN: Pattern[bytes] = re.compile(
-        br"(Kernel panic - not syncing|Out of memory: Killed process|synchronous external abort|BUG: soft lockup - CPU|rcu_preempt detected stalls|task blocked for more than 120 seconds)"
+        br"("
+        # --- Kernel Panics ---
+        br"Kernel panic - not syncing"
+        br"|Unable to handle kernel paging request"   # ARM null-deref: most common panic header
+        br"|Oops - undefined instruction"             # ARMv7 illegal instruction / bad binary
+        # --- Memory Pressure ---
+        br"|Out of memory: Killed process"
+        # --- CPU / Scheduler Stalls ---
+        br"|BUG: soft lockup - CPU"
+        br"|rcu_preempt detected stalls"
+        br"|task blocked for more than 120 seconds"
+        # --- Hardware / Bus Errors ---
+        br"|synchronous external abort"               # i.MX8 bus fault
+        br"|mmc\d+: error -110"                      # eMMC command timeout (post-flash lockup)
+        # --- Filesystem Corruption ---
+        br"|EXT4-fs error"                            # eMMC corruption during/after flashing
+        br"|UBIFS error"                              # NAND-based board filesystem fault
+        # --- Secure Boot / HAB ---
+        br"|HAB Events"
+        br"|SEC_ERR"
+        br"|Signature Verification Failed"
+        br")"
     )
 
     def __init__(self, serial_client: Any):

@@ -79,6 +79,7 @@ class EphemeralSerialClient:
         self._is_executing = True
         try:
             while time.perf_counter() < t_end:
+                chunk = b""
                 if self.ser.in_waiting > 0:
                     chunk = self.ser.read(max(1, self.ser.in_waiting))
                 raw_buffer.extend(chunk)
@@ -267,15 +268,23 @@ class EphemeralSerialClient:
 
     @contextmanager
     def exclusive_raw_access(self) -> Generator[serial.Serial, None, None]:
-        """Temporarily yields raw OS socket control for deep hardware flashes (e.g., uuu)."""
+        """Temporarily yields raw OS socket control for deep hardware flashes (e.g., uuu).
+
+        The kernel watchdog background thread is explicitly stopped for the duration.
+        A flag-based approach has a TOCTOU window: the watchdog could pass its
+        _is_locked check and then read from the FD simultaneously. Stopping the
+        thread is safe because exclusive access is always a well-bounded operation.
+        """
         if not self.is_connected or self.ser is None:
             raise TransportConnectionError("Cannot grant exclusive access: UART port is closed.")
 
         logger.warning(f"[UART] Granting EXCLUSIVE raw binary access to port {self.cfg.port}")
+        self.watchdog.stop()
         self._is_locked = True
         try:
             yield self.ser
         finally:
-            logger.debug("[UART] Revoking exclusive access.")
+            logger.debug("[UART] Revoking exclusive access. Restarting kernel watchdog.")
             self._is_locked = False
             self.flush_buffers()
+            self.watchdog.start()

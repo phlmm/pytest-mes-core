@@ -127,7 +127,7 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
 
     def _probe_uart_for_state(self) -> DutState:
         """
-        🚨 NEW HELPER: Universal UART prober with strict ANSI stripping.
+         NEW HELPER: Universal UART prober with strict ANSI stripping.
         Single source of truth for physical state detection.
         """
         if not self.serial.is_connected:
@@ -144,7 +144,7 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
             resp.extend(self.serial.ser.read(self.serial.ser.in_waiting))
             time.sleep(0.05)
 
-        # 🚨 FIX: Strict ANSI stripping applied centrally
+        #  FIX: Strict ANSI stripping applied centrally
         clean_resp = self.ANSI_ESCAPE_B.sub(b'', resp)
 
         shell_prompt = getattr(self.cfg, "os_shell_prompt", "~#").encode('utf-8')
@@ -164,7 +164,7 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
 
     def _do_soft_reboot(self) -> None:
         """
-        🚨 NEW HELPER: Consolidates desk-mode soft reboots.
+         NEW HELPER: Consolidates desk-mode soft reboots.
         """
         logger.info("[State Machine] Desk Mode: Attempting soft-login to reboot instead of manual power cycle...")
         self.serial.write_line(f"{getattr(self.cfg, 'os_user', 'root')}")
@@ -342,7 +342,7 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
                         time.sleep(0.05)
                     self.serial.ser.flush()
                     interrupt_fired = True
-                    # 🚨 THE FIX: Removed raw_buffer.clear() to prevent deleting the prompt!
+                    #  THE FIX: Removed raw_buffer.clear() to prevent deleting the prompt!
 
                 if prompt_b in clean_buffer or b"MES Framework Trap" in clean_buffer:
                     self.serial.ser.timeout = 2.0
@@ -389,7 +389,7 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
                 raw_buffer.extend(chunk)
                 self.serial.parser.ingest(chunk)
 
-                # 🚨 SOTA FIX: Clean ANSI colors before regex matching!
+                #  SOTA FIX: Clean ANSI colors before regex matching!
                 clean_buffer = self.ANSI_ESCAPE_B.sub(b'', raw_buffer)
 
                 for line in self.serial.parser.extract_lines():
@@ -484,7 +484,7 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
 
         logger.info("[State Machine] Validating default A/B Partitions via SWUpdate IPC...")
 
-        # 🚨 THE FIX: Verify 'swupdate' actually exists before parsing its output!
+        #  THE FIX: Verify 'swupdate' actually exists before parsing its output!
         res_sw = self.serial.safe_run("swupdate -g", timeout_s=3.0, check_exit_code=False)
 
         if res_sw.ok:
@@ -587,7 +587,7 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
                 self.serial.safe_run("reboot", timeout_s=2.0, check_exit_code=False)
             else:
                 if self.state in [DutState.ENERGIZED] and not self.psu:
-                    # 🚨 THE FIX: Replaced 8 lines of code with our DRY helper
+                    #  THE FIX: Replaced 8 lines of code with our DRY helper
                     self._do_soft_reboot()
                 else:
                     if self.state in [DutState.ENERGIZED]: self._do_power_off()
