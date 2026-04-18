@@ -135,13 +135,15 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
             time.sleep(0.1)
 
         self.serial.flush_buffers()
-        self.serial.ser.write(b"\r\n")
-        self.serial.ser.flush()
+        self.serial.raw_write(b"\r\n")
         time.sleep(0.4)
 
         resp = bytearray()
-        while self.serial.ser.in_waiting > 0:
-            resp.extend(self.serial.ser.read(self.serial.ser.in_waiting))
+        while True:
+            chunk = self.serial.raw_read_chunk()
+            if not chunk:
+                break
+            resp.extend(chunk)
             time.sleep(0.05)
 
         #  FIX: Strict ANSI stripping applied centrally
@@ -312,8 +314,8 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
     def _do_wait_for_bootloader(self, spam_interrupt: bool) -> None:
         logger.info("[State Machine] Hunting for Bootloader prompt...")
         self.serial.flush_buffers()
-        if self.serial.ser and self.serial.ser.is_open:
-            self.serial.ser.timeout = 0
+        if self.serial.is_connected:
+            self.serial.raw_set_timeout(0)
 
         t_end = time.perf_counter() + getattr(self.cfg, "cold_boot_timeout_s", 60.0)
         interrupt_fired = False
@@ -325,8 +327,8 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
         raw_buffer = bytearray()
 
         while time.perf_counter() < t_end:
-            if self.serial.ser.in_waiting > 0:
-                chunk = self.serial.ser.read(self.serial.ser.in_waiting)
+            chunk = self.serial.raw_read_chunk()
+            if chunk:
                 raw_buffer.extend(chunk)
                 self.serial.parser.ingest(chunk)
 
@@ -338,15 +340,14 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
                 if spam_interrupt and not interrupt_fired and autoboot_msg_b in clean_buffer:
                     logger.info("[State Machine] Autoboot window detected, sniping...")
                     for _ in range(3):
-                        self.serial.ser.write(blast_bytes)
+                        self.serial.raw_write(blast_bytes)
                         time.sleep(0.05)
-                    self.serial.ser.flush()
                     interrupt_fired = True
                     #  THE FIX: Removed raw_buffer.clear() to prevent deleting the prompt!
 
                 if prompt_b in clean_buffer or b"MES Framework Trap" in clean_buffer:
-                    self.serial.ser.timeout = 2.0
-                    self.serial.ser.write(b"\n")
+                    self.serial.raw_set_timeout(2.0)
+                    self.serial.raw_write(b"\n")
                     time.sleep(0.1)
                     self.serial.flush_buffers()
 
@@ -364,8 +365,7 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
     def _do_boot_from_bootloader_to_os(self) -> None:
         logger.info(f"[State Machine] Commanding OS Boot: '{self.cfg.bootloader_boot_cmd}'")
         self.serial.flush_buffers()
-        self.serial.ser.write(f"{self.cfg.bootloader_boot_cmd}\n".encode())
-        self.serial.ser.flush()
+        self.serial.raw_write(f"{self.cfg.bootloader_boot_cmd}\n".encode())
         self._do_wait_for_os()
 
     def _do_wait_for_os(self) -> None:
@@ -384,8 +384,8 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
         password_handled = False
 
         while time.time() - start_time < getattr(self.cfg, "cold_boot_timeout_s", 65.0):
-            if self.serial.ser.in_waiting > 0:
-                chunk = self.serial.ser.read(self.serial.ser.in_waiting)
+            chunk = self.serial.raw_read_chunk()
+            if chunk:
                 raw_buffer.extend(chunk)
                 self.serial.parser.ingest(chunk)
 
@@ -629,8 +629,7 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
         if self.state == DutState.ENERGIZED:
             logger.info("[State Machine] Device is ENERGIZED (At Login Prompt). Attempting Hot-Login...")
             # Tap ENTER to force the OS to redraw the prompt so _do_wait_for_os catches it instantly
-            self.serial.ser.write(b"\n")
-            self.serial.ser.flush()
+            self.serial.raw_write(b"\n")
             try:
                 # _do_wait_for_os handles the full user/pass/shell authentication natively!
                 self._do_wait_for_os()

@@ -254,6 +254,35 @@ class EphemeralSerialClient:
             self.ser.reset_input_buffer()
         self.parser.clear_buffer()
 
+    # ------------------------------------------------------------------
+    # RAW PORT ACCESSORS
+    # Used exclusively by low-level boot-detection loops in the FSM.
+    # No other caller should access .ser directly.
+    # ------------------------------------------------------------------
+
+    def raw_write(self, data: bytes) -> None:
+        """Write raw bytes to the port and flush. Guards against None/closed port."""
+        if self.ser and self.ser.is_open:
+            self.ser.write(data)
+            self.ser.flush()
+
+    def raw_read_pending(self) -> int:
+        """Returns the number of bytes waiting in the OS receive buffer."""
+        return self.ser.in_waiting if self.ser and self.ser.is_open else 0
+
+    def raw_read_chunk(self) -> bytes:
+        """Reads all pending bytes without blocking. Returns b'' if nothing available."""
+        n = self.raw_read_pending()
+        return self.ser.read(n) if n > 0 else b""
+
+    def raw_set_timeout(self, timeout: float) -> None:
+        """Adjusts the OS-level read timeout. Boot loops switch between 0 (non-blocking)
+        and >0 (blocking) at specific phases; encapsulating this avoids bare .ser access.
+        """
+        if self.ser and self.ser.is_open:
+            self.ser.timeout = timeout
+
+
     def read_clean_stream(self) -> Generator[str, None, None]:
         """Provides a live, ANSI-stripped generator for real-time log trailing (e.g., UUU/TEZI)."""
         if not self.ser or not self.ser.is_open: return
