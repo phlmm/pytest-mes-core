@@ -278,9 +278,9 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
         if self.psu:
             self.psu.enable_output()
             if hasattr(self.psu, "measure_current"):
-                t_end = time.time() + 1.0
+                t_end = time.perf_counter() + 1.0
                 max_i = 0.0
-                while time.time() < t_end:
+                while time.perf_counter() < t_end:
                     try:
                         i = float(self.psu.measure_current())
                         if i > max_i: max_i = i

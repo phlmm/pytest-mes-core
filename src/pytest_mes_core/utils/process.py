@@ -46,19 +46,27 @@ class LiveProcess:
             bufsize=1
         )
 
+        _stdout_chunks: list = []
+
         try:
             while True:
                 # 16-byte chunks defend against RAM spikes and support '\r' progress bars
                 chunk = proc.stdout.read(16)
-                if not chunk and proc.poll() is not None:
-                    break
-                if chunk:
-                    sys.stdout.write(chunk)
-                    sys.stdout.flush()
-                    self.stdout += chunk
+                if not chunk:
+                    if proc.poll() is not None:
+                        break
+                    # Yield to the OS when the subprocess is alive but silent.
+                    # Without this the loop busy-spins at 100% CPU, starving UART
+                    # reader threads in multi-jig environments.
+                    time.sleep(0.005)
+                    continue
+                sys.stdout.write(chunk)
+                sys.stdout.flush()
+                _stdout_chunks.append(chunk)
 
             proc.wait(timeout=self.timeout_s)
             self.returncode = proc.returncode
+            self.stdout = "".join(_stdout_chunks)
 
         except subprocess.TimeoutExpired:
             self.logger.critical(f"\n[OS] FATAL: Process hung for >{self.timeout_s}s! Executing hard kill.")
