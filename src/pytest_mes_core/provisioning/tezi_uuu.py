@@ -1,4 +1,5 @@
 # src/pytest_mes_core/provisioning/tezi_uuu.py
+import re
 import time
 import logging
 import subprocess
@@ -17,6 +18,36 @@ class UuuTeziProvisioner(BaseProvisioner):
     Pushes TEZI images into SoC RAM via USB Serial Downloader mode.
     Enforces USB port isolation for parallel multi-jig environments.
     """
+
+    # ------------------------------------------------------------------
+    # NXP DEVICE DETECTION PATTERNS
+    # ------------------------------------------------------------------
+
+    # lsusb output format: "Bus 001 Device 007: ID 1fc9:0135 NXP Semiconductors"
+    # 1fc9 = NXP, 15a2 = Freescale legacy — both enumerate in Serial Downloader mode.
+    _LSUSB_NXP_RE = re.compile(r"(1fc9|15a2):[0-9a-f]{4}", re.IGNORECASE)
+
+    # uuu -lsusb labels NXP recovery devices as "SE Blank <variant>" or "SDP:<target>".
+    # These are uuu's internal identifiers, not raw USB descriptors.
+    _UUU_RECOVERY_RE = re.compile(r"(SE Blank|SDP:)", re.IGNORECASE)
+
+    # ------------------------------------------------------------------
+    # UUU OUTPUT ANALYSIS PATTERNS
+    # ------------------------------------------------------------------
+
+    # uuu prints "] Done" at the right edge of each successful progress bar step.
+    # Checking for "done" anywhere in raw output risks false positives (e.g. filenames).
+    _UUU_SUCCESS_RE = re.compile(r"\]\s*Done\b", re.IGNORECASE)
+
+    # uuu prints "] Fail" on the progress bar and "uuu Failed!" as a trailing summary.
+    _UUU_FAIL_RE = re.compile(r"(\]\s*Fail\b|uuu Failed)", re.IGNORECASE)
+
+    # libusb permission errors — always produce a non-zero exit code in uuu.
+    _UUU_PERMISSION_RE = re.compile(
+        r"(LIBUSB_ERROR_ACCESS|libusb_open failed|Access denied|Permission denied)",
+        re.IGNORECASE
+    )
+
     def __init__(
         self,
         wait_for_recovery_s: int = 30,
@@ -42,17 +73,16 @@ class UuuTeziProvisioner(BaseProvisioner):
             # 1. Native OS Radar (Bypasses uuu permission/sudo traps)
             # Only safe to do if we are running in single-jig mode (usb_path is None)
             res_lsusb = subprocess.run(["lsusb"], capture_output=True, text=True, timeout=5)
-            output = res_lsusb.stdout.lower()
 
-            # 1fc9 is NXP. 15a2 is Freescale. Both cover the entire i.MX line in Serial Downloader mode.
-            if "1fc9:" in output or "15a2:" in output or "nxp semiconductors" in output:
+            # Match exact VID:PID format — avoids substring collisions with timestamps or paths.
+            if self._LSUSB_NXP_RE.search(res_lsusb.stdout):
                 return True
 
-            # 2. Fallback to uuu (Check stderr as well, where uuu sometimes prints)
+            # 2. Fallback: ask uuu directly. uuu labels NXP recovery devices as
+            #    "SE Blank <variant>" or "SDP:<target>" — match those explicitly.
+            #    Do NOT use "1:" or "nxp" substring checks: both match unrelated output.
             res_uuu = subprocess.run(["uuu", "-lsusb"], capture_output=True, text=True, timeout=5)
-            out_uuu = res_uuu.stdout.lower() + res_uuu.stderr.lower()
-
-            return "1:" in out_uuu or "nxp" in out_uuu
+            return bool(self._UUU_RECOVERY_RE.search(res_uuu.stdout))
 
         except subprocess.TimeoutExpired:
             return False
@@ -117,20 +147,23 @@ class UuuTeziProvisioner(BaseProvisioner):
             # LIVE PROCESS EXECUTION & TELEMETRY
             # ==========================================
             process = LiveProcess(cmd, self.flash_timeout_s, logger).execute()
-            combined_lower = process.stdout.lower()
 
-            if process.returncode != 0 or "libusb_open" in combined_lower or "access denied" in combined_lower:
+            # PRIMARY GATE: returncode is the authoritative failure signal from uuu.
+            if process.returncode != 0:
                 log_path = process.export_log(Path("/tmp/mes_artifacts"))
                 logger.critical(f"\n[TEZI] FATAL: uuu rejected the payload! (Code {process.returncode}). Trace saved to: {log_path}")
 
-                if "libusb" in combined_lower or "access" in combined_lower or "permission" in combined_lower:
+                if self._UUU_PERMISSION_RE.search(process.stdout):
                     raise ProvisioningError(
                         "OS Permission Denied! You must either run pytest with 'sudo' "
                         "or install the NXP udev rules so your user can access the USB device."
                     )
                 raise ProvisioningError(f"uuu lost USB sync (Code {process.returncode}).")
 
-            if "error" in combined_lower or ("done" not in combined_lower and "success" not in combined_lower):
+            # SECONDARY GATE: uuu can exit 0 after a partial script execution.
+            # We do NOT grep for "error" — uuu legitimately prints "error_count: 0" in
+            # normal successful runs, which would cause a false positive failure.
+            if self._UUU_FAIL_RE.search(process.stdout) or not self._UUU_SUCCESS_RE.search(process.stdout):
                 log_path = process.export_log(Path("/tmp/mes_artifacts"))
                 logger.critical(f"\n[TEZI] FATAL: uuu falsely exited 0. Payload never executed. Trace saved to: {log_path}")
                 raise ProvisioningError("uuu script failed to execute fully. Missing 'Done' confirmation.")
