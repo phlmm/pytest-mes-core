@@ -20,8 +20,10 @@ def test_fsm_panic_watchdog_catches_hab_events():
     mock_serial.parser.extract_lines.return_value = []
     
     # Simulate a stream that prints normal boot text, then a HAB exception
-    mock_serial.ser.in_waiting = 50
-    mock_serial.ser.read.return_value = b"U-Boot 2022.04\r\nLoading Kernel...\r\nHAB Events: SEC_ERR Signature Verification Failed"
+    mock_serial.raw_read_chunk.side_effect = [
+        b"U-Boot 2022.04\r\nLoading Kernel...\r\nHAB Events: SEC_ERR Signature Verification Failed",
+        b"", b"", b"", b""
+    ]
     
     mock_ssh = MagicMock(spec=EphemeralSSHClient)
     cfg = StateMachineConfig(enabled=True)
