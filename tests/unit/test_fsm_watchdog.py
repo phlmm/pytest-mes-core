@@ -1,5 +1,5 @@
 import pytest
-from pytest_mes_core.state_machine import EmbeddedLinuxStateMachine
+from pytest_mes_core.state_machine import EmbeddedLinuxStateMachine, KernelPanicError
 from pytest_mes_core.config import StateMachineConfig
 from pytest_mes_core.transports import EphemeralSerialClient, EphemeralSSHClient
 from tests.mocks.virtual_transport import MockTransport
@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 def test_fsm_panic_watchdog_catches_hab_events():
     """
     Simulates a Toradex/NXP i.MX BootROM throwing a Secure Boot violation.
-    The FSM should catch 'HAB Events' and raise a RuntimeError instantly
+    The FSM should catch 'HAB Events' and raise a KernelPanicError instantly
     instead of waiting for the full 60-second boot timeout.
     """
     mock_serial = MagicMock(spec=EphemeralSerialClient)
@@ -35,6 +35,6 @@ def test_fsm_panic_watchdog_catches_hab_events():
         cfg=cfg
     )
     
-    with pytest.raises(RuntimeError, match="Device kernel panicked during OS boot sequence"):
+    with pytest.raises(KernelPanicError, match="Device kernel panicked during OS boot sequence"):
         # We manually invoke the boot sequence reader
         fsm._do_wait_for_os()

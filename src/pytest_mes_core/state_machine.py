@@ -22,6 +22,25 @@ except ImportError:
 
 logger = logging.getLogger("mes_core.state_machine")
 
+# ==========================================
+# DOMAIN EXCEPTIONS (State Machine Faults)
+# ==========================================
+class StateMachineError(Exception):
+    """Root exception for all FSM hardware lifecycle failures."""
+    pass
+
+class KernelPanicError(StateMachineError):
+    """Raised when the PANIC_WATCHDOG regex matches kernel output during boot."""
+    pass
+
+class BootloaderTimeoutError(StateMachineError):
+    """Raised when the FSM cannot intercept the U-Boot prompt within the configured timeout."""
+    pass
+
+class BootloaderSyncError(StateMachineError):
+    """Raised when the echo sync command fails after prompt detection."""
+    pass
+
 @dataclass
 class DeviceContext:
     active_rootfs: str = "UNKNOWN"
@@ -127,7 +146,7 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
 
     def _probe_uart_for_state(self) -> DutState:
         """
-         NEW HELPER: Universal UART prober with strict ANSI stripping.
+        Universal UART prober with strict ANSI stripping.
         Single source of truth for physical state detection.
         """
         if not self.serial.is_connected:
@@ -146,12 +165,12 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
             resp.extend(chunk)
             time.sleep(0.05)
 
-        #  FIX: Strict ANSI stripping applied centrally
+        # Strict ANSI stripping applied centrally
         clean_resp = self.ANSI_ESCAPE_B.sub(b'', resp)
 
-        shell_prompt = getattr(self.cfg, "os_shell_prompt", "~#").encode('utf-8')
-        login_prompt = getattr(self.cfg, "os_login_prompt", "login:").encode('utf-8')
-        uboot_prompt = getattr(self.cfg, "bootloader_prompt", "=>").encode('utf-8')
+        shell_prompt = self.cfg.os_shell_prompt.encode('utf-8')
+        login_prompt = self.cfg.os_login_prompt.encode('utf-8')
+        uboot_prompt = self.cfg.bootloader_prompt.encode('utf-8')
 
         if shell_prompt in clean_resp:
             return DutState.OS_USERLAND
@@ -166,13 +185,13 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
 
     def _do_soft_reboot(self) -> None:
         """
-         NEW HELPER: Consolidates desk-mode soft reboots.
+        Consolidates desk-mode soft reboots.
         """
         logger.info("[State Machine] Desk Mode: Attempting soft-login to reboot instead of manual power cycle...")
-        self.serial.write_line(f"{getattr(self.cfg, 'os_user', 'root')}")
+        self.serial.write_line(self.cfg.os_user)
         time.sleep(0.5)
-        if getattr(self.cfg, "os_password", None):
-            self.serial.write_line(f"{self.cfg.os_password}", sensitive=True)
+        if self.cfg.os_password:
+            self.serial.write_line(self.cfg.get_os_password(), sensitive=True)
             time.sleep(0.5)
         self.serial.write_line("reboot")
 
@@ -180,42 +199,28 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
     # STATE RESOLUTION
     # =========================================================================
 
-    def _sync_physical_state(self) -> None:
-        if self.state != DutState.DIRTY and self.psu is not None:
+    def _align_to_physical_state(self, force: bool = False) -> None:
+        """
+        Probes UART to detect actual hardware state and aligns the FSM.
+        Uses machine.set_state() to ensure transitions library tracks the change.
+
+        Args:
+            force: If True, probes even if the state is not DIRTY and PSU is present.
+        """
+        if not force and self.state != DutState.DIRTY and self.psu is not None:
             return
 
-        logger.debug("[State Machine] Probing UART to sync physical state...")
+        logger.debug("[State Machine] Probing UART to align physical state...")
         detected_state = self._probe_uart_for_state()
 
-        if detected_state == DutState.OS_USERLAND:
-            logger.info("[State Machine] UART Probe: Detected OS Shell. Aligning to OS_USERLAND.")
-        elif detected_state == DutState.ENERGIZED:
-            logger.info("[State Machine] UART Probe: Detected output/login. Aligning to ENERGIZED.")
-        elif detected_state == DutState.BOOTLOADER:
-            logger.info("[State Machine] UART Probe: Detected Bootloader. Aligning to BOOTLOADER.")
-        else:
-            if self.state == DutState.DIRTY:
-                logger.info("[State Machine] UART Probe: Silence. Assumed POWER_OFF.")
-
-        self.state = detected_state
-
-    def _resolve_dirty_state(self) -> None:
-        if self.state != DutState.DIRTY:
-            return
-
-        logger.debug("[State Machine] State is DIRTY. Probing UART to detect actual physical state...")
-        detected_state = self._probe_uart_for_state()
-
-        if detected_state == DutState.OS_USERLAND:
-            logger.info("[State Machine] UART Probe: Detected OS Shell. Fast-tracking to OS_USERLAND.")
-        elif detected_state == DutState.ENERGIZED:
-            logger.info("[State Machine] UART Probe: Detected output/login. Resolving to ENERGIZED.")
-        elif detected_state == DutState.BOOTLOADER:
-            logger.info("[State Machine] UART Probe: Detected Bootloader. Resolving to BOOTLOADER.")
-        else:
-            logger.info("[State Machine] UART Probe: Silence. Resolving to POWER_OFF.")
-
-        self.state = detected_state
+        state_labels = {
+            DutState.OS_USERLAND: "Detected OS Shell",
+            DutState.ENERGIZED: "Detected output/login",
+            DutState.BOOTLOADER: "Detected Bootloader",
+            DutState.POWER_OFF: "Silence",
+        }
+        logger.info(f"[State Machine] UART Probe: {state_labels.get(detected_state, 'Unknown')}. Aligning to {detected_state.name}.")
+        self.machine.set_state(detected_state)
 
     # =========================================================================
     # PHYSICAL PRIMITIVES
@@ -302,7 +307,7 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
 
     def _restore_uboot_trap(self) -> None:
         logger.info("[State Machine] Restoring original U-Boot environment...")
-        prompt = getattr(self.cfg, "bootloader_prompt", "=>")
+        prompt = self.cfg.bootloader_prompt
         self.serial.safe_run('setenv bootcmd "${mes_prev_bootcmd}"', expected_prompt=prompt, timeout_s=3.0)
         self.serial.safe_run('setenv mes_prev_bootcmd', expected_prompt=prompt, timeout_s=3.0)
         self.serial.safe_run('saveenv', expected_prompt=prompt, timeout_s=5.0)
@@ -317,11 +322,11 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
         if self.serial.is_connected:
             self.serial.raw_set_timeout(0)
 
-        t_end = time.perf_counter() + getattr(self.cfg, "cold_boot_timeout_s", 60.0)
+        t_end = time.perf_counter() + self.cfg.cold_boot_timeout_s
         interrupt_fired = False
 
-        blast_bytes = getattr(self.cfg, 'bootloader_interrupt_char', '\r\n').encode('utf-8')
-        prompt_b = getattr(self.cfg, "bootloader_prompt", "=>").encode('utf-8')
+        blast_bytes = self.cfg.bootloader_interrupt_char.encode('utf-8')
+        prompt_b = self.cfg.bootloader_prompt.encode('utf-8')
         autoboot_msg_b = getattr(self.cfg, 'autoboot_msg', 'Hit any key').encode('utf-8')
 
         raw_buffer = bytearray()
@@ -335,7 +340,7 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
                 clean_buffer = self.ANSI_ESCAPE_B.sub(b'', raw_buffer)
 
                 if self.PANIC_WATCHDOG.search(clean_buffer):
-                    raise RuntimeError(f"Panic during Bootloader routing:\n{clean_buffer[-500:].decode('utf-8', errors='ignore')}")
+                    raise KernelPanicError(f"Kernel panic during Bootloader routing:\n{clean_buffer[-500:].decode('utf-8', errors='ignore')}")
 
                 if spam_interrupt and not interrupt_fired and autoboot_msg_b in clean_buffer:
                     logger.info("[State Machine] Autoboot window detected, sniping...")
@@ -351,15 +356,15 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
                     time.sleep(0.1)
                     self.serial.flush_buffers()
 
-                    res = self.serial.safe_run("echo MES_SYNC", expected_prompt=getattr(self.cfg, "bootloader_prompt", "=>"), timeout_s=3.0)
+                    res = self.serial.safe_run("echo MES_SYNC", expected_prompt=self.cfg.bootloader_prompt, timeout_s=3.0)
                     if "MES_SYNC" not in res.stdout:
-                        raise RuntimeError("Failed to synchronize with Bootloader prompt.")
+                        raise BootloaderSyncError("Failed to synchronize with Bootloader prompt after detection.")
                     logger.info("[State Machine] Bootloader intercepted successfully.")
                     return
 
             time.sleep(0.01)
 
-        raise RuntimeError(f"Failed to intercept Bootloader within timeout.")
+        raise BootloaderTimeoutError(f"Failed to intercept Bootloader within {self.cfg.cold_boot_timeout_s}s timeout.")
 
 
     def _do_boot_from_bootloader_to_os(self) -> None:
@@ -370,26 +375,27 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
 
     def _do_wait_for_os(self) -> None:
         logger.info("[State Machine] Waiting for Linux Userland & Profiling Boot...")
-        start_time = time.time()
+        t_start = time.perf_counter()
+        wall_start = time.time()  # Wall clock only for human-readable boot profiler timestamps
         self.boot_metrics.clear()
         pending_milestones = self.boot_profiler_cfg.milestones.copy() if self.boot_profiler_cfg else {}
 
         raw_buffer = bytearray()
         clean_buffer = b""
-        shell_prompt_b = getattr(self.cfg, "os_shell_prompt", "~#").encode('utf-8')
-        login_prompt_b = getattr(self.cfg, "os_login_prompt", "login:").encode('utf-8')
-        password_prompt_b = getattr(self.cfg, "os_password_prompt", "Password:").encode('utf-8') if getattr(self.cfg, "os_password", None) else None
+        shell_prompt_b = self.cfg.os_shell_prompt.encode('utf-8')
+        login_prompt_b = self.cfg.os_login_prompt.encode('utf-8')
+        password_prompt_b = self.cfg.os_password_prompt.encode('utf-8') if self.cfg.os_password else None
 
         login_handled = False
         password_handled = False
 
-        while time.time() - start_time < getattr(self.cfg, "cold_boot_timeout_s", 65.0):
+        while time.perf_counter() - t_start < self.cfg.cold_boot_timeout_s:
             chunk = self.serial.raw_read_chunk()
             if chunk:
                 raw_buffer.extend(chunk)
                 self.serial.parser.ingest(chunk)
 
-                #  SOTA FIX: Clean ANSI colors before regex matching!
+                # Clean ANSI colors before regex matching
                 clean_buffer = self.ANSI_ESCAPE_B.sub(b'', raw_buffer)
 
                 for line in self.serial.parser.extract_lines():
@@ -397,15 +403,15 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
                     if pending_milestones:
                         found_keys = [k for k, v in pending_milestones.items() if v in line]
                         for k in found_keys:
-                            self.boot_metrics[f"t_boot_{k}_s"] = round(time.time() - start_time, 3)
+                            self.boot_metrics[f"t_boot_{k}_s"] = round(time.perf_counter() - t_start, 3)
                             pending_milestones.pop(k)
 
                 if self.PANIC_WATCHDOG.search(clean_buffer):
-                    raise RuntimeError("Device kernel panicked during OS boot sequence.")
+                    raise KernelPanicError("Device kernel panicked during OS boot sequence.")
             else:
                 time.sleep(0.01)
 
-            current_elapsed = round(time.time() - start_time, 3)
+            current_elapsed = round(time.perf_counter() - t_start, 3)
 
             # Success Match
             if shell_prompt_b in clean_buffer:
@@ -416,14 +422,14 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
             elif login_prompt_b in clean_buffer and not login_handled:
                 self.boot_metrics["t_boot_total_to_login_s"] = current_elapsed
                 time.sleep(0.1)
-                self.serial.write_line(f"{self.cfg.os_user}")
+                self.serial.write_line(self.cfg.os_user)
                 login_handled = True
                 # We don't wipe raw_buffer here to avoid dropping fast shell prompts
                 self.serial.parser.clear_buffer()
 
-            elif password_prompt_b and password_prompt_b in clean_buffer and getattr(self.cfg, "os_password", None) and not password_handled:
+            elif password_prompt_b and password_prompt_b in clean_buffer and self.cfg.os_password and not password_handled:
                 time.sleep(0.1)
-                self.serial.write_line(f"{self.cfg.os_password}", sensitive=True)
+                self.serial.write_line(self.cfg.get_os_password(), sensitive=True)
                 password_handled = True
                 self.serial.parser.clear_buffer()
         else:
@@ -530,12 +536,12 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
     # =========================================================================
 
     def _hw_power_off(self, event: EventData) -> None:
-        self._sync_physical_state()
+        self._align_to_physical_state()
         if self.state == DutState.POWER_OFF: return
         self._do_power_off()
 
     def _hw_energize(self, event: EventData) -> None:
-        self._sync_physical_state()
+        self._align_to_physical_state()
         target_medium = event.kwargs.get("medium", self.context.active_boot_medium)
         needs_strap_change = target_medium != self.context.active_boot_medium
 
@@ -552,7 +558,7 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
         self._do_energize()
 
     def _hw_boot_to_bootloader(self, event: EventData) -> None:
-        self._sync_physical_state()
+        self._align_to_physical_state()
         target_medium = event.kwargs.get("medium", self.context.active_boot_medium)
         needs_strap_change = target_medium != self.context.active_boot_medium
 
@@ -561,7 +567,7 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
             self._do_apply_bootstrap(target_medium)
             self.context.active_boot_medium = target_medium
 
-            if not getattr(self.cfg, 'autoboot_enabled', True):
+            if not self.cfg.autoboot_enabled:
                 self._do_energize()
                 self._do_wait_for_os()
                 self._finalize_os_boot()
@@ -574,7 +580,7 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
 
         if self.state == DutState.BOOTLOADER: return
 
-        if not getattr(self.cfg, 'autoboot_enabled', True):
+        if not self.cfg.autoboot_enabled:
             if self.state != DutState.OS_USERLAND:
                 if self.state in [DutState.ENERGIZED]: self._do_power_off()
                 self._do_energize()
@@ -595,14 +601,14 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
             self._do_wait_for_bootloader(spam_interrupt=True)
 
     def _hw_boot_to_os(self, event: EventData) -> None:
-        self._sync_physical_state()
+        self._align_to_physical_state()
 
         target_medium = event.kwargs.get("medium", self.context.active_boot_medium)
         needs_strap_change = target_medium != self.context.active_boot_medium
 
         if needs_strap_change:
             logger.info(f"[State Machine] Boot medium change requested ({target_medium}). Forcing hard reboot.")
-            self.state = DutState.DIRTY
+            self.machine.set_state(DutState.DIRTY)
 
         # ==========================================================
         #  TRAP 1: ZOMBIE OS_USERLAND
@@ -620,7 +626,7 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
                 logger.warning("[State Machine] UART heartbeat failed. OS is a Zombie. Marking DIRTY.")
 
             # If heartbeat or SSH fails, we fall through and force a hardware reset
-            self.state = DutState.DIRTY
+            self.machine.set_state(DutState.DIRTY)
             self._do_hardware_reset()
 
         # ==========================================================
@@ -637,7 +643,7 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
                 return
             except TransportTimeoutError:
                 logger.warning("[State Machine] Hot-login failed. Device is stuck. Marking DIRTY.")
-                self.state = DutState.DIRTY
+                self.machine.set_state(DutState.DIRTY)
                 self._do_hardware_reset()
 
         # ==========================================================
@@ -649,7 +655,7 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
             self.context.active_boot_medium = target_medium
             self._do_energize()
 
-            if getattr(self.cfg, 'autoboot_enabled', True):
+            if self.cfg.autoboot_enabled:
                 self._do_wait_for_bootloader(spam_interrupt=True)
                 self._do_boot_from_bootloader_to_os()
             else:
@@ -661,13 +667,13 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
         #  TRAP 4: BOOTLOADER RESUME
         # ==========================================================
         if self.state == DutState.BOOTLOADER:
-            if not getattr(self.cfg, 'autoboot_enabled', True): self._restore_uboot_trap()
+            if not self.cfg.autoboot_enabled: self._restore_uboot_trap()
             self._do_boot_from_bootloader_to_os()
             self._finalize_os_boot()
             return
 
     def _hw_to_recovery(self, event: EventData) -> None:
-        self._sync_physical_state()
+        self._align_to_physical_state()
         if self.state == DutState.RECOVERY: return
 
         logger.info("[State Machine] Routing to Hardware RECOVERY state. Power cycle required.")
