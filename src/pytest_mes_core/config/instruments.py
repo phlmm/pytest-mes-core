@@ -7,10 +7,14 @@ class RigolPsuConfig(BaseHardwareConfig):
     vendor: Literal["rigol"]
     ip_address: str
     channel: int = Field(default=1, ge=1, le=3)
+    enable_data_logging: bool = Field(default=False)
+    log_interval_s: float = Field(default=0.1, gt=0.0)
 
 class KeysightPsuConfig(BaseHardwareConfig):
     vendor: Literal["keysight"]
     visa_resource: str
+    enable_data_logging: bool = Field(default=False)
+    log_interval_s: float = Field(default=0.1, gt=0.0)
 
 PsuVendorConfig = Annotated[
     Union[RigolPsuConfig, KeysightPsuConfig],

@@ -2,6 +2,7 @@
 import time
 import pyvisa # type: ignore
 import logging
+from pathlib import Path
 from tenacity import retry, stop_after_attempt, wait_fixed
 from typing import Optional, Any
 
@@ -118,6 +119,54 @@ class ScpiPowerSupply:
             return self.query_float(":MEAS:CURR?")
         elif isinstance(self.cfg, KeysightPsuConfig):
             return self.query_float(f"MEAS:CURR? (@{self._channel})")
+
+    def start_data_logger(self) -> None:
+        """Configures and starts the hardware-side datalogger."""
+        if not hasattr(self.cfg, "enable_data_logging") or not self.cfg.enable_data_logging:
+            return
+            
+        logger.info(f"[PSU] Initiating hardware-side data logger (Interval: {self.cfg.log_interval_s}s)")
+        if isinstance(self.cfg, RigolPsuConfig):
+            self.write(":MEM:STAT:REC:ENAB ON")
+        elif isinstance(self.cfg, KeysightPsuConfig):
+            self.write(f"SENS:DLOG:FUNC:VOLT ON,(@{self._channel})")
+            self.write(f"SENS:DLOG:FUNC:CURR ON,(@{self._channel})")
+            self.write(f"SENS:DLOG:TIME {self.cfg.log_interval_s}")
+            self.write("INIT:DLOG")
+
+    def download_data_log(self, export_dir: Path) -> Optional[Path]:
+        """Stops the datalogger and retrieves the recorded CSV/Binary payload."""
+        if not hasattr(self.cfg, "enable_data_logging") or not self.cfg.enable_data_logging:
+            return None
+            
+        logger.info("[PSU] Transferring hardware data log...")
+        log_data = ""
+        
+        try:
+            if isinstance(self.cfg, RigolPsuConfig):
+                self.write(":MEM:STAT:REC:ENAB OFF")
+                if self.instrument:
+                    log_data = self.instrument.query(":MEM:STAT:REC:DATA?")
+            elif isinstance(self.cfg, KeysightPsuConfig):
+                if self.instrument:
+                    v_data = self.instrument.query(f"FETC:DLOG:VOLT? (@{self._channel})")
+                    i_data = self.instrument.query(f"FETC:DLOG:CURR? (@{self._channel})")
+                    log_data = f"Voltage,Current\n{v_data}\n{i_data}"
+        except Exception as e:
+            logger.error(f"[PSU] Failed to transfer data log: {e}")
+            return None
+                
+        if log_data:
+            export_dir.mkdir(parents=True, exist_ok=True)
+            log_path = export_dir / f"psu_datalog_{self.cfg.vendor}_{int(time.time())}.csv"
+            try:
+                with open(log_path, "w") as f:
+                    f.write(log_data)
+                logger.info(f"[PSU] Data log saved to {log_path}")
+                return log_path
+            except IOError as e:
+                logger.error(f"[PSU] Failed to write datalog to disk: {e}")
+        return None
 
     def close(self) -> None:
         if self.instrument:
