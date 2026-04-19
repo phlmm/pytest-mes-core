@@ -10,8 +10,6 @@ from typing import Optional, Any, List, TYPE_CHECKING
 # Evdev is Linux-only. We use dummy stubs to satisfy strict Pylance/MyPy
 # type checkers when developing/linting on Windows or macOS.
 
-from typing import TYPE_CHECKING
-
 class _DummyInputDevice:
         name: str
         path: str

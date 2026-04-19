@@ -103,9 +103,17 @@ class EStopWatchdog(BaseHostAdapter):
         trigger_state = 0 if self.cfg.active_low else 1
         logger.debug(f"[Safety] Background poller started. Target trigger state: {trigger_state}")
 
-        try:
-            while not self._stop_event.is_set():
+        # Transient GPIO read failures (EMI, I2C glitch) should not
+        # immediately halt the production line. Require consecutive failures.
+        MAX_CONSECUTIVE_ERRORS = 3
+        consecutive_errors = 0
+
+        while not self._stop_event.is_set():
+            try:
                 state = self.line.get_value()
+
+                # A successful read resets the error counter
+                consecutive_errors = 0
 
                 # Matrix Tracing: Logs the raw boolean logic of the pin
                 # This will flood the -vv trace, but is critical for identifying ground loops.
@@ -129,11 +137,17 @@ class EStopWatchdog(BaseHostAdapter):
                     logger.critical("[Safety] Pytest failed to exit cleanly within 5 seconds. Executing hard kill.")
                     os._exit(1)
 
-                time.sleep(self.cfg.polling_interval_s)
+            except Exception as e:
+                consecutive_errors += 1
+                logger.warning(f"[Safety] Transient GPIO read error ({consecutive_errors}/{MAX_CONSECUTIVE_ERRORS}): {e}")
 
-        except Exception as e:
-            logger.critical(f"[Safety] FATAL: Watchdog hardware failure mid-test! {e}")
-            logger.critical("[Safety] Halting process to prevent unmonitored high-voltage hazards.")
-            # If safety monitoring physically fails (e.g., operator unplugs GPIO wire),
-            # we MUST halt the line to prevent unmonitored hazards.
-            os.kill(os.getpid(), signal.SIGINT)
+                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                    logger.critical(f"[Safety] FATAL: Watchdog hardware failure mid-test! {MAX_CONSECUTIVE_ERRORS} consecutive GPIO read errors.")
+                    logger.critical("[Safety] Halting process to prevent unmonitored high-voltage hazards.")
+                    # If safety monitoring physically fails (e.g., operator unplugs GPIO wire),
+                    # we MUST halt the line to prevent unmonitored hazards.
+                    os.kill(os.getpid(), signal.SIGINT)
+                    return
+
+            time.sleep(self.cfg.polling_interval_s)
+
