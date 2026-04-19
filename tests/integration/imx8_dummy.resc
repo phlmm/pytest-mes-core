@@ -1,0 +1,12 @@
+using sysbus
+
+mach create "imx8_board"
+
+# Load a built-in Cortex-A SoC model
+machine LoadPlatformDescription @platforms/cpus/imx8.repl
+
+# Show the UART on the telnet port
+showAnalyzer sysbus.uart1 1234
+
+# Load your dummy U-Boot or Zephyr binary
+sysbus LoadELF @/path/to/dummy_uboot.elf

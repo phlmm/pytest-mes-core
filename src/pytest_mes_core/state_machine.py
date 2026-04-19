@@ -2,7 +2,7 @@ import time
 import re
 import logging
 from abc import ABC, abstractmethod
-from typing import Dict, Optional, Pattern, Any, Callable, List
+from typing import Dict, Optional, Pattern, Any, Callable, List, Generator
 from dataclasses import dataclass, field
 from transitions import Machine, EventData
 from enum import Enum, auto
@@ -41,6 +41,135 @@ class BootloaderSyncError(StateMachineError):
     """Raised when the echo sync command fails after prompt detection."""
     pass
 
+# ==========================================
+# UART EVENT TYPES (Event-Driven Boot)
+# ==========================================
+@dataclass(frozen=True)
+class UartEvent:
+    """Base class for all UART events produced during boot monitoring."""
+    elapsed_s: float
+
+@dataclass(frozen=True)
+class PromptDetected(UartEvent):
+    """A known prompt pattern was detected in the UART stream."""
+    prompt_type: str  # "shell", "login", "password", "bootloader"
+
+@dataclass(frozen=True)
+class AutobootWindowDetected(UartEvent):
+    """The U-Boot autoboot countdown message was detected."""
+    pass
+
+@dataclass(frozen=True)
+class PanicDetected(UartEvent):
+    """A kernel panic or secure boot violation was detected."""
+    raw_output: str
+
+@dataclass(frozen=True)
+class MilestoneReached(UartEvent):
+    """A boot profiler milestone string was matched in the UART stream."""
+    name: str
+
+@dataclass(frozen=True)
+class BootDataReceived(UartEvent):
+    """A complete line of boot output was received (for debug logging)."""
+    line: str
+
+
+class UartEventStream:
+    """
+    Synchronous generator-based UART event source.
+
+    Replaces raw busy-wait loops with a typed event stream. The caller
+    iterates over events and reacts to each one, keeping boot sequence
+    logic clean and testable.
+
+    Usage:
+        stream = UartEventStream(serial, ANSI_ESCAPE_B, PANIC_WATCHDOG)
+        for event in stream.open(prompts={"shell": b"root@"}, timeout_s=60):
+            if isinstance(event, PromptDetected) and event.prompt_type == "shell":
+                break
+            elif isinstance(event, PanicDetected):
+                raise KernelPanicError(event.raw_output)
+    """
+
+    def __init__(
+        self,
+        serial: 'EphemeralSerialClient',
+        ansi_pattern: Pattern[bytes],
+        panic_pattern: Pattern[bytes],
+    ):
+        self.serial = serial
+        self.ansi_pattern = ansi_pattern
+        self.panic_pattern = panic_pattern
+
+    def open(
+        self,
+        prompts: Dict[str, bytes],
+        timeout_s: float = 60.0,
+        milestones: Optional[Dict[str, str]] = None,
+        autoboot_trigger: Optional[bytes] = None,
+    ) -> Generator[UartEvent, None, None]:
+        """
+        Opens the UART event stream and yields typed events.
+
+        Each prompt type is yielded at most once. Milestones are yielded once
+        and removed from the pending set. PanicDetected terminates the generator.
+
+        Args:
+            prompts: Map of prompt_type → bytes pattern to watch for.
+            timeout_s: Maximum wall-clock seconds before the stream ends.
+            milestones: Optional boot profiler milestone map (name → substring).
+            autoboot_trigger: Optional bytes pattern for autoboot countdown detection.
+
+        Yields:
+            UartEvent subclasses in the order they are detected.
+        """
+        t_start = time.perf_counter()
+        raw_buffer = bytearray()
+        seen_prompts: set[str] = set()
+        pending_milestones = dict(milestones) if milestones else {}
+        autoboot_fired = False
+
+        self.serial.flush_buffers()
+
+        while time.perf_counter() - t_start < timeout_s:
+            chunk = self.serial.raw_read_chunk()
+            if not chunk:
+                time.sleep(0.01)
+                continue
+
+            raw_buffer.extend(chunk)
+            self.serial.parser.ingest(chunk)
+            clean = self.ansi_pattern.sub(b'', raw_buffer)
+            elapsed = round(time.perf_counter() - t_start, 3)
+
+            # 1. Panic detection (always fatal — terminates the stream)
+            if self.panic_pattern.search(clean):
+                yield PanicDetected(
+                    elapsed_s=elapsed,
+                    raw_output=clean[-500:].decode('utf-8', errors='ignore'),
+                )
+                return
+
+            # 2. Autoboot window detection (yields once)
+            if autoboot_trigger and not autoboot_fired and autoboot_trigger in clean:
+                autoboot_fired = True
+                yield AutobootWindowDetected(elapsed_s=elapsed)
+
+            # 3. Prompt detection (each type yields at most once)
+            for ptype, pbytes in prompts.items():
+                if ptype not in seen_prompts and pbytes in clean:
+                    seen_prompts.add(ptype)
+                    yield PromptDetected(elapsed_s=elapsed, prompt_type=ptype)
+
+            # 4. Line-level processing (milestones + debug logging)
+            for line in self.serial.parser.extract_lines():
+                yield BootDataReceived(elapsed_s=elapsed, line=line.strip())
+                found_keys = [k for k, v in pending_milestones.items() if v in line]
+                for k in found_keys:
+                    pending_milestones.pop(k)
+                    yield MilestoneReached(elapsed_s=elapsed, name=k)
+
 @dataclass
 class DeviceContext:
     active_rootfs: str = "UNKNOWN"
@@ -58,6 +187,79 @@ class DutState(Enum):
     OS_USERLAND = auto()
     RECOVERY = auto()
     DIRTY = auto()
+
+# ==========================================
+# BOOT STRATEGIES (Strategy Pattern)
+# ==========================================
+class BootStrategy(ABC):
+    """
+    Encapsulates the boot sequence for a specific hardware boot architecture.
+
+    Product teams can subclass this for custom boot flows (e.g., Android fastboot,
+    UEFI Secure Boot) without modifying the core FSM.
+    """
+
+    @abstractmethod
+    def cold_boot_to_bootloader(self, fsm: 'EmbeddedLinuxStateMachine') -> None:
+        """From POWER_OFF → BOOTLOADER. Board must be freshly energized."""
+        ...
+
+    @abstractmethod
+    def cold_boot_to_os(self, fsm: 'EmbeddedLinuxStateMachine') -> None:
+        """From POWER_OFF → OS_USERLAND. Full boot sequence."""
+        ...
+
+    @abstractmethod
+    def resume_bootloader_to_os(self, fsm: 'EmbeddedLinuxStateMachine') -> None:
+        """From BOOTLOADER → OS_USERLAND. Board is already at U-Boot."""
+        ...
+
+
+class AutobootStrategy(BootStrategy):
+    """
+    For boards with U-Boot autoboot countdown enabled.
+
+    Intercepts the autoboot window by spamming interrupt characters,
+    giving the FSM deterministic control over the boot process.
+    """
+
+    def cold_boot_to_bootloader(self, fsm: 'EmbeddedLinuxStateMachine') -> None:
+        fsm._do_energize()
+        fsm._event_wait_for_bootloader(intercept_autoboot=True)
+
+    def cold_boot_to_os(self, fsm: 'EmbeddedLinuxStateMachine') -> None:
+        fsm._do_energize()
+        fsm._event_wait_for_bootloader(intercept_autoboot=True)
+        fsm._event_boot_from_bootloader_to_os()
+
+    def resume_bootloader_to_os(self, fsm: 'EmbeddedLinuxStateMachine') -> None:
+        fsm._event_boot_from_bootloader_to_os()
+
+
+class TrapRebootStrategy(BootStrategy):
+    """
+    For boards with autoboot disabled (e.g., Secure Boot / HAB-locked).
+
+    Cannot intercept U-Boot during normal boot. Instead, boots all the way
+    to Linux, sets an fw_setenv trap, reboots, and catches U-Boot on the
+    way back down.
+    """
+
+    def cold_boot_to_bootloader(self, fsm: 'EmbeddedLinuxStateMachine') -> None:
+        fsm._do_energize()
+        fsm._event_wait_for_os_shell()
+        fsm._finalize_os_boot()
+        fsm._set_uboot_trap_and_reboot()
+        fsm._event_wait_for_bootloader(intercept_autoboot=False)
+
+    def cold_boot_to_os(self, fsm: 'EmbeddedLinuxStateMachine') -> None:
+        fsm._do_energize()
+        fsm._event_wait_for_os_shell()
+
+    def resume_bootloader_to_os(self, fsm: 'EmbeddedLinuxStateMachine') -> None:
+        fsm._restore_uboot_trap()
+        fsm._event_boot_from_bootloader_to_os()
+
 
 class BaseDutStateMachine(ABC):
     STATES = [DutState.POWER_OFF, DutState.ENERGIZED, DutState.BOOTLOADER, DutState.OS_USERLAND, DutState.RECOVERY, DutState.DIRTY]
@@ -85,6 +287,20 @@ class BaseDutStateMachine(ABC):
         self.boot_metrics: Dict[str, float] = {}
         self.context = DeviceContext()
         self.context_validators: List[Callable[['BaseDutStateMachine'], None]] = []
+
+        # Event-driven UART stream for boot monitoring
+        self.event_stream = UartEventStream(
+            serial=self.serial,
+            ansi_pattern=self.ANSI_ESCAPE_B,
+            panic_pattern=self.PANIC_WATCHDOG,
+        )
+
+        # Auto-select boot strategy based on hardware config
+        self.boot_strategy: BootStrategy = (
+            AutobootStrategy() if self.cfg.autoboot_enabled
+            else TrapRebootStrategy()
+        )
+        logger.debug(f"[State Machine] Boot Strategy: {type(self.boot_strategy).__name__}")
 
         logger.debug(f"[State Machine] Initializing FSM. PSU: {self.psu is not None} | GPIO: {self.gpio is not None}")
 
@@ -143,6 +359,12 @@ class BaseDutStateMachine(ABC):
 
 
 class EmbeddedLinuxStateMachine(BaseDutStateMachine):
+    """
+    Concrete FSM for embedded Linux SoCs (i.MX, AM62x, STM32MP, etc.).
+
+    Uses the event-driven UartEventStream for boot monitoring and delegates
+    boot sequences to the BootStrategy selected at init time.
+    """
 
     def _probe_uart_for_state(self) -> DutState:
         """
@@ -313,129 +535,144 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
         self.serial.safe_run('saveenv', expected_prompt=prompt, timeout_s=5.0)
 
     # =========================================================================
-    # BOOTLOADER INTERCEPTION
+    # EVENT-DRIVEN BOOT METHODS
     # =========================================================================
 
-    def _do_wait_for_bootloader(self, spam_interrupt: bool) -> None:
+    def _event_wait_for_bootloader(self, intercept_autoboot: bool) -> None:
+        """
+        Event-driven bootloader interception.
+
+        Consumes events from the UartEventStream until a bootloader prompt
+        is detected, then synchronizes with an echo command.
+        """
         logger.info("[State Machine] Hunting for Bootloader prompt...")
-        self.serial.flush_buffers()
         if self.serial.is_connected:
             self.serial.raw_set_timeout(0)
 
-        t_end = time.perf_counter() + self.cfg.cold_boot_timeout_s
-        interrupt_fired = False
-
         blast_bytes = self.cfg.bootloader_interrupt_char.encode('utf-8')
-        prompt_b = self.cfg.bootloader_prompt.encode('utf-8')
-        autoboot_msg_b = getattr(self.cfg, 'autoboot_msg', 'Hit any key').encode('utf-8')
+        prompts = {
+            "bootloader": self.cfg.bootloader_prompt.encode('utf-8'),
+            "trap": b"MES Framework Trap",
+        }
+        autoboot_trigger = (
+            getattr(self.cfg, 'autoboot_msg', 'Hit any key').encode('utf-8')
+            if intercept_autoboot else None
+        )
 
-        raw_buffer = bytearray()
+        for event in self.event_stream.open(
+            prompts=prompts,
+            timeout_s=self.cfg.cold_boot_timeout_s,
+            autoboot_trigger=autoboot_trigger,
+        ):
+            if isinstance(event, PanicDetected):
+                raise KernelPanicError(
+                    f"Kernel panic during Bootloader routing:\n{event.raw_output}"
+                )
 
-        while time.perf_counter() < t_end:
-            chunk = self.serial.raw_read_chunk()
-            if chunk:
-                raw_buffer.extend(chunk)
-                self.serial.parser.ingest(chunk)
+            elif isinstance(event, AutobootWindowDetected):
+                logger.info("[State Machine] Autoboot window detected, sniping...")
+                for _ in range(3):
+                    self.serial.raw_write(blast_bytes)
+                    time.sleep(0.05)
 
-                clean_buffer = self.ANSI_ESCAPE_B.sub(b'', raw_buffer)
+            elif isinstance(event, PromptDetected) and event.prompt_type in ("bootloader", "trap"):
+                # Synchronize with the prompt via echo
+                self.serial.raw_set_timeout(2.0)
+                self.serial.raw_write(b"\n")
+                time.sleep(0.1)
+                self.serial.flush_buffers()
 
-                if self.PANIC_WATCHDOG.search(clean_buffer):
-                    raise KernelPanicError(f"Kernel panic during Bootloader routing:\n{clean_buffer[-500:].decode('utf-8', errors='ignore')}")
+                res = self.serial.safe_run(
+                    "echo MES_SYNC",
+                    expected_prompt=self.cfg.bootloader_prompt,
+                    timeout_s=3.0,
+                )
+                if "MES_SYNC" not in res.stdout:
+                    raise BootloaderSyncError(
+                        "Failed to synchronize with Bootloader prompt after detection."
+                    )
+                logger.info("[State Machine] Bootloader intercepted successfully.")
+                return
 
-                if spam_interrupt and not interrupt_fired and autoboot_msg_b in clean_buffer:
-                    logger.info("[State Machine] Autoboot window detected, sniping...")
-                    for _ in range(3):
-                        self.serial.raw_write(blast_bytes)
-                        time.sleep(0.05)
-                    interrupt_fired = True
-                    #  THE FIX: Removed raw_buffer.clear() to prevent deleting the prompt!
+            elif isinstance(event, BootDataReceived):
+                logger.debug(f"[UART] RX <- {event.line}")
 
-                if prompt_b in clean_buffer or b"MES Framework Trap" in clean_buffer:
-                    self.serial.raw_set_timeout(2.0)
-                    self.serial.raw_write(b"\n")
-                    time.sleep(0.1)
-                    self.serial.flush_buffers()
+        raise BootloaderTimeoutError(
+            f"Failed to intercept Bootloader within {self.cfg.cold_boot_timeout_s}s timeout."
+        )
 
-                    res = self.serial.safe_run("echo MES_SYNC", expected_prompt=self.cfg.bootloader_prompt, timeout_s=3.0)
-                    if "MES_SYNC" not in res.stdout:
-                        raise BootloaderSyncError("Failed to synchronize with Bootloader prompt after detection.")
-                    logger.info("[State Machine] Bootloader intercepted successfully.")
-                    return
-
-            time.sleep(0.01)
-
-        raise BootloaderTimeoutError(f"Failed to intercept Bootloader within {self.cfg.cold_boot_timeout_s}s timeout.")
-
-
-    def _do_boot_from_bootloader_to_os(self) -> None:
+    def _event_boot_from_bootloader_to_os(self) -> None:
+        """Send the boot command from U-Boot and wait for OS shell via event stream."""
         logger.info(f"[State Machine] Commanding OS Boot: '{self.cfg.bootloader_boot_cmd}'")
         self.serial.flush_buffers()
         self.serial.raw_write(f"{self.cfg.bootloader_boot_cmd}\n".encode())
-        self._do_wait_for_os()
+        self._event_wait_for_os_shell()
+
+    def _event_wait_for_os_shell(self) -> None:
+        """
+        Event-driven OS boot monitor.
+
+        Waits for the Linux shell prompt, handling login/password prompts
+        and recording boot profiler milestones along the way.
+        """
+        logger.info("[State Machine] Waiting for Linux Userland & Profiling Boot...")
+        self.boot_metrics.clear()
+
+        prompts: Dict[str, bytes] = {
+            "shell": self.cfg.os_shell_prompt.encode('utf-8'),
+            "login": self.cfg.os_login_prompt.encode('utf-8'),
+        }
+        if self.cfg.os_password:
+            prompts["password"] = self.cfg.os_password_prompt.encode('utf-8')
+
+        milestones = (
+            self.boot_profiler_cfg.milestones.copy()
+            if self.boot_profiler_cfg else {}
+        )
+
+        for event in self.event_stream.open(
+            prompts=prompts,
+            timeout_s=self.cfg.cold_boot_timeout_s,
+            milestones=milestones,
+        ):
+            if isinstance(event, PanicDetected):
+                raise KernelPanicError("Device kernel panicked during OS boot sequence.")
+
+            elif isinstance(event, MilestoneReached):
+                self.boot_metrics[f"t_boot_{event.name}_s"] = event.elapsed_s
+
+            elif isinstance(event, PromptDetected):
+                if event.prompt_type == "shell":
+                    self.boot_metrics["t_boot_total_to_shell_s"] = event.elapsed_s
+                    logger.info(f"[State Machine] Auto-login shell reached in {event.elapsed_s}s.")
+                    return
+
+                elif event.prompt_type == "login":
+                    self.boot_metrics["t_boot_total_to_login_s"] = event.elapsed_s
+                    time.sleep(0.1)
+                    self.serial.write_line(self.cfg.os_user)
+                    self.serial.parser.clear_buffer()
+
+                elif event.prompt_type == "password":
+                    time.sleep(0.1)
+                    self.serial.write_line(self.cfg.get_os_password(), sensitive=True)
+                    self.serial.parser.clear_buffer()
+
+            elif isinstance(event, BootDataReceived):
+                logger.debug(f"[UART] RX <- {event.line}")
+
+        raise TransportTimeoutError("Timed out waiting for Linux Shell prompt.")
+
+    # Backward-compatible aliases for any external code referencing old methods
+    def _do_wait_for_bootloader(self, spam_interrupt: bool) -> None:
+        self._event_wait_for_bootloader(intercept_autoboot=spam_interrupt)
+
+    def _do_boot_from_bootloader_to_os(self) -> None:
+        self._event_boot_from_bootloader_to_os()
 
     def _do_wait_for_os(self) -> None:
-        logger.info("[State Machine] Waiting for Linux Userland & Profiling Boot...")
-        t_start = time.perf_counter()
-        wall_start = time.time()  # Wall clock only for human-readable boot profiler timestamps
-        self.boot_metrics.clear()
-        pending_milestones = self.boot_profiler_cfg.milestones.copy() if self.boot_profiler_cfg else {}
+        self._event_wait_for_os_shell()
 
-        raw_buffer = bytearray()
-        clean_buffer = b""
-        shell_prompt_b = self.cfg.os_shell_prompt.encode('utf-8')
-        login_prompt_b = self.cfg.os_login_prompt.encode('utf-8')
-        password_prompt_b = self.cfg.os_password_prompt.encode('utf-8') if self.cfg.os_password else None
-
-        login_handled = False
-        password_handled = False
-
-        while time.perf_counter() - t_start < self.cfg.cold_boot_timeout_s:
-            chunk = self.serial.raw_read_chunk()
-            if chunk:
-                raw_buffer.extend(chunk)
-                self.serial.parser.ingest(chunk)
-
-                # Clean ANSI colors before regex matching
-                clean_buffer = self.ANSI_ESCAPE_B.sub(b'', raw_buffer)
-
-                for line in self.serial.parser.extract_lines():
-                    logger.debug(f"[UART] RX <- {line.strip()}")
-                    if pending_milestones:
-                        found_keys = [k for k, v in pending_milestones.items() if v in line]
-                        for k in found_keys:
-                            self.boot_metrics[f"t_boot_{k}_s"] = round(time.perf_counter() - t_start, 3)
-                            pending_milestones.pop(k)
-
-                if self.PANIC_WATCHDOG.search(clean_buffer):
-                    raise KernelPanicError("Device kernel panicked during OS boot sequence.")
-            else:
-                time.sleep(0.01)
-
-            current_elapsed = round(time.perf_counter() - t_start, 3)
-
-            # Success Match
-            if shell_prompt_b in clean_buffer:
-                self.boot_metrics["t_boot_total_to_shell_s"] = current_elapsed
-                logger.info(f"[State Machine] Auto-login shell reached in {current_elapsed}s.")
-                break
-
-            elif login_prompt_b in clean_buffer and not login_handled:
-                self.boot_metrics["t_boot_total_to_login_s"] = current_elapsed
-                time.sleep(0.1)
-                self.serial.write_line(self.cfg.os_user)
-                login_handled = True
-                # We don't wipe raw_buffer here to avoid dropping fast shell prompts
-                self.serial.parser.clear_buffer()
-
-            elif password_prompt_b and password_prompt_b in clean_buffer and self.cfg.os_password and not password_handled:
-                time.sleep(0.1)
-                self.serial.write_line(self.cfg.get_os_password(), sensitive=True)
-                password_handled = True
-                self.serial.parser.clear_buffer()
-        else:
-            dump = self.ANSI_ESCAPE_B.sub(b'', raw_buffer)[-500:].decode('utf-8', errors='ignore').strip()
-            logger.error(f"[State Machine] FATAL TIMEOUT. Clean Buffer dump:\n{dump}")
-            raise TransportTimeoutError("Timed out waiting for Linux Shell prompt.")
 
     def _finalize_os_boot(self) -> None:
         """
@@ -562,43 +799,34 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
         target_medium = event.kwargs.get("medium", self.context.active_boot_medium)
         needs_strap_change = target_medium != self.context.active_boot_medium
 
+        # Path A: Medium change or recovery — always cold boot via strategy
         if needs_strap_change or self.state == DutState.RECOVERY:
             self._do_power_off()
             self._do_apply_bootstrap(target_medium)
             self.context.active_boot_medium = target_medium
-
-            if not self.cfg.autoboot_enabled:
-                self._do_energize()
-                self._do_wait_for_os()
-                self._finalize_os_boot()
-                self._set_uboot_trap_and_reboot()
-                self._do_wait_for_bootloader(spam_interrupt=False)
-            else:
-                self._do_energize()
-                self._do_wait_for_bootloader(spam_interrupt=True)
+            self.boot_strategy.cold_boot_to_bootloader(self)
             return
 
-        if self.state == DutState.BOOTLOADER: return
+        # Short-circuit: already at bootloader
+        if self.state == DutState.BOOTLOADER:
+            return
 
-        if not self.cfg.autoboot_enabled:
-            if self.state != DutState.OS_USERLAND:
-                if self.state in [DutState.ENERGIZED]: self._do_power_off()
-                self._do_energize()
-                self._do_wait_for_os()
-            self._finalize_os_boot()
-            self._set_uboot_trap_and_reboot()
-            self._do_wait_for_bootloader(spam_interrupt=False)
-        else:
-            if self.state == DutState.OS_USERLAND:
-                self.serial.safe_run("reboot", timeout_s=2.0, check_exit_code=False)
+        # Path B: Need to get to bootloader from current state
+        if self.state == DutState.OS_USERLAND:
+            self.serial.safe_run("reboot", timeout_s=2.0, check_exit_code=False)
+        elif self.state == DutState.ENERGIZED:
+            if not self.psu:
+                self._do_soft_reboot()
             else:
-                if self.state in [DutState.ENERGIZED] and not self.psu:
-                    #  THE FIX: Replaced 8 lines of code with our DRY helper
-                    self._do_soft_reboot()
-                else:
-                    if self.state in [DutState.ENERGIZED]: self._do_power_off()
-                    self._do_energize()
-            self._do_wait_for_bootloader(spam_interrupt=True)
+                self._do_power_off()
+                self.boot_strategy.cold_boot_to_bootloader(self)
+                return
+        else:
+            self.boot_strategy.cold_boot_to_bootloader(self)
+            return
+
+        # Board is rebooting — catch bootloader on the way back
+        self._event_wait_for_bootloader(intercept_autoboot=self.cfg.autoboot_enabled)
 
     def _hw_boot_to_os(self, event: EventData) -> None:
         self._align_to_physical_state()
@@ -610,67 +838,61 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
             logger.info(f"[State Machine] Boot medium change requested ({target_medium}). Forcing hard reboot.")
             self.machine.set_state(DutState.DIRTY)
 
-        # ==========================================================
-        #  TRAP 1: ZOMBIE OS_USERLAND
-        # ==========================================================
+        # --- TRAP 1: Resume existing OS (zombie detection) ---
         if self.state == DutState.OS_USERLAND:
-            logger.debug("[State Machine] Verifying UART heartbeat for existing OS_USERLAND state...")
-            res = self.serial.safe_run("echo MES_HEARTBEAT", timeout_s=2.0, check_exit_code=False)
-            if "MES_HEARTBEAT" in res.stdout:
-                try:
-                    self._finalize_os_boot()
-                    return
-                except TransportConnectionError:
-                    logger.warning("[State Machine] SSH provision failed on existing OS. Marking DIRTY.")
-            else:
-                logger.warning("[State Machine] UART heartbeat failed. OS is a Zombie. Marking DIRTY.")
-
-            # If heartbeat or SSH fails, we fall through and force a hardware reset
+            if self._try_resume_existing_os():
+                return
             self.machine.set_state(DutState.DIRTY)
             self._do_hardware_reset()
 
-        # ==========================================================
-        #  TRAP 2: THE HOT-LOGIN (The Ultimate Fix)
-        # ==========================================================
+        # --- TRAP 2: Hot-login from ENERGIZED ---
         if self.state == DutState.ENERGIZED:
-            logger.info("[State Machine] Device is ENERGIZED (At Login Prompt). Attempting Hot-Login...")
-            # Tap ENTER to force the OS to redraw the prompt so _do_wait_for_os catches it instantly
-            self.serial.raw_write(b"\n")
-            try:
-                # _do_wait_for_os handles the full user/pass/shell authentication natively!
-                self._do_wait_for_os()
-                self._finalize_os_boot()
+            if self._try_hot_login():
                 return
-            except TransportTimeoutError:
-                logger.warning("[State Machine] Hot-login failed. Device is stuck. Marking DIRTY.")
-                self.machine.set_state(DutState.DIRTY)
-                self._do_hardware_reset()
+            self.machine.set_state(DutState.DIRTY)
+            self._do_hardware_reset()
 
-        # ==========================================================
-        #  TRAP 3: FULL REBOOT SEQUENCE
-        # ==========================================================
+        # --- TRAP 3: Cold boot via strategy ---
         if self.state in [DutState.RECOVERY, DutState.DIRTY, DutState.POWER_OFF]:
-            if self.state != DutState.POWER_OFF: self._do_power_off()
+            if self.state != DutState.POWER_OFF:
+                self._do_power_off()
             self._do_apply_bootstrap(target_medium)
             self.context.active_boot_medium = target_medium
-            self._do_energize()
-
-            if self.cfg.autoboot_enabled:
-                self._do_wait_for_bootloader(spam_interrupt=True)
-                self._do_boot_from_bootloader_to_os()
-            else:
-                self._do_wait_for_os()
+            self.boot_strategy.cold_boot_to_os(self)
             self._finalize_os_boot()
             return
 
-        # ==========================================================
-        #  TRAP 4: BOOTLOADER RESUME
-        # ==========================================================
+        # --- TRAP 4: Resume from bootloader via strategy ---
         if self.state == DutState.BOOTLOADER:
-            if not self.cfg.autoboot_enabled: self._restore_uboot_trap()
-            self._do_boot_from_bootloader_to_os()
+            self.boot_strategy.resume_bootloader_to_os(self)
             self._finalize_os_boot()
             return
+
+    def _try_resume_existing_os(self) -> bool:
+        """Attempt to reuse an existing OS_USERLAND session. Returns True on success."""
+        logger.debug("[State Machine] Verifying UART heartbeat for existing OS_USERLAND state...")
+        res = self.serial.safe_run("echo MES_HEARTBEAT", timeout_s=2.0, check_exit_code=False)
+        if "MES_HEARTBEAT" in res.stdout:
+            try:
+                self._finalize_os_boot()
+                return True
+            except TransportConnectionError:
+                logger.warning("[State Machine] SSH provision failed on existing OS. Marking DIRTY.")
+        else:
+            logger.warning("[State Machine] UART heartbeat failed. OS is a Zombie. Marking DIRTY.")
+        return False
+
+    def _try_hot_login(self) -> bool:
+        """Attempt hot-login from ENERGIZED state. Returns True on success."""
+        logger.info("[State Machine] Device is ENERGIZED (At Login Prompt). Attempting Hot-Login...")
+        self.serial.raw_write(b"\n")
+        try:
+            self._event_wait_for_os_shell()
+            self._finalize_os_boot()
+            return True
+        except TransportTimeoutError:
+            logger.warning("[State Machine] Hot-login failed. Device is stuck. Marking DIRTY.")
+            return False
 
     def _hw_to_recovery(self, event: EventData) -> None:
         self._align_to_physical_state()
