@@ -2,7 +2,7 @@
 import pytest
 from unittest.mock import patch, MagicMock
 from pytest_mes_core.config import KeysightPsuConfig
-from pytest_mes_core.instruments.power_supplies import ScpiPowerSupply, SafePowerController
+from pytest_mes_core.instruments.power_supplies import ScpiPowerSupply, SafePowerController, InstrumentShortCircuitError
 
 @patch('pytest_mes_core.instruments.power_supplies.pyvisa.ResourceManager')
 @patch('pytest_mes_core.instruments.power_supplies.time.sleep') # Bypass the physical ramp delays
@@ -40,7 +40,7 @@ def test_safe_power_controller_short_circuit_abort(mock_sleep, mock_rm):
     psu = ScpiPowerSupply(cfg)
     psu.connect()
 
-    with pytest.raises(RuntimeError, match="Board acting as a short circuit"):
+    with pytest.raises(InstrumentShortCircuitError, match="Board acting as a short circuit"):
         with SafePowerController(psu, target_v=12.0, current_limit_a=3.0):
             pass
 
