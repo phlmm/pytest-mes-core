@@ -3,7 +3,7 @@ import time
 import logging
 from typing import Generator, Any
 
-from pytest_mes_core.instruments.power_supplies import ScpiPowerSupply
+from pytest_mes_core.instruments.power_supplies import ScpiPowerSupply, InstrumentError
 
 logger = logging.getLogger("mes_core.instruments.shmoo")
 
@@ -54,7 +54,7 @@ class LiveVoltageSweeper:
         Resistant to Python floating-point drift.
         """
         if not self._is_active:
-            raise RuntimeError("FATAL: Cannot sweep. PSU output is not actively energized.")
+            raise InstrumentError("FATAL: Cannot sweep. PSU output is not actively energized.")
 
         direction = 1 if v_end >= v_start else -1
         step_v = abs(step_v) * direction

@@ -9,6 +9,21 @@ from pytest_mes_core.config import PsuVendorConfig, RigolPsuConfig, KeysightPsuC
 
 logger = logging.getLogger("mes_core.instruments.psu")
 
+# ==========================================
+# DOMAIN EXCEPTIONS (Instrument Faults)
+# ==========================================
+class InstrumentError(Exception):
+    """Root exception for all Host PC instrument failures (PSU, DMM, etc.)."""
+    pass
+
+class InstrumentConnectionError(InstrumentError):
+    """Raised when the VISA/SCPI connection to an instrument fails."""
+    pass
+
+class InstrumentShortCircuitError(InstrumentError):
+    """Raised when the DUT draws excessive current, indicating a hardware short."""
+    pass
+
 class ScpiPowerSupply:
     """
     Unified SCPI driver for COTS Power Supplies.
@@ -47,7 +62,7 @@ class ScpiPowerSupply:
             logger.critical(f"[PSU] Is the instrument powered on? Is the Ethernet cable connected?")
             logger.critical(f"[PSU] VISA Error: {e}")
             logger.critical("="*60)
-            raise RuntimeError(f"FATAL: Power Supply at {self.resource_str} unreachable.")
+            raise InstrumentConnectionError(f"FATAL: Power Supply at {self.resource_str} unreachable.")
 
     def write(self, cmd: str) -> None:
         if not self.instrument: return
@@ -152,7 +167,7 @@ class SafePowerController:
             logger.critical(f"[PSU Control] Board pulled {idle_current}A at idle (Limit: {self.current_limit_a}A).")
             logger.critical(f"[PSU Control] Power severed. Check PCB for solder bridges or reversed polarity components.")
             logger.critical("="*60)
-            raise RuntimeError(f"FATAL: Board acting as a short circuit! Drew {idle_current}A at idle.")
+            raise InstrumentShortCircuitError(f"FATAL: Board acting as a short circuit! Drew {idle_current}A at idle.")
 
         return self.psu
 
