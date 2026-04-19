@@ -5,11 +5,14 @@ from pytest_mes_core.transports.base import DutTransport, CommandResult, Transpo
 
 logger = logging.getLogger("mes_core.transports.failover")
 
-class FailoverTransport:
+class FailoverTransport(DutTransport):
     """
     Reactive Failover Matrix.
     Wraps two transports. If the primary shatters, it permanently shifts
     to the secondary for the remainder of its lifecycle.
+
+    Explicitly implements the DutTransport protocol to enable proper static
+    type checking across the framework.
     """
     def __init__(self, primary: DutTransport, fallback: DutTransport):
         self.primary = primary

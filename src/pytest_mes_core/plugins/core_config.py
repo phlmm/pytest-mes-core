@@ -141,11 +141,20 @@ def pytest_configure(config: pytest.Config) -> None:
     if toml_path.exists():
         try:
             bom = load_toml_config(toml_path, StationEnvironment)
+            config._mes_bom = bom
 
             if bom.e_stop and bom.e_stop.enabled:
                 watchdog = EStopWatchdog(bom.e_stop)
-                watchdog.__enter__()
-                config._mes_watchdog = watchdog
+                try:
+                    watchdog.__enter__()
+                    config._mes_watchdog = watchdog
+                except Exception as e:
+                    logger.critical(f"[Safety] FATAL: E-Stop Watchdog failed to arm: {e}")
+                    # Don't leave a half-initialized watchdog with leaked GPIO pins
+                    try:
+                        watchdog.__exit__(None, None, None)
+                    except Exception:
+                        pass
 
             session_id = str(uuid.uuid4())
             ctx = StationContext(
@@ -260,7 +269,45 @@ def pytest_unconfigure(config: pytest.Config) -> None:
                 final_path = html_dir / final_name
 
                 # Move the temp file to the final Enterprise directory
-                os.rename(htmlpath, final_path)
+                shutil.move(htmlpath, final_path)
                 logger.info(f"[MES] EOL Certificate (HTML) saved: {final_path}")
             except Exception as e:
                 logger.error(f"[MES] Failed to rename HTML report: {e}")
+
+def pytest_terminal_summary(terminalreporter: Any, exitstatus: int, config: pytest.Config) -> None:
+    """
+    Injects the active Hardware Manifest into the final Pytest console output.
+    """
+    bom = getattr(config, "_mes_bom", None)
+    if not bom:
+        return
+
+    terminalreporter.section("Hardware Manifest (Station BOM)", sep="=", blue=True, bold=True)
+
+    # Base Meta
+    terminalreporter.write_line(f"Facility     : {bom.station_meta.facility}")
+    terminalreporter.write_line(f"Jig ID       : {bom.station_meta.jig_id} ({bom.station_meta.environment.upper()})")
+
+    # Active Transports
+    transports = []
+    if bom.ssh_targets: transports.append("SSH")
+    if bom.uart: transports.append("UART Serial")
+    if bom.can_bus: transports.append("CAN Bus")
+    if bom.ethernet: transports.append("Ethernet")
+    terminalreporter.write_line(f"Transports   : {', '.join(transports) if transports else 'None'}")
+
+    # Hardware Peripherals
+    peripherals = []
+    if getattr(bom, "e_stop", None) and getattr(bom.e_stop, "enabled", False): peripherals.append("E-Stop Watchdog")
+    if bom.psu_hardware: peripherals.append("Programmable PSU")
+    if bom.usb_sd_mux: peripherals.append("USB-SD-Mux")
+    if bom.gpio_edge or bom.gpio_led or getattr(bom, "bootstrap", None): peripherals.append("GPIO Rig")
+    if bom.hid_scanners: peripherals.append("Barcode Scanner")
+    terminalreporter.write_line(f"Peripherals  : {', '.join(peripherals) if peripherals else 'None'}")
+
+    # Provisioning Capabilities
+    provisioning = []
+    if bom.tezi_provisioning: provisioning.append("TEZI (NXP uuu)")
+    if bom.block_storage: provisioning.append("Block Flash (bmaptool)")
+    if bom.microchip_targets: provisioning.append("Microchip ICP")
+    terminalreporter.write_line(f"Provisioning : {', '.join(provisioning) if provisioning else 'None'}")
