@@ -1,5 +1,5 @@
 from typing import Dict, List, Literal, Optional, Union
-from pydantic import Field, model_validator
+from pydantic import Field, computed_field, model_validator
 from typing_extensions import Annotated
 from pytest_mes_core.config.base import BaseHardwareConfig
 
@@ -49,8 +49,26 @@ class BootstrapConfig(BaseHardwareConfig):
 
 class UsbSdMuxConfig(BaseHardwareConfig):
     serial_id: str
+    # Accept either a stable by-id path (/dev/disk/by-id/...) or a raw node (/dev/sdX).
+    # Prefer by-id so the path survives reboots. Use resolved_block_device at runtime.
     host_block_device: str
     image_flash_timeout_s: int = Field(default=300, gt=0)
+
+    @computed_field
+    @property
+    def resolved_block_device(self) -> str:
+        """
+        Resolves the configured block device path to the real kernel device node.
+
+        Follows symlinks at runtime, so a stable ``/dev/disk/by-id/...`` path in the
+        TOML is transparently translated to the currently-assigned ``/dev/sdX`` node.
+        Falls back to the raw value if the path doesn't exist (e.g. device unplugged).
+        """
+        from pathlib import Path
+        p = Path(self.host_block_device)
+        if p.exists():
+            return str(p.resolve())
+        return self.host_block_device
 
 class TeziProvisioningConfig(BaseHardwareConfig):
     tezi_folder_path: str
