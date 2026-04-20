@@ -16,8 +16,8 @@ def test_fsm_panic_watchdog_catches_hab_events():
     
     # We need to mock the underlying 'ser' and 'parser' objects
     mock_serial.ser = MagicMock()
-    mock_serial.parser = MagicMock()
-    mock_serial.parser.extract_lines.return_value = []
+    from pytest_mes_core.utils.uart_parser import UartStreamParser
+    mock_serial.parser = UartStreamParser()
     
     # Simulate a stream that prints normal boot text, then a HAB exception
     mock_serial.raw_read_chunk.side_effect = [
