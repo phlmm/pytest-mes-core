@@ -38,6 +38,25 @@ class HostCanAdapter(BaseHostAdapter):
         kwargs = {"interface": self.cfg.bustype, "channel": self.cfg.interface, "bitrate": self.cfg.bitrate}
         if self.cfg.bustype == "slcan":
             kwargs["tty_baudrate"] = self.cfg.tty_baudrate # Required for FTDI chips inside CAN dongles
+        elif self.cfg.bustype == "socketcan":
+            import subprocess
+            import os
+            # Ensure the host interface is up with the correct bitrate (ignoring errors if we lack sudo)
+            subprocess.run(["sudo", "-n", "ip", "link", "set", self.cfg.interface, "down"], capture_output=True)
+            subprocess.run(["sudo", "-n", "ip", "link", "set", self.cfg.interface, "type", "can", "bitrate", str(self.cfg.bitrate)], capture_output=True)
+            subprocess.run(["sudo", "-n", "ip", "link", "set", self.cfg.interface, "up"], capture_output=True)
+            
+            # ENVIRONMENT CHECK: Verify the interface actually came UP
+            sysfs_path = f"/sys/class/net/{self.cfg.interface}/operstate"
+            if os.path.exists(sysfs_path):
+                with open(sysfs_path, "r") as f:
+                    state = f.read().strip()
+                if state == "down":
+                    raise HostAdapterError(
+                        f"FATAL: CAN Interface '{self.cfg.interface}' is DOWN. "
+                        f"The automated 'sudo ip link set up' command failed (likely due to sudo password prompt). "
+                        f"Please bring the interface up manually: sudo ip link set {self.cfg.interface} up"
+                    )
 
         try:
             self.bus = can.Bus(**kwargs)

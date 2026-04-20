@@ -69,7 +69,7 @@ def dut_state_machine(
         logger.info(f"[Metrics] Final Boot Performance: {sm.boot_metrics}")
         sink = getattr(request.config, "_mes_telemetry_sink", None)
         if sink:
-            from pytest_mes_core.telemetry.models import TestRecord
+            from pytest_mes_core.telemetry.base import TestRecord
             record = TestRecord(
                 test_name="mes_fsm_boot_profiler",
                 outcome="passed",
@@ -78,7 +78,7 @@ def dut_state_machine(
                 context={},
                 timestamp=datetime.now(timezone.utc).isoformat()
             )
-            sink.export(record)
+            sink.emit_record(record)
 
     sm.power_off()
 

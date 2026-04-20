@@ -73,7 +73,7 @@ class HostUsbSdMuxAdapter(BaseHostAdapter):
             self._set_mux_state("host")
 
             # 3. Defeat Linux Kernel USB Enumeration Jitter
-            logger.debug("[SD-Mux] Delaying 2.0s for Linux Kernel block device enumeration (/dev/sda)...")
+            logger.debug("[SD-Mux] Delaying 2.0s for Linux Kernel block device enumeration...")
             time.sleep(2.0)
 
             return self

@@ -22,6 +22,13 @@ class HardwareManifest(BaseModel):
     # Allows for project-specific custom flags (e.g., "carrier_rev": "C")
     custom_flags: Dict[str, Any] = Field(default_factory=dict)
 
+    def to_dict(self) -> dict:
+        """
+        Serializes the manifest to a plain dict, stripping null values to save JSONL space.
+        Alias for model_dump() provided for backward compatibility with the telemetry layer.
+        """
+        return {k: v for k, v in self.model_dump().items() if v is not None}
+
     def check_completeness(self) -> bool:
         """
         Validates that the essential silicon identifiers were successfully harvested.

@@ -57,7 +57,30 @@ class EphemeralSerialClient:
     def is_connected(self) -> bool:
         return bool(self.ser and self.ser.is_open)
 
-    def expect(self, pattern: str, timeout_s: float = 5.0, blast_char: str = "") -> str:
+    @contextmanager
+    def execution_lock(self) -> Generator[None, None, None]:
+        """Temporarily pauses watchdog byte-stealing without killing the thread."""
+        self._is_executing = True
+        try:
+            yield
+        finally:
+            self._is_executing = False
+
+    def expect(self, pattern: str, timeout_s: float = 5.0, blast_char: str = "", active_redraw: bool = True) -> str:
+        """
+        Blocks until ``pattern`` appears in the UART stream or ``timeout_s`` elapses.
+
+        Args:
+            pattern: The string to wait for (plain text, not regex).
+            timeout_s: Maximum seconds to wait before raising TransportTimeoutError.
+            blast_char: Optional character to write N times before starting to listen
+                        (e.g. '\n' to wake a sleeping shell).
+            active_redraw: When True (default), injects a newline if the console has been
+                           silent for 2s. This forces the OS to redraw a partially-written
+                           login prompt that was buried by async kernel dmesg spam.
+                           Set to False when listening passively through U-Boot autoboot
+                           to avoid accidentally halting the countdown.
+        """
         if not self.is_connected or self.ser is None:
             raise TransportConnectionError("Serial port is closed.")
         if self._is_locked:
@@ -71,13 +94,12 @@ class EphemeralSerialClient:
                 time.sleep(0.05)
             self.ser.flush()
 
-        logger.debug(f"[UART] Expecting '{pattern}' (Timeout: {timeout_s}s)...")
+        logger.debug(f"[UART] Expecting '{pattern}' (Timeout: {timeout_s}s, active_redraw={active_redraw})...")
         t_end = time.perf_counter() + timeout_s
         last_rx_time = time.perf_counter()
         raw_buffer = bytearray()
 
-        self._is_executing = True
-        try:
+        with self.execution_lock():
             while time.perf_counter() < t_end:
                 chunk = b""
                 if self.ser.in_waiting > 0:
@@ -91,21 +113,16 @@ class EphemeralSerialClient:
                     return clean_buffer.decode('utf-8', errors='replace')
 
                 last_rx_time = time.perf_counter()
-            else:
-                # ACTIVE PINGING: If the console is silent for 2s, the prompt may have been split
-                # by a kernel log. Inject a newline to force the OS to cleanly redraw the prompt.
-                if time.perf_counter() - last_rx_time > 2.0:
-                    logger.debug("[UART] Console silent. Injecting heartbeat to redraw prompt...")
-                    try:
-                        self.ser.write(b'\n')
-                        self.ser.flush()
-                    except serial.SerialException:
-                        pass
+
+                if active_redraw and (time.perf_counter() - last_rx_time > 2.0):
+                    # Console is silent and a kernel log may have buried the prompt.
+                    # Inject an active ping to force the OS to redraw it immediately.
+                    logger.debug("[UART] Console silent. Injecting ping to redraw prompt...")
+                    self.ser.write(b"\n")
+                    self.ser.flush()
                     last_rx_time = time.perf_counter()
 
-                time.sleep(0.01) # Yield to prevent CPU thrashing
-        finally:
-            self._is_executing = False
+                time.sleep(0.01)
 
         # Timeout occurred
         dump = self.ANSI_ESCAPE_B.sub(b'', raw_buffer)[-200:].decode('utf-8', errors='replace').strip()
@@ -123,8 +140,11 @@ class EphemeralSerialClient:
             log_cmd = cmd if len(cmd) < 256 else cmd[:253] + "..."
             logger.debug(f"[UART] TX -> '{log_cmd}'")
 
-        self.ser.write(f"{cmd}\n".encode('utf-8'))
-        self.ser.flush()
+        payload = f"{cmd}\n".encode('utf-8')
+        for i in range(0, len(payload), 16):
+            self.ser.write(payload[i:i+16])
+            self.ser.flush()
+            time.sleep(0.002)
 
     def safe_run(
         self,
@@ -161,15 +181,26 @@ class EphemeralSerialClient:
             # 1. Generate a cryptographic UUID to defend against ghost echoes
             exec_token = uuid.uuid4().hex[:8]
             magic_marker = f"__MES_EXIT_{exec_token}__"
+            start_marker = f"__MES_START_{exec_token}__"
 
             # 2. Escape single quotes safely for the subshell wrapper
             safe_cmd = cmd.replace("'", "'\\''")
 
             # 3. Wrap the command in `sh -c` to protect background operators (&, ||, &&)
-            # 4. Use `printf` for an atomic TTY write to prevent kernel printk interleaving
-            injected_cmd = f"sh -c '{safe_cmd}' ; printf '\\n{magic_marker}:%d\\n' $?"
+            # 4. Use `printf` for atomic markers to isolate execution output from echoed characters
+            injected_cmd = f"printf '\\n{start_marker}\\n' ; sh -c '{safe_cmd}' ; printf '\\n{magic_marker}:%d\\n' $?"
         else:
             injected_cmd = cmd
+
+        # Send Ctrl+C to abort any half-typed command left over from previous failures
+        self.ser.write(b'\x03')
+        self.ser.flush()
+        try:
+            # Actively wait for the shell to redraw the prompt so it's ready to accept input
+            self.expect(expected_prompt, timeout_s=0.5)
+        except TransportTimeoutError:
+            pass
+        self.flush_buffers()
 
         self.write_line(injected_cmd)
 
@@ -186,11 +217,19 @@ class EphemeralSerialClient:
                 exit_match = re.search(fr"{magic_marker}:(\d+)", stdout)
                 if exit_match:
                     exited = int(exit_match.group(1))
-                    # Surgically remove the magic token from the final output
-                    stdout = stdout.replace(exit_match.group(0), "")
                 else:
-                    # If the token is entirely missing, the shell crashed or the board rebooted
                     exited = -2
+
+                # Isolate the exact execution output between the start and exit markers
+                end_idx = stdout.rfind(magic_marker)
+                if end_idx != -1:
+                    stdout = stdout[:end_idx]
+                else:
+                    stdout = stdout.replace(magic_marker, "")
+
+                start_idx = stdout.rfind(start_marker)
+                if start_idx != -1:
+                    stdout = stdout[start_idx + len(start_marker):]
 
             # Clean up command echo, kernel spam, and prompt
             clean_lines = []
@@ -201,11 +240,7 @@ class EphemeralSerialClient:
                 if not clean or expected_prompt in clean:
                     continue
 
-                # 2. Strip echoed command artifacts
-                if clean == cmd or clean == injected_cmd or clean.startswith("sh -c '"):
-                    continue
-
-                # 3. Strip asynchronous kernel dmesg spam (e.g., "[  14.432] eth0: link up")
+                # 2. Strip asynchronous kernel dmesg spam (e.g., "[  14.432] eth0: link up")
                 if self.KERNEL_LOG_PATTERN.search(clean):
                     logger.debug(f"[UART] Suppressed async kernel log: {clean}")
                     continue
@@ -283,13 +318,17 @@ class EphemeralSerialClient:
             self.ser.timeout = timeout
 
 
-    def read_clean_stream(self) -> Generator[str, None, None]:
+    def read_clean_stream(self, filter_kernel: bool = True) -> Generator[str, None, None]:
         """Provides a live, ANSI-stripped generator for real-time log trailing (e.g., UUU/TEZI)."""
         if not self.ser or not self.ser.is_open: return
         if self.ser.in_waiting > 0:
             raw_bytes = self.ser.read(self.ser.in_waiting)
             self.parser.ingest(raw_bytes)
-        yield from self.parser.extract_lines()
+            
+        for line in self.parser.extract_lines():
+            if filter_kernel and self.KERNEL_LOG_PATTERN.match(line):
+                continue
+            yield line
 
     @property
     def live_buffer(self) -> str:

@@ -35,12 +35,19 @@ class UuuTeziProvisioner(BaseProvisioner):
     # UUU OUTPUT ANALYSIS PATTERNS
     # ------------------------------------------------------------------
 
-    # uuu prints "] Done" at the right edge of each successful progress bar step.
-    # Checking for "done" anywhere in raw output risks false positives (e.g. filenames).
-    _UUU_SUCCESS_RE = re.compile(r"\]\s*Done\b", re.IGNORECASE)
+    # uuu v1.5.x changed the progress bar format:
+    #   Old (<1.5.2): "7/ 7 [================================================================================] Done"
+    #   New (>=1.5.2): "7/ 7 [Done                                  ] FB: done"
+    # We also match the trailing summary line "Success 1    Failure 0" which is
+    # the most reliable signal — it only reaches a non-zero Success count on
+    # the very last completed step.
+    _UUU_SUCCESS_RE = re.compile(
+        r"(\[\s*Done|\]\s*Done\b|Success\s+[1-9]\d*\s+Failure\s+0)",
+        re.IGNORECASE
+    )
 
-    # uuu prints "] Fail" on the progress bar and "uuu Failed!" as a trailing summary.
-    _UUU_FAIL_RE = re.compile(r"(\]\s*Fail\b|uuu Failed)", re.IGNORECASE)
+    # uuu prints "[ Fail" or "] Fail" on the progress bar and "uuu Failed!" as a summary.
+    _UUU_FAIL_RE = re.compile(r"([\[\]]\s*Fail\b|uuu Failed)", re.IGNORECASE)
 
     # libusb permission errors — always produce a non-zero exit code in uuu.
     _UUU_PERMISSION_RE = re.compile(
@@ -199,11 +206,11 @@ class UuuTeziProvisioner(BaseProvisioner):
                 while time.perf_counter() < t_end:
 
                     # 1. LIVE LINE EXTRACTION
-                    for line in serial_client.read_clean_stream():
+                    for line in serial_client.read_clean_stream(filter_kernel=False):
                         logger.debug(f"[DUT UART] {line}")
                         last_ping_time = time.perf_counter()
 
-                        # 🚨 THE FIX: Check for the success signature on COMPLETED lines BEFORE they disappear!
+                        # Check for the success signature on COMPLETED lines BEFORE they disappear!
                         if "Successfully installed" in line or "Rebooting" in line or (success_prompt and success_prompt in line):
                             logger.info("\n[TEZI] Installation Success Signature detected on completed line!")
                             return True
@@ -213,7 +220,7 @@ class UuuTeziProvisioner(BaseProvisioner):
                         logger.debug(f"[DUT UART] {serial_client.live_buffer.strip()}")
                         logger.info("\n[TEZI] TEZI Shell acquired! Injecting live log tracker...")
                         try:
-                            raw_uart.write(b"tail -f /var/volatile/tezi.log\n")
+                            raw_uart.write(b"tail -n +1 -f /var/volatile/tezi.log\n")
                             raw_uart.flush()
                             tail_command_sent = True
                             serial_client.parser.clear_buffer()

@@ -78,7 +78,11 @@ class NativeMemoryValidator:
             logger.debug("[Memory] Verifying bit-integrity...")
             res_cmp = dut.safe_run("cmp -l /tmp/test_payload.bin /tmp/readback.bin", timeout_s=10.0)
 
-            if res_cmp.exited != 0:
+            if res_cmp.exited == -3:
+                return ValidatorResult(passed=False, error_msg="cmp command timed out. UART dropped keystrokes?", context=context_data)
+            elif res_cmp.exited < 0:
+                return ValidatorResult(passed=False, error_msg=f"cmp command failed with transport error code: {res_cmp.exited}", context=context_data)
+            elif res_cmp.exited != 0:
                 error_out = res_cmp.stdout.strip().split('\n')
                 error_count = len(error_out)
                 logger.critical("="*60)

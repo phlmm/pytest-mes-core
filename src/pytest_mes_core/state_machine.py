@@ -11,7 +11,7 @@ from pytest_mes_core.config import StateMachineConfig, BootProfilerConfig
 from pytest_mes_core.instruments import ScpiPowerSupply
 from pytest_mes_core.transports import EphemeralSerialClient, EphemeralSSHClient
 from pytest_mes_core.transports import TransportTimeoutError, TransportConnectionError
-from pytest_mes_core.telemetry.manifest import HardwareManifest
+from pytest_mes_core.manifest import HardwareManifest
 
 try:
     from transitions.extensions import GraphMachine as Machine
@@ -108,6 +108,8 @@ class UartEventStream:
         timeout_s: float = 60.0,
         milestones: Optional[Dict[str, str]] = None,
         autoboot_trigger: Optional[bytes] = None,
+        flush: bool = True,
+        active_ping_char: Optional[bytes] = None,
     ) -> Generator[UartEvent, None, None]:
         """
         Opens the UART event stream and yields typed events.
@@ -125,22 +127,27 @@ class UartEventStream:
             UartEvent subclasses in the order they are detected.
         """
         t_start = time.perf_counter()
-        raw_buffer = bytearray()
-        seen_prompts: set[str] = set()
         pending_milestones = dict(milestones) if milestones else {}
         autoboot_fired = False
 
-        self.serial.flush_buffers()
+        if flush:
+            self.serial.flush_buffers()
+
+        last_rx_time = time.perf_counter()
 
         while time.perf_counter() - t_start < timeout_s:
             chunk = self.serial.raw_read_chunk()
             if not chunk:
+                if active_ping_char and (time.perf_counter() - last_rx_time > 2.0):
+                    logger.debug("[UART] Console silent. Injecting ping to redraw prompt...")
+                    self.serial.raw_write(active_ping_char)
+                    last_rx_time = time.perf_counter()
                 time.sleep(0.01)
                 continue
 
-            raw_buffer.extend(chunk)
+            last_rx_time = time.perf_counter()
             self.serial.parser.ingest(chunk)
-            clean = self.ansi_pattern.sub(b'', raw_buffer)
+            clean = self.serial.parser.buffer.encode('utf-8')
             elapsed = round(time.perf_counter() - t_start, 3)
 
             # 1. Panic detection (always fatal — terminates the stream)
@@ -156,10 +163,10 @@ class UartEventStream:
                 autoboot_fired = True
                 yield AutobootWindowDetected(elapsed_s=elapsed)
 
-            # 3. Prompt detection (each type yields at most once)
+            # 3. Prompt detection
             for ptype, pbytes in prompts.items():
-                if ptype not in seen_prompts and pbytes in clean:
-                    seen_prompts.add(ptype)
+                if pbytes in clean:
+                    logger.debug(f"[UART-FSM] Detected prompt {ptype} in buffer!")
                     yield PromptDetected(elapsed_s=elapsed, prompt_type=ptype)
 
             # 4. Line-level processing (milestones + debug logging)
@@ -370,22 +377,42 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
         """
         Universal UART prober with strict ANSI stripping.
         Single source of truth for physical state detection.
+
+        Uses a two-pass strategy: a fast 0.4s pass for boards already streaming
+        output, then a 2.0s retry pass for boards sitting idle at a login prompt
+        (where agetty may take 1-3s to respond to an empty newline input).
         """
         if not self.serial.is_connected:
             self.serial.connect()
             time.sleep(0.1)
 
-        self.serial.flush_buffers()
-        self.serial.raw_write(b"\r\n")
-        time.sleep(0.4)
+        with self.serial.execution_lock():
+            self.serial.flush_buffers()
+            self.serial.raw_write(b"\r\n")
+            time.sleep(0.4)
 
-        resp = bytearray()
-        while True:
-            chunk = self.serial.raw_read_chunk()
-            if not chunk:
-                break
-            resp.extend(chunk)
-            time.sleep(0.05)
+            resp = bytearray()
+            while True:
+                chunk = self.serial.raw_read_chunk()
+                if not chunk:
+                    break
+                resp.extend(chunk)
+                time.sleep(0.05)
+
+            # RETRY PASS: an idle login prompt (agetty) can take 1-3s to respond
+            # to an empty newline. Also, UART chips often swallow the first byte 
+            # after port initialization. If the fast pass returned nothing, ping
+            # again and wait longer before declaring POWER_OFF.
+            if not resp:
+                logger.debug("[State Machine] Probe: fast pass silent, injecting \\r\\n and retrying with 2.0s wait...")
+                self.serial.raw_write(b"\r\n")
+                time.sleep(2.0)
+                while True:
+                    chunk = self.serial.raw_read_chunk()
+                    if not chunk:
+                        break
+                    resp.extend(chunk)
+                    time.sleep(0.05)
 
         # Strict ANSI stripping applied centrally
         clean_resp = self.ANSI_ESCAPE_B.sub(b'', resp)
@@ -403,6 +430,7 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
         elif len(clean_resp) > 0:
             return DutState.ENERGIZED
 
+        logger.debug(f"[State Machine] Probe clean response: {clean_resp!r}")
         return DutState.POWER_OFF
 
     def _do_soft_reboot(self) -> None:
@@ -426,11 +454,26 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
         Probes UART to detect actual hardware state and aligns the FSM.
         Uses machine.set_state() to ensure transitions library tracks the change.
 
+        Probe is skipped when:
+        - ``force`` is False AND the PSU is present AND state is not DIRTY
+          (PSU presence means we can trust the power-cycle history).
+        - ``force`` is False AND the state is RECOVERY or BOOTLOADER
+          (these were explicitly set by a transition command; we know the hardware).
+
+        Probing from an explicitly-commanded state is dangerous: a false POWER_OFF
+        result would bypass the _do_power_off() call in the cold-boot path, causing
+        the operator to never be asked to unplug the board.
+
         Args:
-            force: If True, probes even if the state is not DIRTY and PSU is present.
+            force: If True, probes regardless of current state or PSU presence.
         """
-        if not force and self.state != DutState.DIRTY and self.psu is not None:
-            return
+        if not force:
+            if self.psu is not None and self.state != DutState.DIRTY:
+                return  # PSU present: power-cycle history is tracked, trust the FSM
+            if self.state in (DutState.RECOVERY, DutState.BOOTLOADER):
+                # Explicitly-commanded states — we know what the hardware is doing.
+                logger.debug(f"[State Machine] Probe skipped: state is explicitly-set {self.state.name}.")
+                return
 
         logger.debug("[State Machine] Probing UART to align physical state...")
         detected_state = self._probe_uart_for_state()
@@ -500,7 +543,6 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
 
     def _do_energize(self) -> None:
         logger.info(f"[State Machine] Applying RAW POWER to the board (Medium: {self.context.active_boot_medium.upper()})...")
-        if not self.serial.is_connected: self.serial.connect()
 
         if self.psu:
             self.psu.enable_output()
@@ -520,6 +562,18 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
             logger.warning("[MANUAL ACTION] PLUG IN THE 12V POWER NOW.")
             try: input(">>> Press [ENTER] once power is applied... ")
             except EOFError: time.sleep(2.0)
+
+        # Securely re-bind the serial port to recover the file descriptor.
+        # If the USB-Serial adapter is physically on the board, it drops and re-enumerates during a power cycle.
+        self.serial.disconnect()
+        for i in range(50):
+            try:
+                self.serial.connect()
+                break
+            except Exception:
+                if i == 49:
+                    raise
+                time.sleep(0.1)
 
     def _set_uboot_trap_and_reboot(self) -> None:
         logger.info("[State Machine] Autoboot Disabled: Hot-patching U-Boot env from OS...")
@@ -555,14 +609,17 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
             "trap": b"MES Framework Trap",
         }
         autoboot_trigger = (
-            getattr(self.cfg, 'autoboot_msg', 'Hit any key').encode('utf-8')
+            self.cfg.bootloader_interrupt_pattern.encode('utf-8')
             if intercept_autoboot else None
         )
+
+        ping_char = b"\r\n" if intercept_autoboot else None
 
         for event in self.event_stream.open(
             prompts=prompts,
             timeout_s=self.cfg.cold_boot_timeout_s,
             autoboot_trigger=autoboot_trigger,
+            active_ping_char=ping_char,
         ):
             if isinstance(event, PanicDetected):
                 raise KernelPanicError(
@@ -606,9 +663,9 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
         logger.info(f"[State Machine] Commanding OS Boot: '{self.cfg.bootloader_boot_cmd}'")
         self.serial.flush_buffers()
         self.serial.raw_write(f"{self.cfg.bootloader_boot_cmd}\n".encode())
-        self._event_wait_for_os_shell()
+        self._event_wait_for_os_shell(flush=False)
 
-    def _event_wait_for_os_shell(self) -> None:
+    def _event_wait_for_os_shell(self, flush: bool = True) -> None:
         """
         Event-driven OS boot monitor.
 
@@ -634,6 +691,8 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
             prompts=prompts,
             timeout_s=self.cfg.cold_boot_timeout_s,
             milestones=milestones,
+            flush=flush,
+            active_ping_char=b"\n",
         ):
             if isinstance(event, PanicDetected):
                 raise KernelPanicError("Device kernel panicked during OS boot sequence.")
@@ -829,6 +888,7 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
         self._event_wait_for_bootloader(intercept_autoboot=self.cfg.autoboot_enabled)
 
     def _hw_boot_to_os(self, event: EventData) -> None:
+        self.boot_metrics.clear()
         self._align_to_physical_state()
 
         target_medium = event.kwargs.get("medium", self.context.active_boot_medium)
@@ -883,15 +943,35 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
         return False
 
     def _try_hot_login(self) -> bool:
-        """Attempt hot-login from ENERGIZED state. Returns True on success."""
+        """
+        Attempt hot-login from ENERGIZED (at login prompt) state.
+
+        Flushes stale UART data, then writes the configured username directly
+        to the waiting login prompt. This avoids the "Login incorrect" cycle
+        that an empty ``\\n`` would cause.
+
+        Returns True on success, False if the shell prompt is not reached
+        within the configured timeout.
+        """
         logger.info("[State Machine] Device is ENERGIZED (At Login Prompt). Attempting Hot-Login...")
-        self.serial.raw_write(b"\n")
+
+        # 1. Clear any stale bytes that accumulated since the login prompt appeared.
+        self.serial.flush_buffers()
+
+        # 2. Write the username directly. The board is already sitting at the
+        #    "login:" prompt, so this is the correct next input — not a bare \n.
+        logger.debug(f"[State Machine] Hot-Login: sending user '{self.cfg.os_user}'")
+        self.serial.write_line(self.cfg.os_user)
+
         try:
-            self._event_wait_for_os_shell()
+            # 3. _event_wait_for_os_shell handles password challenge (if any)
+            #    and blocks until the shell prompt is seen.
+            #    Do NOT flush, otherwise the prompt generated by our username will be erased.
+            self._event_wait_for_os_shell(flush=False)
             self._finalize_os_boot()
             return True
         except TransportTimeoutError:
-            logger.warning("[State Machine] Hot-login failed. Device is stuck. Marking DIRTY.")
+            logger.warning("[State Machine] Hot-login failed (shell prompt not reached). Marking DIRTY.")
             return False
 
     def _hw_to_recovery(self, event: EventData) -> None:

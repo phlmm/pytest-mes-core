@@ -288,6 +288,15 @@ def pytest_terminal_summary(terminalreporter: Any, exitstatus: int, config: pyte
     terminalreporter.write_line(f"Facility     : {bom.station_meta.facility}")
     terminalreporter.write_line(f"Jig ID       : {bom.station_meta.jig_id} ({bom.station_meta.environment.upper()})")
 
+    # Serial Numbers
+    telemetry_sink = getattr(config, "_mes_telemetry_sink", None)
+    if telemetry_sink and telemetry_sink.context:
+        ctx = telemetry_sink.context
+        som_sn = ctx.dut_manifest.get("serial_number", ctx.dut_serial)
+        board_sn = ctx.dut_manifest.get("evse_carrier_serial", "UNKNOWN")
+        terminalreporter.write_line(f"Board Serial : {board_sn}")
+        terminalreporter.write_line(f"SOM Serial   : {som_sn}")
+
     # Active Transports
     transports = []
     if bom.ssh_targets: transports.append("SSH")

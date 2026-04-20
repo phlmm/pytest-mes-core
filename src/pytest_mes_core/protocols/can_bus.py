@@ -31,7 +31,7 @@ class CanTopologyValidator:
         # 4. Mathematical Verification
         verify = self.dut.safe_run(f"ip link show {interface}")
         if "UP" not in verify.stdout:
-            raise RuntimeError(f"Hardware Fault: {interface} refused to transition to UP state.")
+            raise RuntimeError(f"Hardware Fault: {interface} refused to transition to UP state. Output: '{verify.stdout}'")
 
     def teardown_dut_interface(self, interface: str) -> None:
         """Zero-leakage teardown. Returns the Target PCB to a clean state."""
