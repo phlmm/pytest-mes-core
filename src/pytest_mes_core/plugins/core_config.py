@@ -218,6 +218,66 @@ def pytest_configure(config: pytest.Config) -> None:
         except Exception as e:
             logger.critical(f"[Framework] FATAL: Failed to load Hardware BOM: {e}")
 
+@pytest.hookimpl(tryfirst=True)
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    """
+    Runs just before pytest-html generates the report.
+    Updates the environment table with the fully populated hardware manifest.
+    """
+    config = session.config
+    telemetry_sink = getattr(config, "_mes_telemetry_sink", None)
+    if not telemetry_sink or not telemetry_sink.context:
+        return
+
+    ctx = telemetry_sink.context
+    if hasattr(config, "_metadata"):
+        metadata = getattr(config, "_metadata")
+        
+        # Pull final serials
+        som_sn = ctx.dut_manifest.get("serial_number", ctx.dut_serial)
+        board_sn = ctx.dut_manifest.get("evse_carrier_serial", "UNKNOWN")
+        
+        metadata["Board Serial"] = board_sn
+        metadata["SOM Serial"] = som_sn
+        
+        # Dump any extra hardware information into the HTML environment table
+        for k, v in ctx.dut_manifest.items():
+            if k not in ["serial_number", "evse_carrier_serial", "custom_flags"] and v:
+                pretty_key = k.replace("_", " ").title()
+                metadata[pretty_key] = str(v)
+
+def pytest_html_results_summary(prefix, summary, postfix, session):
+    """
+    Injects the Hardware Manifest directly into the Summary section of the pytest-html report.
+    This guarantees it is visually front-and-center, bypassing any Environment table limitations.
+    """
+    telemetry_sink = getattr(session.config, "_mes_telemetry_sink", None)
+    if not telemetry_sink or not telemetry_sink.context:
+        return
+
+    import html
+    ctx = telemetry_sink.context
+
+    # Build a raw HTML table block
+    html_block = "<h2>Hardware Manifest (Station BOM)</h2>"
+    html_block += "<table style='width: 100%; border-collapse: collapse; margin-bottom: 20px; font-family: monospace;'>"
+    html_block += "<tr style='background-color: #f2f2f2;'><th style='border: 1px solid #ddd; padding: 8px; text-align: left;'>Component</th><th style='border: 1px solid #ddd; padding: 8px; text-align: left;'>Identifier</th></tr>"
+    
+    som_sn = ctx.dut_manifest.get("serial_number", ctx.dut_serial)
+    board_sn = ctx.dut_manifest.get("evse_carrier_serial", "UNKNOWN")
+    
+    html_block += f"<tr><td style='border: 1px solid #ddd; padding: 8px;'>Board Serial</td><td style='border: 1px solid #ddd; padding: 8px;'><b>{html.escape(str(board_sn))}</b></td></tr>"
+    html_block += f"<tr><td style='border: 1px solid #ddd; padding: 8px;'>SOM Serial</td><td style='border: 1px solid #ddd; padding: 8px;'><b>{html.escape(str(som_sn))}</b></td></tr>"
+
+    for k, v in ctx.dut_manifest.items():
+        if k not in ["serial_number", "evse_carrier_serial", "custom_flags"] and v:
+            pretty_key = k.replace("_", " ").title()
+            html_block += f"<tr><td style='border: 1px solid #ddd; padding: 8px;'>{html.escape(pretty_key)}</td><td style='border: 1px solid #ddd; padding: 8px;'><b>{html.escape(str(v))}</b></td></tr>"
+
+    html_block += "</table>"
+    
+    prefix.extend([html_block])
+
 def pytest_unconfigure(config: pytest.Config) -> None:
     """
     The Master Teardown Hook. Executes unconditionally after all tests finish
@@ -235,20 +295,6 @@ def pytest_unconfigure(config: pytest.Config) -> None:
 
         # Flush the Telemetry exporter buffers
         telemetry_sink.end_session(session_passed=session_passed)
-
-        # Sychronize local spool back to the NFS Master Log Directory
-        spool_dir = getattr(config, "_mes_telemetry_spool_dir", None)
-        target_dir = getattr(config, "_mes_telemetry_target_dir", None)
-
-        if spool_dir and target_dir and spool_dir.exists():
-            try:
-                target_dir.mkdir(parents=True, exist_ok=True)
-                shutil.copytree(spool_dir, target_dir, dirs_exist_ok=True)
-                logger.info(f"[MES] Telemetry spool successfully synced to {target_dir}")
-                # Optional: shutil.rmtree(spool_dir) to clean up
-            except Exception as e:
-                logger.error(f"[MES] WARNING: Failed to sync telemetry spool to NFS {target_dir}: {e}")
-                logger.error(f"[MES] Data is preserved locally in {spool_dir}")
 
         #  DYNAMIC HTML REPORT RENAMING
         htmlpath = getattr(config.option, "htmlpath", None)
@@ -271,8 +317,25 @@ def pytest_unconfigure(config: pytest.Config) -> None:
                 # Move the temp file to the final Enterprise directory
                 shutil.move(htmlpath, final_path)
                 logger.info(f"[MES] EOL Certificate (HTML) saved: {final_path}")
+                
+                # Update pytest-html's internal path so its terminal summary prints the correct location
+                config.option.htmlpath = str(final_path)
             except Exception as e:
                 logger.error(f"[MES] Failed to rename HTML report: {e}")
+
+        # Sychronize local spool back to the NFS Master Log Directory
+        spool_dir = getattr(config, "_mes_telemetry_spool_dir", None)
+        target_dir = getattr(config, "_mes_telemetry_target_dir", None)
+
+        if spool_dir and target_dir and spool_dir.exists():
+            try:
+                target_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(spool_dir, target_dir, dirs_exist_ok=True)
+                logger.info(f"[MES] Telemetry spool successfully synced to {target_dir}")
+                # Optional: shutil.rmtree(spool_dir) to clean up
+            except Exception as e:
+                logger.error(f"[MES] WARNING: Failed to sync telemetry spool to NFS {target_dir}: {e}")
+                logger.error(f"[MES] Data is preserved locally in {spool_dir}")
 
 def pytest_terminal_summary(terminalreporter: Any, exitstatus: int, config: pytest.Config) -> None:
     """
@@ -288,7 +351,7 @@ def pytest_terminal_summary(terminalreporter: Any, exitstatus: int, config: pyte
     terminalreporter.write_line(f"Facility     : {bom.station_meta.facility}")
     terminalreporter.write_line(f"Jig ID       : {bom.station_meta.jig_id} ({bom.station_meta.environment.upper()})")
 
-    # Serial Numbers
+    # Serial Numbers & Hardware Components
     telemetry_sink = getattr(config, "_mes_telemetry_sink", None)
     if telemetry_sink and telemetry_sink.context:
         ctx = telemetry_sink.context
@@ -296,6 +359,12 @@ def pytest_terminal_summary(terminalreporter: Any, exitstatus: int, config: pyte
         board_sn = ctx.dut_manifest.get("evse_carrier_serial", "UNKNOWN")
         terminalreporter.write_line(f"Board Serial : {board_sn}")
         terminalreporter.write_line(f"SOM Serial   : {som_sn}")
+
+        # Dynamically append any other scraped hardware details
+        for k, v in ctx.dut_manifest.items():
+            if k not in ["serial_number", "evse_carrier_serial", "custom_flags"] and v:
+                pretty_key = k.replace("_", " ").title()
+                terminalreporter.write_line(f"{pretty_key:<12} : {v}")
 
     # Active Transports
     transports = []

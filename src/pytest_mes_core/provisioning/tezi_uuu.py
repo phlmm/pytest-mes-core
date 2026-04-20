@@ -216,9 +216,9 @@ class UuuTeziProvisioner(BaseProvisioner):
                             return True
 
                     # 2. PROMPT DETECTION (Using the client's live fragment buffer)
-                    if not tail_command_sent and ("~ #" in serial_client.live_buffer or "root@" in serial_client.live_buffer):
+                    if not tail_command_sent and any(p in serial_client.live_buffer for p in ["~ #", "root@", "/ #"]):
                         logger.debug(f"[DUT UART] {serial_client.live_buffer.strip()}")
-                        logger.info("\n[TEZI] TEZI Shell acquired! Injecting live log tracker...")
+                        logger.info("n[TEZI] TEZI Shell acquired! Injecting live log tracker...")
                         try:
                             raw_uart.write(b"tail -n +1 -f /var/volatile/tezi.log\n")
                             raw_uart.flush()

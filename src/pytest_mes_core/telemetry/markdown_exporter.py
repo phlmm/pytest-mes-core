@@ -92,7 +92,33 @@ class DeveloperMarkdownExporter:
         footer = (
             f"## Session Complete\n"
             f"- **Final Status:** {'✅ SUCCESS' if session_passed else '❌ FAILED'}\n"
-            f"- **Total Test Execution Time:** {round(self.total_duration, 2)}s\n"
+            f"- **Total Test Execution Time:** {round(self.total_duration, 2)}s\n\n"
         )
+        
+        if self._context and self._context.dut_manifest:
+            footer += "## Hardware Manifest (Station BOM)\n"
+            footer += "| Component | Identifier |\n|---|---|\n"
+            for k, v in self._context.dut_manifest.items():
+                if v:
+                    pretty_key = k.replace("_", " ").title()
+                    footer += f"| `{pretty_key}` | **{v}** |\n"
+            footer += "\n"
+
         with open(self.filepath, "a", encoding="utf-8") as f:
             f.write(footer)
+
+        # Rename the file dynamically at the end of the session to capture the final scraped serial
+        # and match the HTML report naming convention for easy directory sorting.
+        try:
+            status = "PASS" if session_passed else "FAIL"
+            time_str = datetime.now().strftime("%H-%M-%S")
+            safe_operator = self._context.operator_id.replace("/", "_") if self._context else "UNKNOWN"
+            serial = self._context.dut_serial if self._context else "PENDING"
+            
+            final_name = f"{status}_{time_str}_{safe_operator}_SN-{serial}.md"
+            final_path = self.filepath.parent / final_name
+            self.filepath.rename(final_path)
+            self.filepath = final_path
+            logger.debug(f"[MES] Bringup report finalized and renamed to: {final_name}")
+        except Exception as e:
+            logger.error(f"[MES] Failed to rename Bringup report: {e}")

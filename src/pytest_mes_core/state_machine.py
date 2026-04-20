@@ -135,47 +135,48 @@ class UartEventStream:
 
         last_rx_time = time.perf_counter()
 
-        while time.perf_counter() - t_start < timeout_s:
-            chunk = self.serial.raw_read_chunk()
-            if not chunk:
-                if active_ping_char and (time.perf_counter() - last_rx_time > 2.0):
-                    logger.debug("[UART] Console silent. Injecting ping to redraw prompt...")
-                    self.serial.raw_write(active_ping_char)
-                    last_rx_time = time.perf_counter()
-                time.sleep(0.01)
-                continue
+        with self.serial.execution_lock():
+            while time.perf_counter() - t_start < timeout_s:
+                chunk = self.serial.raw_read_chunk()
+                if not chunk:
+                    if active_ping_char and (time.perf_counter() - last_rx_time > 2.0):
+                        logger.debug("[UART] Console silent. Injecting ping to redraw prompt...")
+                        self.serial.raw_write(active_ping_char)
+                        last_rx_time = time.perf_counter()
+                    time.sleep(0.01)
+                    continue
 
-            last_rx_time = time.perf_counter()
-            self.serial.parser.ingest(chunk)
-            clean = self.serial.parser.buffer.encode('utf-8')
-            elapsed = round(time.perf_counter() - t_start, 3)
+                last_rx_time = time.perf_counter()
+                self.serial.parser.ingest(chunk)
+                clean = self.serial.parser.buffer.encode('utf-8')
+                elapsed = round(time.perf_counter() - t_start, 3)
 
-            # 1. Panic detection (always fatal — terminates the stream)
-            if self.panic_pattern.search(clean):
-                yield PanicDetected(
-                    elapsed_s=elapsed,
-                    raw_output=clean[-500:].decode('utf-8', errors='ignore'),
-                )
-                return
+                # 1. Panic detection (always fatal — terminates the stream)
+                if self.panic_pattern.search(clean):
+                    yield PanicDetected(
+                        elapsed_s=elapsed,
+                        raw_output=clean[-500:].decode('utf-8', errors='ignore'),
+                    )
+                    return
 
-            # 2. Autoboot window detection (yields once)
-            if autoboot_trigger and not autoboot_fired and autoboot_trigger in clean:
-                autoboot_fired = True
-                yield AutobootWindowDetected(elapsed_s=elapsed)
+                # 2. Autoboot window detection (yields once)
+                if autoboot_trigger and not autoboot_fired and autoboot_trigger in clean:
+                    autoboot_fired = True
+                    yield AutobootWindowDetected(elapsed_s=elapsed)
 
-            # 3. Prompt detection
-            for ptype, pbytes in prompts.items():
-                if pbytes in clean:
-                    logger.debug(f"[UART-FSM] Detected prompt {ptype} in buffer!")
-                    yield PromptDetected(elapsed_s=elapsed, prompt_type=ptype)
+                # 3. Prompt detection
+                for ptype, pbytes in prompts.items():
+                    if pbytes in clean:
+                        logger.debug(f"[UART-FSM] Detected prompt {ptype} in buffer!")
+                        yield PromptDetected(elapsed_s=elapsed, prompt_type=ptype)
 
-            # 4. Line-level processing (milestones + debug logging)
-            for line in self.serial.parser.extract_lines():
-                yield BootDataReceived(elapsed_s=elapsed, line=line.strip())
-                found_keys = [k for k, v in pending_milestones.items() if v in line]
-                for k in found_keys:
-                    pending_milestones.pop(k)
-                    yield MilestoneReached(elapsed_s=elapsed, name=k)
+                # 4. Line-level processing (milestones + debug logging)
+                for line in self.serial.parser.extract_lines():
+                    yield BootDataReceived(elapsed_s=elapsed, line=line.strip())
+                    found_keys = [k for k, v in pending_milestones.items() if v in line]
+                    for k in found_keys:
+                        pending_milestones.pop(k)
+                        yield MilestoneReached(elapsed_s=elapsed, name=k)
 
 @dataclass
 class DeviceContext:
@@ -953,7 +954,7 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
         Returns True on success, False if the shell prompt is not reached
         within the configured timeout.
         """
-        logger.info("[State Machine] Device is ENERGIZED (At Login Prompt). Attempting Hot-Login...")
+        logger.info("[State Machine] Device is ENERGIZED (Actively Booting or at Login). Intercepting Shell...")
 
         # 1. Clear any stale bytes that accumulated since the login prompt appeared.
         self.serial.flush_buffers()
