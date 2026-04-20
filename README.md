@@ -45,6 +45,20 @@ The machine physically wired to the test jig running the Pytest runner.
 
 ---
 
+## Module Ecosystem
+
+The `pytest-mes-core` framework is divided into distinct, strictly-typed modules to handle different layers of hardware testing:
+
+* **`pytest_mes_core.config`**: Parses the physical Station Bill of Materials (BOM) from TOML. Validates that all expected test jig hardware exists before execution.
+* **`pytest_mes_core.state_machine`**: A physical Finite State Machine (`EmbeddedLinuxStateMachine`) that transitions the target between `POWER_OFF`, `BOOTLOADER`, `OS_USERLAND`, and `RECOVERY`.
+* **`pytest_mes_core.transports`**: Contains the `FailoverTransport` matrix. Catches shattered SSH connections and seamlessly fails over to the out-of-band Serial Console.
+* **`pytest_mes_core.protocols`**: Target-side validation logic. Instead of writing bash scripts, tests use Python abstractions for `I2C`, `CAN`, `Ethernet`, and `SysFS`.
+* **`pytest_mes_core.host_adapters` & `instruments`**: Host-side drivers for barcode scanners, SCPI power supplies, JTAG debuggers, and CAN bus adapters.
+* **`pytest_mes_core.provisioning`**: Bootstraps blank silicon (e.g., using NXP `uuu` to push Toradex Easy Installer into RAM over USB OTG).
+* **`pytest_mes_core.telemetry`**: A composite telemetry router outputting to JSONL, Markdown, and TXT receipts. Intercepts failures to automatically harvest `dmesg` and `coredumpctl`.
+
+---
+
 ## Installation & Development
 
 The framework uses `hatchling` and isolates C-extension dependencies to allow cross-platform development. Engineers can install the core framework on Windows/macOS to write tests, while factory jigs install the full hardware suite.
