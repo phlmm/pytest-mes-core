@@ -19,6 +19,10 @@ from pytest_mes_core.host_adapters.base import (
 
 logger = logging.getLogger("mes_core.host_adapters.peripheral_serial")
 
+class HostSerialError(HostAdapterError):
+    """Specific exception for general Host UART/Serial failures."""
+    pass
+
 class HostPeripheralSerialAdapter(BaseHostAdapter):
     """
     Raw binary serial adapter for testing RS485/UART data buses.
@@ -66,7 +70,18 @@ class HostPeripheralSerialAdapter(BaseHostAdapter):
         except serial.SerialException as e:
             err_str = str(e).lower()
             if "device or resource busy" in err_str or "access is denied" in err_str:
-                raise HostResourceBusyError(f"Serial port {self.cfg.port} is locked by another process: {e}")
+                from pytest_mes_core.host_adapters.diagnostics import ResourceDiagnostics
+                owner = ResourceDiagnostics.get_device_owner(self.cfg.port)
+                logger.critical("="*60)
+                if owner:
+                    error_msg = f"Serial port {self.cfg.port} is locked by PID/Process: {owner}!"
+                    logger.critical(f"[Host RS485] FATAL: {error_msg}")
+                    logger.critical("[Host RS485] Please close the competing application and retry.")
+                else:
+                    error_msg = f"Serial port {self.cfg.port} is busy (OS refused to identify owner)."
+                    logger.critical(f"[Host RS485] FATAL: {error_msg}")
+                logger.critical("="*60)
+                raise HostResourceBusyError(error_msg)
             elif "file not found" in err_str or "no such file" in err_str:
                 raise HostHardwareDisconnectError(f"Serial port physically disconnected: {self.cfg.port}")
             else:

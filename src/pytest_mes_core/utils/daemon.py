@@ -68,8 +68,9 @@ class DaemonProcess:
             # If no ready phrase is provided, just give the OS 0.5s to fail-fast
             time.sleep(0.5)
             if self.proc.poll() is not None:
+                retcode = self.proc.returncode
                 self.stop()
-                raise DaemonStartupError(f"Daemon crashed instantly. Code: {self.proc.returncode}")
+                raise DaemonStartupError(f"Daemon crashed instantly. Code: {retcode}")
 
         self.logger.info(f"[Daemon] Process online and backgrounded (PID: {self.proc.pid}).")
         return self

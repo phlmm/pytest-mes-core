@@ -58,7 +58,12 @@ class LiveProcess:
         _stdout_chunks: list = []
 
         try:
+            import os
+            os.set_blocking(proc.stdout.fileno(), False)
             while True:
+                if time.perf_counter() - t0 > self.timeout_s:
+                    raise subprocess.TimeoutExpired(self.cmd, self.timeout_s)
+
                 # 16-byte chunks defend against RAM spikes and support '\r' progress bars
                 chunk = proc.stdout.read(16)
                 if not chunk:

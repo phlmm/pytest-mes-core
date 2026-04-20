@@ -17,8 +17,7 @@ from .base import (
 from .mutex import hardware_mutex, HostMutexTimeoutError
 from .host_can_bus import HostCanAdapter
 from .hid_scanner import HeadlessBarcodeScanner, HidScannerTimeoutError
-from .serial_uart import HostSerialAdapter, HostSerialError
-from .peripheral_serial import HostPeripheralSerialAdapter
+from .peripheral_serial import HostPeripheralSerialAdapter, HostPeripheralSerialAdapter as HostSerialAdapter, HostSerialError
 from .safety import EStopWatchdog
 from .openocd import OpenOcdDaemonAdapter, HostOpenOcdError
 from .microchip import HostPickitAdapter

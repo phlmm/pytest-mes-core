@@ -51,6 +51,20 @@ class EphemeralSerialClient:
             logger.debug(f"[UART] Bound to {self.cfg.port} and flushed stale OS buffers.")
             self.watchdog.start()
         except serial.SerialException as e:
+            err_str = str(e).lower()
+            if "device or resource busy" in err_str or "access is denied" in err_str:
+                from pytest_mes_core.host_adapters.diagnostics import ResourceDiagnostics
+                owner = ResourceDiagnostics.get_device_owner(self.cfg.port)
+                logger.critical("="*60)
+                if owner:
+                    error_msg = f"Serial port {self.cfg.port} is locked by PID/Process: {owner}!"
+                    logger.critical(f"[UART] FATAL: {error_msg}")
+                    logger.critical("[UART] Please close the competing application (minicom, Putty) and retry.")
+                else:
+                    error_msg = f"Serial port {self.cfg.port} is busy (OS refused to identify owner)."
+                    logger.critical(f"[UART] FATAL: {error_msg}")
+                logger.critical("="*60)
+                raise TransportConnectionError(error_msg)
             raise TransportConnectionError(f"Failed to bind Host UART {self.cfg.port}: {e}")
 
     def disconnect(self) -> None:
