@@ -10,9 +10,16 @@ class ResourceDiagnostics:
 
     @staticmethod
     def get_device_owner(device_path: str) -> Optional[str]:
-        """
-        Checks if a /dev/ node is currently opened by any process on the OS.
-        Returns a formatted string of the culprit (e.g., 'PID 4092 (minicom)'), or None if free.
+        """Checks if a /dev/ node is currently opened by any process on the OS.
+        
+        Uses fuser or lsof to identify process IDs and program names locking the device.
+
+        Args:
+            device_path: The absolute path to the hardware device (e.g. /dev/ttyUSB0).
+
+        Returns:
+            str: A formatted string of the culprit (e.g., 'PID 4092 (minicom)'), 
+                or None if the device is free.
         """
         logger.debug(f"[Diagnostics] Interrogating kernel for locks on {device_path}...")
         try:

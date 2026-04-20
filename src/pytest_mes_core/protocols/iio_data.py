@@ -25,6 +25,20 @@ class IioAdcValidator:
         min_v: float = 0.0,
         max_v: float = 5.0
     ) -> ValidatorResult:
+        """Measures an analog voltage by bursting reads over the Linux IIO subsystem.
+
+        Args:
+            dut: The transport interface connected to the target.
+            iio_device_name: The name of the IIO device in sysfs.
+            channel: The IIO channel number to read.
+            samples: The number of samples to take.
+            delay_s: The delay between samples in seconds.
+            min_v: The minimum acceptable voltage.
+            max_v: The maximum acceptable voltage.
+
+        Returns:
+            ValidatorResult: Pass/fail outcome based on voltage bounds.
+        """
 
         context_data: Dict[str, Any] = {"target_sensor": iio_device_name, "channel": channel}
         logger.info(f"[ADC {iio_device_name}:{channel}] Sampling voltage ({samples} bursts, {delay_s}s delay)...")
@@ -126,6 +140,17 @@ class IioDacActuator:
         channel: int,
         target_v: float
     ) -> ValidatorResult:
+        """Sets an analog voltage output via the Linux IIO subsystem.
+
+        Args:
+            dut: The transport interface connected to the target.
+            iio_device_name: The name of the IIO DAC device in sysfs.
+            channel: The IIO DAC channel number to write to.
+            target_v: The target voltage to set.
+
+        Returns:
+            ValidatorResult: Pass/fail outcome of the DAC set operation.
+        """
 
         context_data: Dict[str, Any] = {"target_v": target_v}
         logger.info(f"[DAC {iio_device_name}:{channel}] Requesting target {target_v} V...")

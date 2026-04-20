@@ -24,6 +24,18 @@ class NativeMemoryValidator:
         total_size_bytes: int,
         restore_backup: bool = False
     ) -> ValidatorResult:
+        """Verifies read/write integrity across the full capacity of a block device.
+
+        Args:
+            dut: The transport interface connected to the target.
+            device_path: The /dev path of the block device to test.
+            total_size_bytes: The total size of the block device in bytes.
+            restore_backup: Whether to backup the original contents and restore them
+                after the test.
+
+        Returns:
+            ValidatorResult: Pass/fail outcome based on a bit-level comparison.
+        """
 
         context_data: Dict[str, Any] = {"device_path": device_path, "total_size_bytes": total_size_bytes}
         backup_created = False
@@ -141,6 +153,17 @@ class RamValidator:
 
     @staticmethod
     def verify_ram_health(dut: DutTransport, size_mb: int, loops: int = 1) -> ValidatorResult:
+        """Validates physical RAM integrity using memtester and hardware EDAC counters.
+
+        Args:
+            dut: The transport interface connected to the target.
+            size_mb: The amount of RAM to test in MB.
+            loops: The number of test loops to run.
+
+        Returns:
+            ValidatorResult: Pass/fail outcome based on memtester success and zero 
+                uncorrectable EDAC errors.
+        """
         logger.info(f"[RAM] Initiating physical memory stress test: {size_mb}MB for {loops} loops...")
         context_data: Dict[str, Any] = {"size_mb": size_mb, "loops": loops}
         metrics: Dict[str, float] = {}

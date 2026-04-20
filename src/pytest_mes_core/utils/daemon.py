@@ -28,7 +28,17 @@ class DaemonProcess:
         self._ready_event = threading.Event()
 
     def start(self, timeout_s: float = 5.0) -> 'DaemonProcess':
-        """Spawns the daemon and blocks until the ready_phrase is detected."""
+        """Spawns the daemon and blocks until the ready_phrase is detected.
+
+        Args:
+            timeout_s: The maximum number of seconds to wait for the ready phrase.
+
+        Returns:
+            DaemonProcess: The current instance, for chaining.
+
+        Raises:
+            DaemonStartupError: If the daemon crashes instantly or times out waiting.
+        """
         self.logger.debug(f"[Daemon] Spawning background process: {self.cmd_str}")
 
         self.proc = subprocess.Popen(
@@ -106,7 +116,14 @@ class DaemonProcess:
                         self._ready_event.set()
 
     def export_log(self, export_dir: Path) -> Path:
-        """Dumps the daemon's lifetime output to a discrete file."""
+        """Dumps the daemon's lifetime output to a discrete file.
+
+        Args:
+            export_dir: Directory where the log file should be saved.
+
+        Returns:
+            Path: The full path to the exported log file.
+        """
         export_dir.mkdir(parents=True, exist_ok=True)
         filename = f"{Path(self.cmd[0]).name}_daemon_{int(time.time())}.log"
         filepath = export_dir / filename

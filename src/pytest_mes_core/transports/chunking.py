@@ -30,7 +30,10 @@ class HostSideBuffer:
         self._t0: float = 0.0
 
     def start(self) -> None:
-        """Spawns the background daemon to begin data extraction."""
+        """Spawns the background daemon to begin data extraction.
+        
+        Ensures thread safety and floors the polling interval to protect DUT CPU.
+        """
         # THREAD SAFETY FIX: Prevent Ghost Threads
         if self._thread and self._thread.is_alive():
             logger.warning(f"[HostBuffer] Vacuum for {self.remote_path} is already running. Ignoring start request.")
@@ -54,7 +57,11 @@ class HostSideBuffer:
         self._thread.start()
 
     def stop(self) -> List[str]:
-        """Halts the polling instantly and returns a thread-safe copy of the surviving data."""
+        """Halts the polling instantly and returns a thread-safe copy of the surviving data.
+        
+        Returns:
+            List[str]: The extracted log lines secured in Host RAM.
+        """
         logger.debug("[HostBuffer] ZERO-LEAKAGE: Disarming vacuum and reaping thread...")
         self._stop_event.set()
 

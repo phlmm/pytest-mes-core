@@ -25,15 +25,30 @@ class OperatorReceiptExporter:
         return self._context
 
     def start_session(self, context: StationContext) -> None:
+        """Initializes the session.
+
+        Args:
+            context: The station metadata context for this session.
+        """
         self._context = context
         self.start_time = time.perf_counter()
 
     def emit_record(self, record: TestRecord) -> None:
+        """Updates internal statistics based on the emitted test record.
+
+        Args:
+            record: The test record to process.
+        """
         self.total_tests += 1
         if not record.passed:
             self.failed_tests += 1
 
     def end_session(self, session_passed: bool) -> None:
+        """Finalizes the run and writes the receipt file.
+
+        Args:
+            session_passed: True if all tests passed, False otherwise.
+        """
         if not self._context: return
 
         date_str = datetime.now().strftime("%Y-%m-%d")
@@ -42,16 +57,18 @@ class OperatorReceiptExporter:
 
         status = "PASS" if session_passed else "FAIL"
         time_str = datetime.now().strftime("%H-%M-%S")
+        run_id = self._context.run_id
         safe_operator = self._context.operator_id.replace("/", "_")
         serial = self._context.dut_serial
 
-        filename = f"{status}_{time_str}_{safe_operator}_SN-{serial}.txt"
+        filename = f"{status}_{time_str}_{safe_operator}_SN-{serial}_{run_id}.txt"
         filepath = receipt_dir / filename
 
         duration = round(time.perf_counter() - self.start_time, 2) if self.start_time else 0.0
 
         receipt_body = (
             f"=== EOL TEST RECEIPT ===\n"
+            f"Run ID       : {run_id}\n"
             f"Status       : {status}\n"
             f"Jig ID       : {self._context.jig_id}\n"
             f"Operator     : {self._context.operator_id}\n"

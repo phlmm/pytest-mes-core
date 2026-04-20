@@ -25,9 +25,15 @@ class EthernetValidator:
 
     @classmethod
     def setup_and_verify_link(cls, dut: DutTransport, cfg: EthernetConfig) -> ValidatorResult:
-        """
-        Takes absolute control of the interface, flushes stale states,
-        assigns deterministic IPs, and polls for PHY Carrier lock.
+        """Takes absolute control of the interface, flushes stale states, assigns deterministic IPs, and polls for PHY Carrier lock.
+
+        Args:
+            dut: The transport interface connected to the Device Under Test.
+            cfg: The Ethernet configuration parameters.
+
+        Returns:
+            ValidatorResult: An object containing the validation outcome (passed/failed), 
+                captured metrics like negotiated speed, and contextual error information.
         """
         logger.info(f"[ETH {cfg.interface}] Enforcing deterministic physical state...")
         context_data: Dict[str, Any] = {}
@@ -116,6 +122,20 @@ class EthernetValidator:
 
     @classmethod
     def measure_throughput(cls, dut: DutTransport, cfg: EthernetConfig) -> ValidatorResult:
+        """Measures DMA/MAC throughput by orchestrating an iperf3 client/server session.
+
+        Spawns a local Host PC iperf3 daemon, triggers the DUT client, and parses
+        the JSON results to ensure hardware physics (throughput, retransmits) meet
+        the required minimums.
+
+        Args:
+            dut: The transport interface connected to the Device Under Test.
+            cfg: The Ethernet configuration parameters.
+
+        Returns:
+            ValidatorResult: An object containing the validation outcome (passed/failed), 
+                captured metrics like throughput and retransmits, and contextual error information.
+        """
         logger.info(f"[ETH] Measuring DMA/MAC throughput to {cfg.host_iperf_ip} for {cfg.iperf_duration_s}s...")
         context_data: Dict[str, Any] = {}
         server_proc = None

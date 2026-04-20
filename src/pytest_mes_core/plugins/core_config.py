@@ -81,6 +81,11 @@ def pytest_load_initial_conftests(early_config: pytest.Config, parser: pytest.Pa
     The Pre-Parse Hook.
     Intercepts the raw CLI arguments and injects the pytest-html flags BEFORE
     the plugin manager initializes, forcing pytest-html to wake up.
+
+    Args:
+        early_config: The early pytest configuration object.
+        parser: The argument parser.
+        args: The raw list of command-line arguments.
     """
     # Only inject if the user didn't manually pass a custom --html flag
     if not any(arg.startswith("--html") for arg in args):
@@ -111,6 +116,9 @@ def telemetry_sink(request: pytest.FixtureRequest) -> Optional[TelemetryExporter
 def pytest_configure(config: pytest.Config) -> None:
     """
     The Master Setup Hook. Executes once before any test collection begins.
+
+    Args:
+        config: The Pytest configuration object.
     """
     config.addinivalue_line(
         "markers", "requires_state(state): Enforces physical hardware state (DutState) before test execution."
@@ -141,13 +149,13 @@ def pytest_configure(config: pytest.Config) -> None:
     if toml_path.exists():
         try:
             bom = load_toml_config(toml_path, StationEnvironment)
-            config._mes_bom = bom
+            config._mes_bom = bom  # type: ignore
 
             if bom.e_stop and bom.e_stop.enabled:
                 watchdog = EStopWatchdog(bom.e_stop)
                 try:
                     watchdog.__enter__()
-                    config._mes_watchdog = watchdog
+                    config._mes_watchdog = watchdog  # type: ignore
                 except Exception as e:
                     logger.critical(f"[Safety] FATAL: E-Stop Watchdog failed to arm: {e}")
                     # Don't leave a half-initialized watchdog with leaked GPIO pins
@@ -169,11 +177,11 @@ def pytest_configure(config: pytest.Config) -> None:
             if bom.telemetry.exporter_type == "jsonl":
                 # Stash the true network drive target
                 target_dir = Path(bom.telemetry.log_directory) if bom.telemetry.log_directory else Path("artifacts/evse_telemetry")
-                config._mes_telemetry_target_dir = target_dir
+                config._mes_telemetry_target_dir = target_dir  # type: ignore
 
                 # Pivot all telemetry to a local RAM/ephemeral spool
                 log_dir = Path("/tmp/mes_telemetry_spool") / session_id
-                config._mes_telemetry_spool_dir = log_dir
+                config._mes_telemetry_spool_dir = log_dir  # type: ignore
 
                 # 1. Base Exporter (Always Active)
                 active_exporters = [JsonlTelemetryExporter(log_dir)]
@@ -188,17 +196,17 @@ def pytest_configure(config: pytest.Config) -> None:
                 telemetry_sink = CompositeTelemetryExporter(active_exporters)
                 try:
                     telemetry_sink.start_session(ctx)
-                    config._mes_telemetry_sink = telemetry_sink
+                    config._mes_telemetry_sink = telemetry_sink  # type: ignore
                 except Exception as e:
                     logger.critical(f"FATAL: Telemetry sub-system failed to initialize! {e}")
                     pytest.exit(f"MES Framework aborted. Cannot guarantee telemetry storage: {e}", returncode=1)
 
-                # 🚨 HTML EOL CERTIFICATE AUTO-CONFIG
+                # HTML EOL CERTIFICATE AUTO-CONFIG
                 date_str = datetime.now().strftime("%Y-%m-%d")
                 html_dir = log_dir / "html_reports" / date_str
                 html_dir.mkdir(parents=True, exist_ok=True)
 
-                config._mes_html_dir = html_dir
+                config._mes_html_dir = html_dir  # type: ignore
 
             # Metadata Injection for the HTML Report Header
             if hasattr(config, "_metadata"):
@@ -223,6 +231,10 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     """
     Runs just before pytest-html generates the report.
     Updates the environment table with the fully populated hardware manifest.
+
+    Args:
+        session: The Pytest session object.
+        exitstatus: The exit status code.
     """
     config = session.config
     telemetry_sink = getattr(config, "_mes_telemetry_sink", None)
@@ -246,10 +258,16 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
                 pretty_key = k.replace("_", " ").title()
                 metadata[pretty_key] = str(v)
 
-def pytest_html_results_summary(prefix, summary, postfix, session):
+def pytest_html_results_summary(prefix: list[str], summary: list[str], postfix: list[str], session: pytest.Session) -> None:
     """
     Injects the Hardware Manifest directly into the Summary section of the pytest-html report.
     This guarantees it is visually front-and-center, bypassing any Environment table limitations.
+
+    Args:
+        prefix: The prefix elements for the HTML summary.
+        summary: The core summary elements.
+        postfix: The postfix elements for the HTML summary.
+        session: The Pytest session object.
     """
     telemetry_sink = getattr(session.config, "_mes_telemetry_sink", None)
     if not telemetry_sink or not telemetry_sink.context:
@@ -282,6 +300,9 @@ def pytest_unconfigure(config: pytest.Config) -> None:
     """
     The Master Teardown Hook. Executes unconditionally after all tests finish
     or if the framework crashes fatally.
+
+    Args:
+        config: The Pytest configuration object.
     """
     watchdog = getattr(config, "_mes_watchdog", None)
     telemetry_sink = getattr(config, "_mes_telemetry_sink", None)
@@ -340,6 +361,11 @@ def pytest_unconfigure(config: pytest.Config) -> None:
 def pytest_terminal_summary(terminalreporter: Any, exitstatus: int, config: pytest.Config) -> None:
     """
     Injects the active Hardware Manifest into the final Pytest console output.
+
+    Args:
+        terminalreporter: The pytest terminal reporter object.
+        exitstatus: The exit status code.
+        config: The Pytest configuration object.
     """
     bom = getattr(config, "_mes_bom", None)
     if not bom:

@@ -27,7 +27,12 @@ class RenodeRunner:
         self._process: Optional[subprocess.Popen] = None
         
     def start(self) -> None:
-        """Spawns the headless Renode process and waits for the monitor port."""
+        """Spawns the headless Renode process and waits for the monitor port.
+        
+        Raises:
+            FileNotFoundError: If the Renode script does not exist.
+            RenodeRunnerError: If the simulator fails to bind the TCP monitor port.
+        """
         if not self.script_path.exists():
             raise FileNotFoundError(f"Renode script not found: {self.script_path}")
             

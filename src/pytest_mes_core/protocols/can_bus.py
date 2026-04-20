@@ -7,11 +7,29 @@ from pytest_mes_core.host_adapters import HostCanAdapter
 logger = logging.getLogger("mes_core.protocols.can")
 
 class CanTopologyValidator:
+    """Validates CAN bus topology by orchestrating round-robin TX/RX tests.
+
+    Manages both Target DUT CAN interfaces via POSIX iproute2/can-utils
+    and local Host PC CAN adapters (e.g. PEAK PCAN) to ensure electrical
+    and software bus integrity.
+    """
     def __init__(self, dut: DutTransport, host_adapters: Dict[str, HostCanAdapter] = None):
         self.dut = dut
         self.host_adapters = host_adapters or {}
 
     def configure_dut_interface(self, interface: str, bitrate: int = 500000) -> None:
+        """Configures the Target DUT CAN interface.
+
+        Clears existing error states, applies the bitrate, and brings the link UP.
+        Validates the state mathematically by parsing `ip link show`.
+
+        Args:
+            interface: The name of the interface on the DUT (e.g. 'can0').
+            bitrate: The CAN bus bitrate in bits per second.
+
+        Raises:
+            RuntimeError: If the interface fails to configure or transition to the UP state.
+        """
         logger.info(f"[DUT CAN] Configuring Target Interface '{interface}' @ {bitrate}bps...")
 
         # 1. Self-Healing: Clear hardware error states
@@ -34,7 +52,11 @@ class CanTopologyValidator:
             raise RuntimeError(f"Hardware Fault: {interface} refused to transition to UP state. Output: '{verify.stdout}'")
 
     def teardown_dut_interface(self, interface: str) -> None:
-        """Zero-leakage teardown. Returns the Target PCB to a clean state."""
+        """Zero-leakage teardown. Returns the Target PCB to a clean state.
+
+        Args:
+            interface: The name of the interface on the DUT to tear down.
+        """
         logger.debug(f"[DUT CAN] Tearing down Target '{interface}'...")
         self.dut.safe_run(f"ip link set {interface} down")
 
@@ -100,6 +122,17 @@ class CanTopologyValidator:
         return all_passed
 
     def validate_topology(self, nodes: List[str], can_id_base: int, payload: bytes, timeout_s: float = 2.0) -> bool:
+        """Validates the full CAN matrix by forcing each node to TX while all others RX.
+
+        Args:
+            nodes: A list of nodes to test in the format 'owner:interface' (e.g., 'host:can0', 'dut:can1').
+            can_id_base: The base CAN ID to use for the payload frames.
+            payload: The payload bytes to transmit.
+            timeout_s: The maximum time to wait for the RX nodes to capture the frame.
+
+        Returns:
+            bool: True if all nodes successfully transmitted and received the payload, False otherwise.
+        """
         logger.info(f"[CAN Topology] Validating Full Matrix for Nodes: {nodes}")
         all_passed = True
         for index, tx_node in enumerate(nodes):

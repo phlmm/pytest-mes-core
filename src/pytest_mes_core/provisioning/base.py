@@ -21,7 +21,12 @@ class BaseProvisioner(ABC):
     """
     @abstractmethod
     def provision(self, image_path: Path) -> bool:
-        """
-        Returns True if successful, raises ProvisioningError or returns False on failure.
+        """Executes the provisioning process for the given image.
+
+        Args:
+            image_path: Path to the firmware image or payload to flash.
+
+        Returns:
+            bool: True if successful, raises ProvisioningError or returns False on failure.
         """
         pass

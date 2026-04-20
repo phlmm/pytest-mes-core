@@ -58,6 +58,17 @@ class HostUsbSdMuxAdapter(BaseHostAdapter):
             raise HostAdapterError(err_msg)
 
     def __enter__(self) -> 'HostUsbSdMuxAdapter':
+        """Acquires a cross-process lock and toggles the SD Mux to the Host PC.
+
+        Includes a defensive 2-second sleep to ensure the Linux kernel completes
+        USB block device enumeration before returning.
+
+        Returns:
+            HostUsbSdMuxAdapter: The locked and host-connected SD Mux adapter.
+
+        Raises:
+            HostAdapterError: If the OS lock fails or the usbsdmux command fails.
+        """
         logger.debug(f"[SD-Mux] Acquiring hardware lock for mux {self.cfg.serial_id}...")
 
         try:

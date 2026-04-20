@@ -117,8 +117,12 @@ class JsonlTelemetryExporter:
                     fcntl.flock(f, fcntl.LOCK_UN)
 
     def _execute_emergency_dump(self, payload: str) -> None:
-        """Attempts to save data to the volatile RAM disk if the main drive drops."""
-        fallback_file = Path(f"/tmp/mes_emergency_dump_{int(time.time())}.jsonl")
+        """Attempts to save data to the volatile RAM disk if the main drive drops.
+
+        Args:
+            payload: The string payload to salvage.
+        """
+        fallback_file = Path(f"/tmp/mes_emergency_dump_{int(time.time())}_{os.getpid()}.jsonl")
         logger.critical(f"[Telemetry] Executing RAM-disk emergency dump to {fallback_file}...")
 
         try:

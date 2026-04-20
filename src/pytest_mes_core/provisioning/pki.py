@@ -26,10 +26,21 @@ class PkiProvisioner:
         remote_dest: str,
         permissions: str = "400"
     ) -> None:
-        """
-        Pushes a local certificate/key to the DUT over ANY transport (SSH or Serial),
-        enforces strict chmod permissions, and cryptographically verifies the transit.
-        Raises ProvisioningError on any failure to abort the factory setup.
+        """Pushes a local certificate/key to the DUT over ANY transport (SSH or Serial).
+
+        Enforces strict chmod permissions and cryptographically verifies the transit.
+        Uses POSIX heredocs and base64 chunking to bypass missing SFTP servers on
+        raw embedded targets.
+
+        Args:
+            transport: The DUT transport connection.
+            local_filepath: Path to the local certificate/key file.
+            remote_dest: Destination path on the target device.
+            permissions: POSIX permission string to apply to the remote file.
+
+        Raises:
+            ProvisioningError: If the local file is missing, chunk transmission fails,
+                or cryptographic transit verification fails.
         """
         if not local_filepath.exists():
             err_msg = f"Local credential file not found at {local_filepath}"
@@ -122,6 +133,16 @@ class PkiPairingValidator:
         remote_cert_path: str,
         remote_key_path: str
     ) -> ValidatorResult:
+        """Verifies cryptographic pairing of a certificate and private key on the target.
+
+        Args:
+            transport: The DUT transport connection.
+            remote_cert_path: Path to the certificate file on the target.
+            remote_key_path: Path to the private key file on the target.
+
+        Returns:
+            ValidatorResult: Contains success status and any relevant error messages.
+        """
         logger.info(f"[PKI] Verifying cryptographic pairing of {remote_cert_path} and {remote_key_path}...")
 
         # Extract modulus from Certificate

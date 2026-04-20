@@ -57,12 +57,32 @@ class GpioEdgeValidator:
 
     @staticmethod
     def verify_button_press(dut: DutTransport, cfg: GpioEdgeConfig) -> ValidatorResult:
-        """Use this for human-interactive buttons."""
+        """Use this for human-interactive buttons.
+
+        Arms a hardware trap and waits for a physical edge transition.
+
+        Args:
+            dut: The transport interface connected to the target.
+            cfg: The GPIO edge configuration.
+
+        Returns:
+            ValidatorResult: Pass/fail outcome and the time it took to detect the edge.
+        """
         return GpioEdgeValidator._execute_gpiomon_trap(dut, cfg, trap_name="GPIO Button")
 
     @staticmethod
     def await_interrupt_pulse(dut: DutTransport, cfg: GpioEdgeConfig) -> ValidatorResult:
-        """Use this for silicon-driven IRQ lines (e.g., PIC18 INT_SOM#)."""
+        """Use this for silicon-driven IRQ lines (e.g., PIC18 INT_SOM#).
+
+        Arms a hardware trap to detect high-speed interrupts from auxiliary silicon.
+
+        Args:
+            dut: The transport interface connected to the target.
+            cfg: The GPIO edge configuration.
+
+        Returns:
+            ValidatorResult: Pass/fail outcome and the time it took to detect the interrupt.
+        """
         return GpioEdgeValidator._execute_gpiomon_trap(dut, cfg, trap_name="GPIO IRQ")
 
 
@@ -71,9 +91,14 @@ class GpioLedActuator:
 
     @staticmethod
     def set_output(dut: DutTransport, cfg: GpioLedConfig, state: bool) -> None:
-        """
-        Drives a GPIO line high or low.
+        """Drives a GPIO line high or low.
+        
         Uses background mode to hold the line state after the command exits.
+
+        Args:
+            dut: The transport interface connected to the target.
+            cfg: The GPIO output configuration.
+            state: True to drive the line HIGH (1), False for LOW (0).
         """
         val = 1 if state else 0
         logger.debug(f"[GPIO {cfg.gpiochip}:{cfg.line}] Driving line to {val} (Background mode)...")
@@ -90,7 +115,11 @@ class GpioLedActuator:
 
     @staticmethod
     def teardown_zero_leakage(dut: DutTransport) -> None:
-        """ZERO-LEAKAGE: Kills all lingering gpioset holds to turn off all outputs."""
+        """ZERO-LEAKAGE: Kills all lingering gpioset holds to turn off all outputs.
+
+        Args:
+            dut: The transport interface connected to the target.
+        """
         logger.debug("[GPIO] ZERO-LEAKAGE: Releasing all active gpioset line holds.")
         try:
             dut.safe_run("killall -9 gpioset >/dev/null 2>&1 || true", timeout_s=3.0)
@@ -103,6 +132,16 @@ class GpioLoopbackValidator:
 
     @staticmethod
     def verify_loopback(dut: DutTransport, cfg: GpioLoopbackConfig, test_state: bool = True) -> ValidatorResult:
+        """Validates physical signal propagation across a GPIO loopback pair.
+
+        Args:
+            dut: The transport interface connected to the target.
+            cfg: The GPIO loopback configuration.
+            test_state: The boolean state to drive on the TX line.
+
+        Returns:
+            ValidatorResult: Pass/fail outcome indicating whether RX matched TX.
+        """
         tx_val = 1 if test_state else 0
         logger.info(f"[GPIO Loopback] Testing TX {cfg.tx_gpiochip}:{cfg.tx_line} -> RX {cfg.rx_gpiochip}:{cfg.rx_line} (State: {tx_val})")
 

@@ -49,9 +49,15 @@ dev = [
     "pytest-mock>=3.10",
     "pyvisa-sim>=0.5"
 ]
+# Documentation
+docs = [
+    "mkdocs>=1.5.0",
+    "mkdocs-material>=9.5.0",
+    "mkdocstrings[python]>=0.24.0"
+]
 # Install everything: pip install pytest-mes-core[all]
 all = [
-    "pytest-mes-core[linux-hardware,instruments,dev]"
+    "pytest-mes-core[linux-hardware,instruments,dev,docs]"
 ]
 
 [project.entry-points.pytest11]

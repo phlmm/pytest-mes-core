@@ -21,6 +21,14 @@ class HostPickitAdapter(BaseHostAdapter):
     # REQUIRED BY BASE CLASS CONTRACT
     # ==========================================
     def __enter__(self) -> 'HostPickitAdapter':
+        """Acquires a cross-process mutex lock for the physical PICkit probe.
+
+        Returns:
+            HostPickitAdapter: The locked hardware adapter instance.
+
+        Raises:
+            HostAdapterError: If the probe cannot be locked within the timeout.
+        """
         logger.debug(f"[PICkit] Acquiring hardware lock for probe {self.tool_serial}...")
         try:
             self._mutex_context = hardware_mutex(
@@ -49,9 +57,11 @@ class HostPickitAdapter(BaseHostAdapter):
     # ==========================================
     @contextmanager
     def lock_usb_bus(self):
-        """
-        Allows tests to use `with pickit.lock_usb_bus():` for better readability,
+        """Allows tests to use 'with pickit.lock_usb_bus():' for better readability,
         while routing through the required __enter__/__exit__ methods.
+
+        Yields:
+            HostPickitAdapter: The locked hardware adapter instance.
         """
         with self:
             yield self

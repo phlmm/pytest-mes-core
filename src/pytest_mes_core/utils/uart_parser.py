@@ -14,7 +14,11 @@ class UartStreamParser:
         self._buffer = ""
 
     def ingest(self, raw_bytes: bytes) -> None:
-        """Decodes raw bytes, sanitizes ANSI, and appends to the internal buffer."""
+        """Decodes raw bytes, sanitizes ANSI, and appends to the internal buffer.
+
+        Args:
+            raw_bytes: Raw byte string received from the UART.
+        """
         if not raw_bytes:
             return
 
@@ -24,7 +28,11 @@ class UartStreamParser:
 
     @property
     def buffer(self) -> str:
-        """Returns the current unbroken string buffer."""
+        """Returns the current unbroken string buffer.
+
+        Returns:
+            str: The current string buffer contents.
+        """
         return self._buffer
 
     def clear_buffer(self) -> None:

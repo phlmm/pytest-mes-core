@@ -19,6 +19,15 @@ class OpenOcdDaemonAdapter(BaseHostAdapter):
         self._daemon: Optional[DaemonProcess] = None
 
     def __enter__(self) -> 'OpenOcdDaemonAdapter':
+        """Starts the OpenOCD daemon and waits for it to bind the telnet RPC port.
+
+        Returns:
+            OpenOcdDaemonAdapter: The active daemon adapter instance.
+
+        Raises:
+            HostAdapterError: If OpenOCD is not installed.
+            HostOpenOcdError: If the daemon crashes or the JTAG probe is unplugged.
+        """
         logger.info(f"[JTAG] Initializing OpenOCD Daemon (RPC Port: {self.rpc_port})...")
 
         cmd = [

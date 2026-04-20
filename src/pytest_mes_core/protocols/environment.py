@@ -34,8 +34,14 @@ class EnvironmentValidator:
         dut: DutTransport,
         extra_binaries: Optional[List[str]] = None
     ) -> ValidatorResult:
-        """
-        Executes a zero-overhead, single-shot batch check of all required binaries.
+        """Executes a zero-overhead, single-shot batch check of all required binaries.
+
+        Args:
+            dut: The transport interface connected to the target.
+            extra_binaries: An optional list of additional binary names to check.
+
+        Returns:
+            ValidatorResult: Contains the pass/fail status and lists missing binaries in the context.
         """
         logger.info("[Pre-Flight] Verifying DUT embedded Linux dependencies...")
 
@@ -93,9 +99,16 @@ class EnvironmentValidator:
 
     @classmethod
     def verify_system_health(cls, dut: DutTransport) -> ValidatorResult:
-        """
-        Performs a pre-flight sanity check on the kernel state.
+        """Performs a pre-flight sanity check on the kernel state.
+
         Checks for early-boot panics, thermal throttling, and invalid system clocks.
+
+        Args:
+            dut: The transport interface connected to the target.
+
+        Returns:
+            ValidatorResult: Contains pass/fail status and captures dmesg panic traces or 
+                invalid RTC times in the context.
         """
         logger.info("[Pre-Flight] Performing kernel sanity and health sweep...")
         context_data: Dict[str, Any] = {}

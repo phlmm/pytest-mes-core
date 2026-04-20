@@ -34,6 +34,20 @@ class MicrochipIpeProvisioner(BaseProvisioner):
 
     # 🚨 Syncing signature to the new base class contract
     def provision(self, image_path: Path) -> bool:
+        """Flashes the target using Microchip's IPECMD tool over a securely locked Host Adapter.
+
+        Args:
+            image_path: The path to the hex firmware image.
+
+        Returns:
+            bool: True if provisioning is successful.
+
+        Raises:
+            ProvisioningError: If the executable or firmware is missing, target VDD is missing,
+                JVM crashes, target silicon is not detected, or confirmation is missing.
+            ImageVerificationError: If readback verification fails.
+            SiliconLockError: If the PIC Configuration Bits are locked.
+        """
         if not self.ipecmd_path.exists():
             err_msg = f"IPECMD executable not found at {self.ipecmd_path}."
             logger.critical(f"[ICSP] FATAL: {err_msg}")

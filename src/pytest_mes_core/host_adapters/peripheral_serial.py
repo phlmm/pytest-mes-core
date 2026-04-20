@@ -38,6 +38,16 @@ class HostPeripheralSerialAdapter(BaseHostAdapter):
         self.disconnect()
 
     def connect(self) -> None:
+        """Acquires an exclusive OS lock on the target COM port.
+
+        Clears the hardware UART FIFOs after connection to prevent stale bytes
+        from interfering with tests.
+
+        Raises:
+            HostResourceBusyError: If another process (e.g., minicom) owns the port.
+            HostHardwareDisconnectError: If the port does not physically exist.
+            HostAdapterError: If pyserial is missing or another hardware failure occurs.
+        """
         if not HAS_SERIAL:
             raise HostAdapterError("pyserial library is not installed on the Host PC environment.")
         if self.ser: return
@@ -63,6 +73,7 @@ class HostPeripheralSerialAdapter(BaseHostAdapter):
                 raise HostAdapterError(f"Hardware failure on {self.cfg.port}: {e}")
 
     def disconnect(self) -> None:
+        """Safely closes the serial port and releases the OS lock."""
         if self.ser:
             try:
                 self.ser.close()
@@ -72,15 +83,33 @@ class HostPeripheralSerialAdapter(BaseHostAdapter):
                 self.ser = None
 
     def clear_rx_buffer(self) -> None:
+        """Flushes the input buffer of the serial port."""
         if self.ser: self.ser.reset_input_buffer()
 
     def send(self, payload: bytes) -> None:
+        """Transmits a binary payload over the serial interface and blocks until flushed.
+
+        Args:
+            payload: The raw bytes to send.
+
+        Raises:
+            HostAdapterError: If the port is not connected.
+        """
         if not self.ser:
             raise HostAdapterError("Host RS485 not connected.")
         self.ser.write(payload)
         self.ser.flush()
 
     def expect(self, payload: bytes, timeout_s: float = 2.0) -> bool:
+        """Blocks until the exact byte sequence is received or the timeout expires.
+
+        Args:
+            payload: The exact byte sequence to search for in the incoming stream.
+            timeout_s: Maximum time to wait in seconds.
+
+        Returns:
+            bool: True if the payload was found, False otherwise.
+        """
         if not self.ser: return False
         t_end = time.perf_counter() + timeout_s
         buf = bytearray()

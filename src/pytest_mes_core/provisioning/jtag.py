@@ -22,7 +22,18 @@ class OpenOcdRpcProvisioner(BaseProvisioner):
         self.rpc_port = rpc_port
         self.timeout_s = timeout_s
 
-    def provision(self, image_path: Path) -> None:
+    def provision(self, image_path: Path) -> bool:
+        """Flashes the firmware via JTAG RPC using OpenOCD.
+
+        Args:
+            image_path: The absolute path to the firmware image to flash.
+
+        Raises:
+            ProvisioningError: If the firmware does not exist, connection is refused,
+                or the OpenOCD daemon reports an error.
+            SiliconLockError: If the target silicon is read/write protected.
+            ImageVerificationError: If flash succeeds but verification fails.
+        """
         if not image_path.exists():
             err_msg = f"Firmware image not found: {image_path}"
             logger.critical(f"[JTAG] FATAL: {err_msg}")
@@ -97,13 +108,25 @@ class OpenOcdRpcProvisioner(BaseProvisioner):
             duration = round(time.perf_counter() - t0, 3)
             logger.info(f"[JTAG] Firmware successfully flashed and verified in {duration}s.")
 
+
         except ConnectionRefusedError:
             err_msg = f"Connection refused on port {self.rpc_port}. Is the OpenOCD daemon running?"
             logger.critical(f"[JTAG] FATAL: {err_msg}")
             raise ProvisioningError(err_msg)
 
+        return True
+
     def _evaluate_rpc_response(self, stdout: str) -> None:
-        """Parses the daemon's text stream to map cryptic C-errors to Domain Exceptions."""
+        """Parses the daemon's text stream to map cryptic C-errors to Domain Exceptions.
+
+        Args:
+            stdout: The complete textual output from the OpenOCD daemon.
+
+        Raises:
+            SiliconLockError: If the target silicon is read/write protected.
+            ImageVerificationError: If flash succeeds but verification fails.
+            ProvisioningError: If OpenOCD reports an error or lacks positive confirmation.
+        """
         stdout_lower = stdout.lower()
 
         # 1. Check for Hardware Locks

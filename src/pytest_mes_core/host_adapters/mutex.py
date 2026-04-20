@@ -37,10 +37,20 @@ class HostMutexTimeoutError(HostAdapterError):
 
 @contextmanager
 def hardware_mutex(resource_name: str, timeout_s: float = 60.0) -> Iterator[None]:
-    """
-    Prevents parallel pytest-xdist workers from colliding on physical USB hardware.
+    """Prevents parallel pytest-xdist workers from colliding on physical USB hardware.
+
     Defensively logs waiting states, prevents deadlocks, and relies on the OS kernel
     for bulletproof lock release even on SIGKILL.
+
+    Args:
+        resource_name: The unique string identifier for the hardware resource.
+        timeout_s: Maximum time to wait for the lock before aborting.
+
+    Yields:
+        None
+
+    Raises:
+        HostMutexTimeoutError: If the lock cannot be acquired within the timeout.
     """
     if not HAS_FCNTL:
         logger.warning(f"[Mutex] fcntl not available on this OS. Hardware lock '{resource_name}' bypassed. Do not run parallel tests!")

@@ -67,7 +67,14 @@ class UuuTeziProvisioner(BaseProvisioner):
         self.usb_path = usb_path
 
     def _is_device_in_recovery(self) -> bool:
-        """Polls the Linux USB tree to verify the SoC BootROM is visible."""
+        """Polls the Linux USB tree to verify the SoC BootROM is visible.
+
+        Returns:
+            bool: True if the device is found in recovery mode.
+
+        Raises:
+            ProvisioningError: If the required 'lsusb' or 'uuu' tools are missing.
+        """
         try:
             if self.usb_path:
                 # STRICT USB TOPOLOGY BINDING:
@@ -104,12 +111,25 @@ class UuuTeziProvisioner(BaseProvisioner):
         serial_client: Optional[EphemeralSerialClient] = None,
         success_prompt: str = "login:"
     ) -> bool:
-        """
+        """Pushes TEZI images into SoC RAM via USB Serial Downloader mode.
+
         Hardware Flow:
             1. Blocks until the DUT physical USB enumerates in NXP Recovery Mode.
-            2. Executes `uuu` targeting the specific USB port and TEZI folder.
+            2. Executes 'uuu' targeting the specific USB port and TEZI folder.
             3. Uses LiveProcess to handle telemetry and artifact dumping.
             4. Optionally locks the UART and tails the OS boot until success_prompt is found.
+
+        Args:
+            image_path: The directory containing the TEZI payload and uuu.auto script.
+            serial_client: Optional UART client to tail the live log for a success signature.
+            success_prompt: The prompt to wait for before considering the boot successful.
+
+        Returns:
+            bool: True if the provisioning completes successfully.
+
+        Raises:
+            ProvisioningError: If the payload is invalid, the device doesn't enter recovery,
+                the uuu command fails, or the flash times out.
         """
         tezi_dir = image_path
 

@@ -20,6 +20,15 @@ class MmioValidator:
 
     @staticmethod
     def read_register(dut: DutTransport, cfg: MmioConfig) -> ValidatorResult:
+        """Reads a raw physical silicon address bypassing the Linux kernel.
+
+        Args:
+            dut: The transport interface connected to the target.
+            cfg: The MMIO configuration specifying address, width, mask, and expected value.
+
+        Returns:
+            ValidatorResult: Pass/fail outcome based on matching the expected masked value.
+        """
         logger.info(f"[MMIO] Reading {cfg.data_width}-bit hardware register at {cfg.address_hex}...")
 
         context_data: Dict[str, Any] = {"address": cfg.address_hex, "mask": cfg.bit_mask_hex}
@@ -102,9 +111,17 @@ class MmioValidator:
 
     @staticmethod
     def write_register(dut: DutTransport, cfg: MmioConfig, write_val_hex: str) -> ValidatorResult:
-        """
-        DANGEROUS: Writes raw bits directly to physical silicon.
-        Can cause immediate hard-faults if written to read-only/protected memory.
+        """Writes raw bits directly to physical silicon bypassing the Linux kernel.
+
+        DANGEROUS: Can cause immediate hard-faults if written to read-only/protected memory.
+
+        Args:
+            dut: The transport interface connected to the target.
+            cfg: The MMIO configuration specifying address and width.
+            write_val_hex: The hex string value to write.
+
+        Returns:
+            ValidatorResult: Pass/fail outcome of the raw write operation.
         """
         context_data: Dict[str, Any] = {"address": cfg.address_hex, "write_val": write_val_hex}
 

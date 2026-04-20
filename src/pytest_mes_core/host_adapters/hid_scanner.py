@@ -113,9 +113,18 @@ class HeadlessBarcodeScanner(BaseHostAdapter):
                 self.device = None
 
     def wait_for_scan(self) -> str:
-        """
-        Blocks until a full barcode + Carriage Return is scanned,
-        or until the configured timeout expires.
+        """Blocks until a full barcode + Carriage Return is scanned.
+
+        Uses POSIX select to implement a non-blocking wait with a strict timeout,
+        capturing physical keystrokes directly from the evdev input buffer.
+
+        Returns:
+            str: The fully parsed barcode string.
+
+        Raises:
+            HostAdapterError: If the scanner is not initialized.
+            HidScannerTimeoutError: If the operator fails to scan within the timeout.
+            HostHardwareDisconnectError: If the scanner is unplugged mid-scan.
         """
         if not self.device:
             raise HostAdapterError("Scanner not initialized. Must be used within a 'with' context manager.")

@@ -11,9 +11,28 @@ from pytest_mes_core.config import EfuseConfig
 logger = logging.getLogger("mes_core.protocols.efuse")
 
 class NvmemEfuseValidator:
+    """Interacts with the SoC's hardware eFuse blocks via the Linux NVMEM subsystem.
+
+    Provides high-assurance read and permanent burn capabilities, complete with
+    pre-burn state validation, strict alignment checks, and post-burn readback verification.
+    """
 
     @classmethod
     def read_efuse(cls, dut: DutTransport, cfg: EfuseConfig, offset_hex: str, num_bytes: int) -> str:
+        """Reads a specific number of bytes from the eFuse block.
+
+        Args:
+            dut: The transport interface connected to the Device Under Test.
+            cfg: The eFuse configuration parameters including the NVMEM path.
+            offset_hex: The hexadecimal offset within the NVMEM device to read from.
+            num_bytes: The number of bytes to read.
+
+        Returns:
+            str: A hex string representation of the bytes read from the eFuse.
+
+        Raises:
+            IOError: If the NVMEM read command fails or returns an unexpected number of bytes.
+        """
         logger.debug(f"[eFuse] Reading {num_bytes} bytes from NVMem offset {offset_hex}...")
         cmd = f"hexdump -v -e '/1 \"%02X\"' -s {offset_hex} -n {num_bytes} {cfg.nvmem_path}"
         res = dut.safe_run(cmd, timeout_s=5.0)
@@ -40,6 +59,23 @@ class NvmemEfuseValidator:
         offset_hex: str,
         hex_payload: str
     ) -> ValidatorResult:
+        """Permanently burns a hex payload into the SoC's eFuse memory.
+
+        Executes a sequence of safety checks: validates 32-bit alignment if required,
+        verifies the target region is blank (all 00s), executes the burn via base64
+        injection to `dd`, and finally performs a readback to guarantee the silicon
+        accepted the charge.
+
+        Args:
+            dut: The transport interface connected to the Device Under Test.
+            cfg: The eFuse configuration parameters.
+            offset_hex: The hexadecimal offset to burn the payload to.
+            hex_payload: The data to burn, formatted as a hex string.
+
+        Returns:
+            ValidatorResult: An object containing the validation outcome (passed/failed), 
+                captured metrics like burn duration, and contextual error/trace information.
+        """
 
         hex_payload = hex_payload.replace(" ", "").replace("0x", "").upper()
         payload_bytes = bytes.fromhex(hex_payload)

@@ -84,7 +84,12 @@ class TestRecord(BaseModel):
         return self
 
     def absorb(self, validator_res: ValidatorResult, prefix: str = "") -> None:
-        """Surgically flattens a ValidatorResult into the JSONL record."""
+        """Surgically flattens a ValidatorResult into the JSONL record.
+
+        Args:
+            validator_res: The validation result to absorb.
+            prefix: An optional prefix to prepend to metrics and context keys.
+        """
         self.result = validator_res
         pfx = f"{prefix}_" if prefix else ""
         self.metrics.update({f"{pfx}{k}": v for k, v in validator_res.metrics.items()})

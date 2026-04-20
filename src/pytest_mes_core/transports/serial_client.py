@@ -35,6 +35,11 @@ class EphemeralSerialClient:
         self.watchdog = UartKernelWatchdog(self)
 
     def connect(self) -> None:
+        """Binds to the host UART port with exclusive OS locking and flushes stale buffers.
+
+        Raises:
+            TransportConnectionError: If the port fails to bind or is locked by another process.
+        """
         try:
             self.ser = serial.Serial(
                 port=self.cfg.port,
@@ -49,6 +54,7 @@ class EphemeralSerialClient:
             raise TransportConnectionError(f"Failed to bind Host UART {self.cfg.port}: {e}")
 
     def disconnect(self) -> None:
+        """Safely tears down the UART interface, stops the watchdog, and releases the OS lock."""
         self.watchdog.stop()
         if self.ser and self.ser.is_open:
             self.ser.close()
@@ -154,6 +160,25 @@ class EphemeralSerialClient:
         auto_retry: bool = False,
         **kwargs: Any
     ) -> CommandResult:
+        """Executes a command synchronously over the serial UART interface.
+
+        Uses robust framed payload injection to isolate command output from kernel spam
+        and shell echoes.
+
+        Args:
+            cmd: The shell command to execute.
+            timeout_s: Maximum seconds to wait before timing out.
+            check_exit_code: If True, raises RuntimeError on non-zero exit code.
+            auto_retry: If True, indicates the command is idempotent (handled by Failover router).
+            **kwargs: Additional options like 'expected_prompt'.
+
+        Returns:
+            CommandResult: The parsed, immutable command outcome.
+
+        Raises:
+            TransportConnectionError: If the port is disconnected.
+            RuntimeError: If check_exit_code is True and the command fails or times out.
+        """
         expected_prompt = kwargs.get("expected_prompt", getattr(self.cfg, "os_shell_prompt", "~#"))
 
         if not self.is_connected or self.ser is None:

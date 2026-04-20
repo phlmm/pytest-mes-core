@@ -45,6 +45,17 @@ class HostSerialAdapter(BaseHostAdapter):
         return self.cfg.baudrate
 
     def __enter__(self) -> 'HostSerialAdapter':
+        """Connects to the serial port with exclusive OS locking.
+
+        Returns:
+            HostSerialAdapter: The initialized and connected serial adapter.
+
+        Raises:
+            HostAdapterError: If pyserial is missing.
+            HostResourceBusyError: If the port is locked by another process.
+            HostHardwareDisconnectError: If the port doesn't exist.
+            HostSerialError: For other hardware-level failures.
+        """
         if not HAS_SERIAL:
             err_msg = "pyserial library is not installed on the Host PC environment."
             logger.critical("="*60)

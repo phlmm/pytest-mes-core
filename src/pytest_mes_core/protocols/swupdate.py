@@ -13,7 +13,11 @@ class SWUpdateValidator:
         self.fsm = fsm
 
     def pre_flight_checks(self) -> str:
-        """Verifies the board is healthy and capable of accepting an update."""
+        """Verifies the board is healthy and capable of accepting an update.
+
+        Returns:
+            str: The name of the current active partition before the update.
+        """
         logger.info("[SWUpdate] Running pre-flight checks...")
 
         # 1. Verify SWUpdate binary exists
@@ -28,9 +32,13 @@ class SWUpdateValidator:
         return original_rootfs
 
     def install_from_url(self, swu_url: str, timeout_s: float = 300.0) -> None:
-        """
-        Streams the update directly into flash via HTTP.
+        """Streams the update directly into flash via HTTP.
+
         Bypasses RAM/tmpfs limits and avoids slow serial transfers.
+
+        Args:
+            swu_url: The HTTP URL pointing to the SWU payload.
+            timeout_s: Maximum time to wait for the download and flash process.
         """
         logger.info(f"[SWUpdate] Initiating direct HTTP stream from: {swu_url}")
 
@@ -47,9 +55,11 @@ class SWUpdateValidator:
             logger.warning("[SWUpdate] Command exited 0, but 'Installation successful' not found in stdout. Proceeding with caution.")
 
     def install_from_local_media(self, file_path: str, timeout_s: float = 300.0) -> None:
-        """
-        Installs an update from a locally mounted USB drive or SD Card.
-        e.g., file_path = "/run/media/sda1/evse-image.swu"
+        """Installs an update from a locally mounted USB drive or SD Card.
+
+        Args:
+            file_path: The absolute path to the SWU file on the target.
+            timeout_s: Maximum time to wait for the flash process.
         """
         logger.info(f"[SWUpdate] Initiating local install from: {file_path}")
 
@@ -62,8 +72,13 @@ class SWUpdateValidator:
         logger.info("[SWUpdate] Local payload written successfully.")
 
     def verify_partition_flip(self, original_rootfs: str) -> None:
-        """
-        Reboots the board and verifies U-Boot successfully transitioned to the new partition.
+        """Reboots the board and verifies U-Boot successfully transitioned to the new partition.
+
+        Args:
+            original_rootfs: The partition that was active prior to the update.
+
+        Raises:
+            RuntimeError: If the board reboots back into the original partition.
         """
         logger.info("[SWUpdate] Rebooting board to verify A/B partition flip...")
 
@@ -88,7 +103,12 @@ class SWUpdateValidator:
             self.dut.safe_run("fw_setenv bootcount 0", timeout_s=3.0, check_exit_code=False)
 
     def execute_full_ota(self, swu_url: str, timeout_s: float = 300.0) -> None:
-        """Helper to run the entire sequence in one shot."""
+        """Executes the complete over-the-air update sequence.
+
+        Args:
+            swu_url: The HTTP URL pointing to the SWU payload.
+            timeout_s: Maximum time to wait for the download and flash process.
+        """
         logger.info("="*60)
         logger.info("[SWUpdate] COMMENCING OVER-THE-AIR UPDATE")
         logger.info("="*60)

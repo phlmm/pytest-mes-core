@@ -24,6 +24,11 @@ class DeveloperMarkdownExporter:
         return self._context
 
     def start_session(self, context: StationContext) -> None:
+        """Initializes the session and dynamically generates the file path.
+
+        Args:
+            context: The station metadata context for this session.
+        """
         self._context = context
 
         date_str = datetime.now().strftime("%Y-%m-%d")
@@ -31,7 +36,7 @@ class DeveloperMarkdownExporter:
         report_dir = self.base_log_dir / "bringup_reports" / date_str
         report_dir.mkdir(parents=True, exist_ok=True)
 
-        self.filepath = report_dir / f"Bringup_{time_str}_SN-{context.dut_serial}.md"
+        self.filepath = report_dir / f"Bringup_{time_str}_SN-{context.dut_serial}_{context.run_id}.md"
 
         header = (
             f"# MES Bring-up Report\n"
@@ -45,6 +50,11 @@ class DeveloperMarkdownExporter:
             f.write(header)
 
     def emit_record(self, record: TestRecord) -> None:
+        """Serializes and flushes a single payload to the active markdown file.
+
+        Args:
+            record: The test record to emit.
+        """
         if not self.filepath: return
         self.total_duration += record.duration_s
 
@@ -87,6 +97,11 @@ class DeveloperMarkdownExporter:
             f.write(md)
 
     def end_session(self, session_passed: bool) -> None:
+        """Finalizes the session and renames the file with the final status.
+
+        Args:
+            session_passed: True if all tests passed, False otherwise.
+        """
         if not self.filepath: return
 
         footer = (
@@ -112,10 +127,11 @@ class DeveloperMarkdownExporter:
         try:
             status = "PASS" if session_passed else "FAIL"
             time_str = datetime.now().strftime("%H-%M-%S")
+            run_id = self._context.run_id if self._context else "UNKNOWN_RUN"
             safe_operator = self._context.operator_id.replace("/", "_") if self._context else "UNKNOWN"
             serial = self._context.dut_serial if self._context else "PENDING"
             
-            final_name = f"{status}_{time_str}_{safe_operator}_SN-{serial}.md"
+            final_name = f"{status}_{time_str}_{safe_operator}_SN-{serial}_{run_id}.md"
             final_path = self.filepath.parent / final_name
             self.filepath.rename(final_path)
             self.filepath = final_path

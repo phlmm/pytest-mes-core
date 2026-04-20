@@ -9,10 +9,11 @@ crashes by executing automated forensic post-mortem dumps.
 import pytest
 import time
 import logging
-from typing import Generator, Any
+from typing import Generator, Any, Optional
 
 from pytest_mes_core.config import StationEnvironment
 from pytest_mes_core.telemetry import TestRecord, TelemetryExporter
+from pytest_mes_core.state_machine import EmbeddedLinuxStateMachine
 
 logger = logging.getLogger("mes_core.telemetry")
 
@@ -21,16 +22,29 @@ logger = logging.getLogger("mes_core.telemetry")
 # ==========================================
 
 def pytest_html_report_title(report: Any) -> None:
-    """Renames the pytest-html report title."""
+    """Renames the pytest-html report title.
+
+    Args:
+        report: The Pytest HTML report object.
+    """
     report.title = "Manufacturing EOL Certificate"
 
 def pytest_html_results_table_header(cells: list[Any]) -> None:
-    """Injects a custom column into the HTML report for physical metrics."""
+    """Injects a custom column into the HTML report for physical metrics.
+
+    Args:
+        cells: The list of table header cells.
+    """
     cells.insert(2, "<th>Physical Metrics</th>")
     if cells: cells.pop()
 
 def pytest_html_results_table_row(report: Any, cells: list[Any]) -> None:
-    """Populates the custom HTML metrics column per test."""
+    """Populates the custom HTML metrics column per test.
+
+    Args:
+        report: The Pytest HTML report object.
+        cells: The list of table row cells.
+    """
     metrics_html = getattr(report, "custom_metrics_html", "<i>No data</i>")
     cells.insert(2, f"<td>{metrics_html}</td>")
     if cells: cells.pop()
@@ -40,17 +54,24 @@ def pytest_html_results_table_row(report: Any, cells: list[Any]) -> None:
 # ==========================================
 
 @pytest.hookimpl(tryfirst=True, hookwrapper=True)
-def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]) -> Generator[None, None, None]:
+def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]) -> Generator[None, Any, None]:
     """
     Intercepts the test execution phases (setup, call, teardown) to attach
     results and HTML metrics directly to the Pytest report object.
+
+    Args:
+        item: The Pytest item object.
+        call: The Pytest call info object.
+
+    Yields:
+        None
     """
-    outcome = yield
-    rep = outcome.get_result()
+    outcome: Any = yield
+    rep = outcome.get_result()  # type: ignore
     setattr(item, "rep_" + rep.when, rep)
 
     if rep.when == "call":
-        record: TestRecord = getattr(item, "mes_telemetry_record", None)
+        record: Optional[TestRecord] = getattr(item, "mes_telemetry_record", None)
         if record:
             html_parts = []
 
@@ -79,9 +100,9 @@ def mes_record(
     request: pytest.FixtureRequest,
     mes_env: StationEnvironment,
     telemetry_sink: TelemetryExporter,  # Injected cleanly from core_config!
-    dut_transport,                      # Injected from hardware plugin
-    dut_state_machine,                  # Injected from orchestrator plugin
-    enforce_physical_state              # Force execution order: Boot BEFORE timer starts
+    dut_transport: Any,                 # Injected from hardware plugin
+    dut_state_machine: Optional[EmbeddedLinuxStateMachine], # Injected from orchestrator plugin
+    enforce_physical_state: Any         # Force execution order: Boot BEFORE timer starts
 ) -> Generator[TestRecord, None, None]:
     """
     The Zero-Leakage Telemetry Wrapper.

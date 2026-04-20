@@ -98,6 +98,13 @@ class UartEventStream:
         ansi_pattern: Pattern[bytes],
         panic_pattern: Pattern[bytes],
     ):
+        """Initializes the event stream wrapper over the UART.
+
+        Args:
+            serial: The active Serial transport client.
+            ansi_pattern: Regex pattern to strip ANSI terminal codes.
+            panic_pattern: Regex pattern to detect fatal kernel crashes.
+        """
         self.serial = serial
         self.ansi_pattern = ansi_pattern
         self.panic_pattern = panic_pattern
@@ -285,6 +292,16 @@ class BaseDutStateMachine(ABC):
         boot_profiler_cfg: Optional[BootProfilerConfig] = None,
         gpio: Optional[Any] = None
     ):
+        """Initializes the core Hardware State Machine context.
+
+        Args:
+            psu: Programmable power supply for cold-booting, if available.
+            serial: UART transport used for early bootloader monitoring.
+            ssh: High-speed Ethernet transport for OS-level interactions.
+            cfg: Top-level TOML configuration parameters.
+            boot_profiler_cfg: Analytics configuration for tracking boot phase duration.
+            gpio: Optional hardware fixture controller for physical interaction.
+        """
         self.psu = psu
         self.serial = serial
         self.ssh = ssh
@@ -375,13 +392,15 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
     """
 
     def _probe_uart_for_state(self) -> DutState:
-        """
-        Universal UART prober with strict ANSI stripping.
-        Single source of truth for physical state detection.
+        """Universal UART prober with strict ANSI stripping.
 
-        Uses a two-pass strategy: a fast 0.4s pass for boards already streaming
-        output, then a 2.0s retry pass for boards sitting idle at a login prompt
-        (where agetty may take 1-3s to respond to an empty newline input).
+        Single source of truth for physical state detection. Uses a two-pass 
+        strategy: a fast 0.4s pass for boards already streaming output, then a 
+        2.0s retry pass for boards sitting idle at a login prompt (where agetty 
+        may take 1-3s to respond to an empty newline input).
+
+        Returns:
+            DutState: The dynamically detected physical state of the target device.
         """
         if not self.serial.is_connected:
             self.serial.connect()
@@ -439,10 +458,10 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
         Consolidates desk-mode soft reboots.
         """
         logger.info("[State Machine] Desk Mode: Attempting soft-login to reboot instead of manual power cycle...")
-        self.serial.write_line(self.cfg.os_user)
+        self.serial.write_line(self.cfg.os_user or "root")
         time.sleep(0.5)
         if self.cfg.os_password:
-            self.serial.write_line(self.cfg.get_os_password(), sensitive=True)
+            self.serial.write_line(self.cfg.get_os_password() or "", sensitive=True)
             time.sleep(0.5)
         self.serial.write_line("reboot")
 
@@ -493,6 +512,11 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
     # =========================================================================
 
     def _do_apply_bootstrap(self, medium: str) -> None:
+        """Applies physical hardware bootstrap constraints (e.g., pulling GPIO pins).
+
+        Args:
+            medium: The boot medium requested ("default", "emmc", "sd", etc).
+        """
         if medium == "default" or not medium: medium = "default"
         straps = getattr(self.cfg, "boot_straps_gpio_map", {}).get(medium)
 
@@ -513,6 +537,10 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
             except EOFError: time.sleep(2.0)
 
     def _do_hardware_reset(self) -> None:
+        """Toggles the physical RESET pin on the board via GPIO.
+
+        If no reset pin is defined, falls back to a hard power cycle.
+        """
         reset_pin = getattr(self.cfg, "gpio_reset_pin", None)
         if self.gpio and reset_pin:
             logger.warning(f"[State Machine] JTAG/GPIO: Firing physical hardware RESET pin ({reset_pin})...")
@@ -526,6 +554,11 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
             self._do_energize()
 
     def _do_power_off(self) -> None:
+        """Executes a hard power drop using the PSU.
+
+        If no PSU is connected, pauses FSM execution and prompts the user
+        to manually unplug the power cable.
+        """
         logger.debug("[State Machine] Executing hard power drop...")
         if self.ssh.is_connected: self.ssh.disconnect()
 
@@ -543,6 +576,11 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
             except EOFError: time.sleep(2.0)
 
     def _do_energize(self) -> None:
+        """Applies physical voltage to the board and captures inrush current.
+
+        If no PSU is connected, pauses FSM execution and prompts the user
+        to manually plug in the power cable.
+        """
         logger.info(f"[State Machine] Applying RAW POWER to the board (Medium: {self.context.active_boot_medium.upper()})...")
 
         if self.psu:
@@ -594,11 +632,13 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
     # =========================================================================
 
     def _event_wait_for_bootloader(self, intercept_autoboot: bool) -> None:
-        """
-        Event-driven bootloader interception.
+        """Event-driven bootloader interception.
 
         Consumes events from the UartEventStream until a bootloader prompt
         is detected, then synchronizes with an echo command.
+
+        Args:
+            intercept_autoboot: If True, fires interrupt characters to stop autoboot.
         """
         logger.info("[State Machine] Hunting for Bootloader prompt...")
         if self.serial.is_connected:
@@ -667,11 +707,13 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
         self._event_wait_for_os_shell(flush=False)
 
     def _event_wait_for_os_shell(self, flush: bool = True) -> None:
-        """
-        Event-driven OS boot monitor.
+        """Event-driven OS boot monitor.
 
         Waits for the Linux shell prompt, handling login/password prompts
         and recording boot profiler milestones along the way.
+
+        Args:
+            flush: Whether to flush the UART buffer before reading.
         """
         logger.info("[State Machine] Waiting for Linux Userland & Profiling Boot...")
         self.boot_metrics.clear()
@@ -710,12 +752,12 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
                 elif event.prompt_type == "login":
                     self.boot_metrics["t_boot_total_to_login_s"] = event.elapsed_s
                     time.sleep(0.1)
-                    self.serial.write_line(self.cfg.os_user)
+                    self.serial.write_line(self.cfg.os_user or "root")
                     self.serial.parser.clear_buffer()
 
                 elif event.prompt_type == "password":
                     time.sleep(0.1)
-                    self.serial.write_line(self.cfg.get_os_password(), sensitive=True)
+                    self.serial.write_line(self.cfg.get_os_password() or "", sensitive=True)
                     self.serial.parser.clear_buffer()
 
             elif isinstance(event, BootDataReceived):
@@ -735,9 +777,11 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
 
 
     def _finalize_os_boot(self) -> None:
-        """
-        Executes final OS verification and bridges the SSH transport.
+        """Executes final OS verification and bridges the SSH transport.
+
         Relies on the Yocto image to have pre-baked SSH keys or default passwords.
+        Harvests systemd boot times and establishes the primary SSH connection
+        once the OS is fully validated.
         """
         if self.ssh.is_connected:
             return
@@ -761,7 +805,11 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
         self.ssh.connect()
 
     def verify_heartbeat(self) -> bool:
-        """Ping the OS state via UART heartbeat to verify it's still alive."""
+        """Ping the OS state via UART heartbeat to verify it's still alive.
+
+        Returns:
+            bool: True if the device successfully echoes the heartbeat payload, False otherwise.
+        """
         if not self.serial.is_connected:
             return False
         logger.debug("[State Machine] Verifying UART heartbeat...")
@@ -773,8 +821,11 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
     # =========================================================================
 
     def _verify_linux_context(self) -> None:
-        """
-        Executes dynamically injected Validators, or defaults to SWUpdate checking.
+        """Executes dynamically injected Validators, or defaults to SWUpdate checking.
+
+        Parses the current A/B partition configuration from swupdate and populates
+        the DeviceContext. If custom validators are registered, it executes them
+        sequentially instead.
         """
         if self.context_validators:
             logger.info(f"[State Machine] Executing {len(self.context_validators)} dynamically injected Context Validators...")
@@ -962,7 +1013,7 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
         # 2. Write the username directly. The board is already sitting at the
         #    "login:" prompt, so this is the correct next input — not a bare \n.
         logger.debug(f"[State Machine] Hot-Login: sending user '{self.cfg.os_user}'")
-        self.serial.write_line(self.cfg.os_user)
+        self.serial.write_line(self.cfg.os_user or "root")
 
         try:
             # 3. _event_wait_for_os_shell handles password challenge (if any)

@@ -21,10 +21,23 @@ class CompositeTelemetryExporter:
         return self.exporters[0].context if self.exporters else None
 
     def start_session(self, context: StationContext) -> None:
+        """Initializes the session on all registered exporters.
+
+        Args:
+            context: The station metadata context for this session.
+        """
         for exporter in self.exporters:
             exporter.start_session(context)
 
     def emit_record(self, record: TestRecord) -> None:
+        """Forwards the record to all registered exporters.
+
+        Args:
+            record: The test record to emit.
+
+        Raises:
+            TelemetryDeliveryError: If ANY exporter fails to deliver the payload.
+        """
         errors = []
         for exporter in self.exporters:
             try:
@@ -38,6 +51,14 @@ class CompositeTelemetryExporter:
             raise TelemetryDeliveryError(f"Composite router failed to deliver payload: {errors}")
 
     def end_session(self, session_passed: bool) -> None:
+        """Finalizes the session on all registered exporters.
+
+        Args:
+            session_passed: True if all tests passed, False otherwise.
+
+        Raises:
+            TelemetryDeliveryError: If ANY exporter fails during teardown.
+        """
         errors = []
         for exporter in self.exporters:
             try:

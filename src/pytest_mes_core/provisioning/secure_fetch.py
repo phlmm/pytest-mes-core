@@ -23,7 +23,14 @@ class SecureAssetFetcher:
 
     @staticmethod
     def _calculate_local_hash(filepath: Path) -> str:
-        """Helper to safely hash local files without blowing up RAM."""
+        """Helper to safely hash local files without blowing up RAM.
+
+        Args:
+            filepath: Path to the local file to hash.
+
+        Returns:
+            str: The computed SHA256 hexadecimal string.
+        """
         logger.debug(f"[Fetch] Calculating SHA256 for local file {filepath.name}...")
         hasher = hashlib.sha256()
         with open(filepath, "rb") as f:
@@ -43,6 +50,23 @@ class SecureAssetFetcher:
         before_sleep=before_sleep_log(logger, logging.WARNING)
     )
     def fetch_and_verify(url: str, expected_sha256: str, dest: Path, timeout_s: float = 30.0) -> Path:
+        """Fetches an asset from a remote URL with strict cryptographic verification.
+
+        Features RAM-safe chunking, atomic file locks, and idempotent caching.
+
+        Args:
+            url: The remote URL to download from.
+            expected_sha256: The expected SHA256 checksum of the asset.
+            dest: The final destination path for the verified asset.
+            timeout_s: The maximum seconds to wait for the download stream.
+
+        Returns:
+            Path: The path to the successfully downloaded and verified asset.
+
+        Raises:
+            SecureFetchError: If the network request fails or returns an HTTP error.
+            ImageVerificationError: If the downloaded file's checksum doesn't match.
+        """
         expected_sha256 = expected_sha256.lower()
 
         # ==========================================
@@ -130,9 +154,21 @@ class SecureAssetFetcher:
 
     @classmethod
     def resolve_payload(cls, uri: str, expected_sha256: Optional[str] = None) -> Path:
-        """
-        The Master Entrypoint: Handles both Local Paths and Remote URLs.
+        """The Master Entrypoint: Handles both Local Paths and Remote URLs.
+
         Routes to the appropriate verification or download logic.
+
+        Args:
+            uri: A local file path or remote HTTP(S) URL.
+            expected_sha256: The expected SHA256 checksum of the asset.
+
+        Returns:
+            Path: The path to the resolved, verified local file.
+
+        Raises:
+            FileNotFoundError: If a local payload URI does not exist.
+            ImageVerificationError: If a local payload checksum verification fails.
+            ValueError: If a remote URL lacks an expected SHA256 checksum.
         """
         # Scenario A: Local Developer Desk File
         if not uri.startswith(("http://", "https://")):

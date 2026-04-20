@@ -48,6 +48,7 @@ class UartKernelWatchdog:
         self._panic_callbacks = []
 
     def start(self) -> None:
+        """Spawns the background watchdog thread to monitor the serial stream."""
         if self._thread and self._thread.is_alive():
             return
         self._stop_event.clear()
@@ -58,6 +59,7 @@ class UartKernelWatchdog:
         logger.debug("[Watchdog] Kernel panic background watchdog started.")
 
     def stop(self) -> None:
+        """Safely stops the watchdog thread and waits for it to exit."""
         self._stop_event.set()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=1.0)

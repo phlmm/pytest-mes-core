@@ -26,7 +26,15 @@ class JtagCrashDumper:
         self.gdb_toolchain = gdb_toolchain
 
     def _send_rpc(self, cmd: str, timeout_s: float = 5.0) -> str:
-        """Robust, EMI-resistant OpenOCD RPC client."""
+        """Robust, EMI-resistant OpenOCD RPC client.
+
+        Args:
+            cmd: The OpenOCD command to send.
+            timeout_s: The timeout for the socket operation.
+
+        Returns:
+            str: The output of the command.
+        """
         logger.debug(f"[Post-Mortem] RPC TX -> {cmd}")
 
         with socket.create_connection(('127.0.0.1', self.rpc_port), timeout=timeout_s) as s:
@@ -60,7 +68,16 @@ class JtagCrashDumper:
         dcc_addr: Optional[str] = None,
         stack_addr: Optional[str] = None
     ) -> Dict[str, str]:
-        """Extracts raw silicon state based strictly on configured addresses."""
+        """Extracts raw silicon state based strictly on configured addresses.
+
+        Args:
+            dcc_addr: Optional memory address of the DCC console.
+            stack_addr: Optional memory address of the call stack.
+
+        Returns:
+            Dict[str, str]: The collected crash data containing registers,
+                DCC console, stack memory, and any errors.
+        """
         logger.critical("="*60)
         logger.critical(f"[Post-Mortem] FATAL: TEST FAILURE DETECTED. INITIATING HARDWARE CRASH DUMP!")
         logger.critical(f"[Post-Mortem] Freezing crime scene via OpenOCD RPC (Port {self.rpc_port})...")
@@ -92,9 +109,15 @@ class JtagCrashDumper:
         return crash_data
 
     def execute_gdb_backtrace(self, elf_path: Path) -> str:
-        """
-        Uses headless GDB to generate a human-readable C-code backtrace.
+        """Uses headless GDB to generate a human-readable C-code backtrace.
+
         Uses thread-safe temporary files to prevent parallel worker collisions.
+
+        Args:
+            elf_path: Path to the ELF file.
+
+        Returns:
+            str: The backtrace output.
         """
         if not elf_path.exists():
             logger.warning(f"[Post-Mortem] No ELF file found at {elf_path}. Skipping GDB backtrace.")

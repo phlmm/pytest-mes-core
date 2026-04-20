@@ -25,14 +25,24 @@ FATAL_SIGNALS = {
 }
 
 class CustomPayloadValidator:
-    """
-    The 'Escape Hatch' protocol.
+    """The 'Escape Hatch' protocol.
+
     Executes proprietary binaries safely, featuring automatic Kernel Trap interception,
     POSIX signal decoding, and asynchronous log vacuuming via HostSideBuffer.
     """
 
     @staticmethod
     def run_binary(dut: DutTransport, cfg: ExecutableConfig) -> ValidatorResult:
+        """Executes a custom binary on the target and validates the result.
+
+        Args:
+            dut: The transport interface connected to the target.
+            cfg: The execution configuration containing binary path, arguments, and timeouts.
+
+        Returns:
+            ValidatorResult: Pass/fail outcome based on expected exit codes, including
+                execution time metrics and contextual stdout/stderr logs.
+        """
         binary_name = Path(cfg.binary_path).name
         full_cmd = f"{cfg.binary_path} {cfg.arguments}".strip()
 

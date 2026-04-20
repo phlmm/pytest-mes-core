@@ -23,6 +23,15 @@ class RtcTimeValidator:
 
     @classmethod
     def verify_and_sync_time(cls, dut: DutTransport, cfg: TimeSyncConfig) -> ValidatorResult:
+        """Audits hardware PPS, verifies time drift, and warns on temporal taint.
+
+        Args:
+            dut: The transport interface connected to the target.
+            cfg: The time synchronization configuration.
+
+        Returns:
+            ValidatorResult: Pass/fail outcome with detailed drift metrics and taint warnings.
+        """
         logger.info(f"[Time] Initiating Temporal Audit. Daemon Strategy: {cfg.daemon_type.value.upper()}")
 
         context_data: Dict[str, Any] = {"temporal_warnings": []}

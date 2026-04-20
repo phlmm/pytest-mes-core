@@ -31,7 +31,16 @@ class LiveProcess:
         self.executed: bool = False
 
     def execute(self) -> 'LiveProcess':
-        """Runs the process, streams to console, and captures telemetry."""
+        """Runs the process, streams to console, and captures telemetry.
+
+        Returns:
+            LiveProcess: The current instance containing telemetry and status.
+
+        Raises:
+            RuntimeError: If the process has already been executed.
+            ProcessTimeoutError: If the command times out.
+            ProcessExecutionError: If the process execution fails unexpectedly.
+        """
         if self.executed:
             raise RuntimeError(f"Process '{self.cmd[0]}' has already been executed.")
 
@@ -93,7 +102,17 @@ class LiveProcess:
     # THE EXPORTERS
     # ==========================================
     def export_log(self, export_dir: Path) -> Path:
-        """Dumps the raw unedited output to a discrete text file for CI/CD artifacts."""
+        """Dumps the raw unedited output to a discrete text file for CI/CD artifacts.
+
+        Args:
+            export_dir: Directory where the log file should be saved.
+
+        Returns:
+            Path: The full path to the exported log file.
+
+        Raises:
+            RuntimeError: If called before the process has been executed.
+        """
         if not self.executed:
             raise RuntimeError("Cannot export a process that hasn't run.")
 
@@ -113,7 +132,11 @@ class LiveProcess:
         return filepath
 
     def to_dict(self) -> dict:
-        """Serializes the telemetry for injection into Pytest JSON reports."""
+        """Serializes the telemetry for injection into Pytest JSON reports.
+
+        Returns:
+            dict: Telemetry data containing cmd, returncode, duration, and output size.
+        """
         return {
             "cmd": self.cmd_str,
             "returncode": self.returncode,

@@ -117,10 +117,24 @@ class EphemeralSSHClient:
         auto_retry: bool = False,
         **kwargs: Any
     ) -> CommandResult:
-        """
-        Synchronous execution mapped to exact Domain Exceptions.
+        """Synchronous execution mapped to exact Domain Exceptions.
+
         Logs every command execution directly to the target's systemd journal for forensic auditing.
         Contains ZERO internal auto-healing to allow external Failover architectures to function.
+
+        Args:
+            cmd: The shell command to execute.
+            timeout_s: Maximum seconds to wait before timing out.
+            check_exit_code: If True, raises RuntimeError on non-zero exit code.
+            auto_retry: If True, indicates the command is idempotent (handled by Failover router).
+            **kwargs: Additional options passed to fabric.Connection.run.
+
+        Returns:
+            CommandResult: The parsed, immutable command outcome.
+
+        Raises:
+            TransportConnectionError: If the SSH socket is severed or drops silently.
+            RuntimeError: If check_exit_code is True and the command fails or times out.
         """
         if not self.is_connected:
             err_msg = "Cannot execute: SSH socket is disconnected."

@@ -7,11 +7,22 @@ from pytest_mes_core.host_adapters import HostPeripheralSerialAdapter
 logger = logging.getLogger("mes_core.protocols.uart")
 
 class UartTopologyValidator:
+    """Validates UART topologies (RS232/RS485) across multiple physical interfaces."""
+
     def __init__(self, dut: DutTransport, host_adapters: Dict[str, HostPeripheralSerialAdapter] = None):
         self.dut = dut
         self.host_adapters = host_adapters or {}
 
     def configure_dut_interface(self, interface: str, baudrate: int = 115200) -> None:
+        """Configures the target UART interface natively using stty.
+
+        Args:
+            interface: The tty device path (e.g. /dev/ttyS1).
+            baudrate: The serial baudrate to apply.
+
+        Raises:
+            RuntimeError: If stty fails to configure the interface.
+        """
         logger.info(f"[DUT UART] Configuring Target Interface '{interface}' @ {baudrate}bps...")
 
         # 1. TTY Configuration: Disable echo, ignore modem pins (clocal), enable rx (cread), disable flow control
@@ -81,6 +92,16 @@ class UartTopologyValidator:
         return all_passed
 
     def validate_topology(self, nodes: List[str], base_payload: bytes, timeout_s: float = 2.0) -> bool:
+        """Validates a multi-node serial topology using round-robin transmissions.
+
+        Args:
+            nodes: A list of nodes in 'owner:interface' format.
+            base_payload: The base bytes payload to transmit.
+            timeout_s: Time to wait for the payload to loop back.
+
+        Returns:
+            bool: True if all nodes transmitted and received the payload successfully.
+        """
         logger.info(f"[RS485 Topology] Validating Full Matrix for Nodes: {nodes}")
         all_passed = True
 

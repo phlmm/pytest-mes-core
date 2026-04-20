@@ -26,7 +26,15 @@ class BmapBlockDeviceProvisioner(BaseProvisioner):
         self.timeout_s = timeout_s
 
     def _pre_flight_safety_check(self) -> None:
-        """Mathematically verifies the target is a valid, unmounted block device."""
+        """Mathematically verifies the target is a valid, unmounted block device.
+        
+        Prevents catastrophic Host OS destruction by ensuring the device is unmounted
+        and is a true block device, not a regular file system path.
+
+        Raises:
+            ProvisioningError: If the device doesn't exist, is not a block device,
+                or cannot be unmounted.
+        """
         logger.debug(f"[Provisioning] Executing pre-flight safety checks on {self.host_block_device}...")
 
         if not os.path.exists(self.host_block_device):
@@ -74,11 +82,19 @@ class BmapBlockDeviceProvisioner(BaseProvisioner):
         except FileNotFoundError:
             logger.debug("[Provisioning] /proc/mounts not found. Assuming non-Linux Host OS.")
 
-    def provision(self, image_path: Path) -> None:
-        """
+    def provision(self, image_path: Path) -> bool:
+        """Flashes a raw block image to the physical media using bmaptool.
+
         Hardware Flow:
             Uses bmaptool to securely and rapidly flash an image to physical media.
             Enforces a final POSIX 'sync' to flush RAM caches to silicon.
+
+        Args:
+            image_path: The path to the raw firmware image.
+
+        Raises:
+            ProvisioningError: If the firmware image is missing, the execution fails,
+                or the flash operation times out.
         """
         if not image_path.exists():
             err_msg = f"Firmware image missing at {image_path}"
@@ -129,3 +145,5 @@ class BmapBlockDeviceProvisioner(BaseProvisioner):
             err_msg = f"Failed to execute OS command. Is bmaptool installed? Error: {e}"
             logger.critical(f"[Provisioning] FATAL: {err_msg}")
             raise ProvisioningError(err_msg)
+
+        return True

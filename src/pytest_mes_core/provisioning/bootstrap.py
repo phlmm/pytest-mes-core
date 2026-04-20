@@ -41,8 +41,13 @@ class HardwareBootstrapper:
         self.cfg = cfg
 
     def set_boot_mode(self, mode_name: str) -> None:
-        """
-        Public method to dynamically assert any boot state defined in the station configuration.
+        """Public method to dynamically assert any boot state defined in the station configuration.
+
+        Args:
+            mode_name: The string identifier of the boot mode (e.g., 'recovery', 'emmc').
+
+        Raises:
+            ProvisioningError: If the mode is undefined or has an incorrect number of pin states.
         """
         if mode_name not in self.cfg.boot_modes:
             err_msg = f"Boot mode '{mode_name}' is not defined in the station configuration."
@@ -63,7 +68,15 @@ class HardwareBootstrapper:
         self._strobe_hardware(target_states)
 
     def _strobe_hardware(self, target_states: List[int]) -> None:
-        """Internal helper to assert multiplexed boot pins and strobe the reset line."""
+        """Internal helper to assert multiplexed boot pins and strobe the reset line.
+
+        Args:
+            target_states: A list of binary integers (0 or 1) representing the target
+                state for each configured boot pin.
+
+        Raises:
+            ProvisioningError: If the physical GPIO toggling fails.
+        """
         if not HAS_GPIOD:
             logger.warning("[Bootstrap] gpiod missing. Hardware boot state bypassed! (OK if testing on Windows/Mac)")
             return
@@ -135,9 +148,11 @@ class HardwareBootstrapper:
 
     # Convenience Wrappers for standard Pytest Fixtures
     def force_recovery_mode(self) -> None:
+        """Convenience wrapper to force the silicon into 'recovery' mode."""
         self.set_boot_mode("recovery")
 
     def force_normal_boot(self) -> None:
+        """Convenience wrapper to force the silicon into 'normal' or 'emmc' mode."""
         # Fallback to "emmc" if defined, otherwise use "normal"
         mode = "emmc" if "emmc" in self.cfg.boot_modes else "normal"
         self.set_boot_mode(mode)

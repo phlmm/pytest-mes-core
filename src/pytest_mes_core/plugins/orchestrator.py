@@ -72,11 +72,10 @@ def dut_state_machine(
             from pytest_mes_core.telemetry.base import TestRecord
             record = TestRecord(
                 test_name="mes_fsm_boot_profiler",
-                outcome="passed",
+                passed=True,
                 duration_s=sm.boot_metrics.get("t_boot_total_to_shell_s", 0.0),
                 metrics=sm.boot_metrics,
-                context={},
-                timestamp=datetime.now(timezone.utc).isoformat()
+                context={}
             )
             sink.emit_record(record)
 
@@ -99,6 +98,10 @@ def enforce_physical_state(
     failure during teardown and marks the State Machine as DIRTY, guaranteeing
     the next test starts from a clean, hard-booted environment.
 
+    Args:
+        request: The Pytest fixture request.
+        dut_state_machine: The active State Machine fixture.
+
     Returns:
         Generator[None, None, None]: Yields to the test body once the hardware is ready.
     """
@@ -120,20 +123,20 @@ def enforce_physical_state(
         if target_state_name == 'OS_USERLAND' and hasattr(dut_state_machine, 'verify_heartbeat'):
             if not dut_state_machine.verify_heartbeat():
                 logger.warning("[Router] Target is OS_USERLAND but heartbeat failed! Marking DIRTY and rebooting.")
-                dut_state_machine.mark_dirty()
-                dut_state_machine.boot_to_os()
+                dut_state_machine.mark_dirty()  # type: ignore
+                dut_state_machine.boot_to_os()  # type: ignore
             else:
                 logger.debug(f"[Router] Board is already in {current_state_name} and heartbeat OK. Bypassing boot sequence.")
         else:
             logger.debug(f"[Router] Board is already in {current_state_name}. Bypassing boot sequence.")
     elif target_state_name == 'POWER_OFF':
-        dut_state_machine.power_off()
+        dut_state_machine.power_off()  # type: ignore
     elif target_state_name == 'ENERGIZED':
-        dut_state_machine.energize()
+        dut_state_machine.energize()  # type: ignore
     elif target_state_name == 'BOOTLOADER':
-        dut_state_machine.boot_to_bootloader()
+        dut_state_machine.boot_to_bootloader()  # type: ignore
     elif target_state_name == 'OS_USERLAND':
-        dut_state_machine.boot_to_os()
+        dut_state_machine.boot_to_os()  # type: ignore
 
     # Yield control to the actual test function
     yield
@@ -159,13 +162,17 @@ def enforce_physical_state(
                 logger.debug(f"[FSM] Failed to generate graphviz image: {e}")
 
         # Force a hard reset before the next test
-        dut_state_machine.mark_dirty()
+        dut_state_machine.mark_dirty()  # type: ignore
         logger.warning(f"[Router] Test '{request.node.name}' failed. State marked DIRTY.")
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     """
     Translates the MES-specific hardware_retry marker into the pytest-rerunfailures engine.
     This keeps the core framework API decoupled from third-party plugins.
+
+    Args:
+        config: The Pytest configuration object.
+        items: The list of collected test items.
     """
     for item in items:
         retry_marker = item.get_closest_marker("hardware_retry")

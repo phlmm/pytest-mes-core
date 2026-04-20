@@ -31,6 +31,14 @@ class HostCanAdapter(BaseHostAdapter):
         self.disconnect()
 
     def connect(self) -> None:
+        """Initializes the physical CAN adapter via python-can.
+
+        Binds the adapter using the configured bustype (e.g., 'slcan' or 'socketcan').
+        For socketcan interfaces, attempts to natively bring the network interface UP.
+
+        Raises:
+            HostAdapterError: If python-can is missing, the interface is down, or binding fails.
+        """
         if can is None: raise HostAdapterError("python-can package is not installed.")
         if self.bus: return
         logger.info(f"[Host CAN] Binding {self.cfg.bustype} on {self.cfg.interface} @ {self.cfg.bitrate}bps...")
@@ -68,6 +76,7 @@ class HostCanAdapter(BaseHostAdapter):
             raise HostAdapterError(f"Failed to bind CAN bus {self.cfg.interface}: {e}")
 
     def disconnect(self) -> None:
+        """Safely shuts down the CAN bus and releases any background polling threads."""
         if self.notifier:
             try:
                 self.notifier.stop()
@@ -83,15 +92,38 @@ class HostCanAdapter(BaseHostAdapter):
         self.listener = None
 
     def clear_rx_buffer(self) -> None:
+        """Flushes any stale frames from the adapter's RX buffer before starting a test."""
         if self.listener:
             while self.listener.get_message(timeout=0.0): pass
 
     def send(self, can_id: int, payload: bytes) -> None:
+        """Transmits a standard CAN frame onto the physical bus.
+
+        Args:
+            can_id: The standard arbitration ID (11-bit).
+            payload: The binary payload to transmit.
+
+        Raises:
+            HostAdapterError: If the bus is not connected.
+        """
         if not self.bus: raise HostAdapterError("Host CAN not connected.")
         msg = can.Message(arbitration_id=can_id, data=payload, is_extended_id=False)
         self.bus.send(msg)
 
     def expect(self, expected_id: int, expected_payload: bytes, timeout_s: float = 2.0) -> bool:
+        """Blocks until a matching CAN frame is received or the timeout expires.
+
+        Args:
+            expected_id: The exact arbitration ID to match.
+            expected_payload: The exact payload data to match.
+            timeout_s: Maximum time to wait in seconds.
+
+        Returns:
+            bool: True if the exact frame was captured, False otherwise.
+
+        Raises:
+            HostAdapterError: If the bus is not connected.
+        """
         if not self.listener: raise HostAdapterError("Host CAN not connected.")
         t_end = time.perf_counter() + timeout_s
         while time.perf_counter() < t_end:

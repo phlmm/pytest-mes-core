@@ -25,7 +25,11 @@ class UsbMassStorageValidator:
         self.mount_point = f"/tmp/usb_test_{self.cfg.vid_hex}_{self.cfg.pid_hex}"
 
     def _find_block_device(self) -> str:
-        """Dynamically maps the VID:PID to a logical block device (e.g., /dev/sda1)."""
+        """Dynamically maps the authorized VID:PID to a logical block device.
+
+        Returns:
+            str: The /dev block device path, or an empty string if not found.
+        """
         logger.debug(f"[USB] Probing sysfs for authorized VID:PID {self.cfg.vid_hex}:{self.cfg.pid_hex}...")
 
         # Find the USB bus and device number for the specific VID:PID
@@ -49,6 +53,12 @@ class UsbMassStorageValidator:
         return f"/dev/{match.group(1)}" if match else ""
 
     def verify_throughput_and_integrity(self) -> ValidatorResult:
+        """Stresses the USB host controller and monitors for VBUS brownouts.
+
+        Returns:
+            ValidatorResult: Pass/fail outcome based on write throughput, data 
+                integrity, and the absence of dmesg PHY reset/brownout traces.
+        """
         logger.info(f"[USB] Verifying Host port via authorized drive {self.cfg.vid_hex}:{self.cfg.pid_hex}...")
         context_data: Dict[str, Any] = {}
 

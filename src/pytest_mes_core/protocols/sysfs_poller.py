@@ -8,13 +8,19 @@ from pytest_mes_core.config import SysfsPollerConfig
 logger = logging.getLogger("mes_core.protocols.sysfs")
 
 class BackgroundSysfsPoller:
-    """
-    Transport-Agnostic telemetry daemon.
+    """Transport-Agnostic telemetry daemon.
+    
     Dynamically applies Host-Side Chunking if running over SSH,
     or standard end-of-test fetching if running over Serial.
     Protected against kernel driver lockups via POSIX timeouts.
     """
     def __init__(self, dut: DutTransport, cfg: SysfsPollerConfig):
+        """Initializes the background SysFS polling daemon.
+
+        Args:
+            dut: The transport interface connected to the target.
+            cfg: The sysfs polling configuration defining targets and intervals.
+        """
         self.dut = dut
         self.cfg = cfg
         self.log_file = f"/tmp/mes_sysfs_{id(self)}.log"

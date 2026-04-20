@@ -50,6 +50,14 @@ class EStopWatchdog(BaseHostAdapter):
         self.line: Optional[Any] = None
 
     def __enter__(self) -> 'EStopWatchdog':
+        """Binds the GPIO line for the E-Stop button and spawns the monitor thread.
+
+        Returns:
+            EStopWatchdog: The armed safety watchdog instance.
+
+        Raises:
+            HostAdapterError: If the GPIO chip or line cannot be claimed.
+        """
         if not HAS_GPIOD:
             logger.warning("[Safety] gpiod not available. E-Stop bypassed. DANGEROUS IF PHYSICAL HIGH VOLTAGE IS PRESENT!")
             return self
@@ -96,7 +104,11 @@ class EStopWatchdog(BaseHostAdapter):
                 logger.debug(f"[Safety] Failed to close chip: {e}")
 
     def _monitor(self) -> None:
-        """Background thread logic for monitoring physical state."""
+        """Background thread logic for monitoring physical E-Stop state.
+        
+        Executes an immediate SIGINT and hard kill if the operator triggers the E-Stop
+        or if consecutive I/O read failures occur.
+        """
         if not self.line:
             return
 

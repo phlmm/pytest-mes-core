@@ -27,12 +27,23 @@ class BlockDeviceValidator:
         test_file_size_mb: int = 50,
         min_write_mbps: float = 10.0
     ) -> ValidatorResult:
-        """
+        """Measures true physical write throughput of a block storage device.
+
         Hardware Flow:
             1. Verifies filesystem capacity to prevent false-negative "Disk Full" errors.
             2. Writes a massive block of zeros to the target filesystem.
             3. Uses `conv=fdatasync` to force the Linux kernel to flush the Page Cache
                to the actual NAND flash before returning, yielding true silicon speed.
+
+        Args:
+            dut: The transport interface connected to the target.
+            mount_point: The path where the block device is mounted.
+            test_file_size_mb: The size of the payload to write in megabytes.
+            min_write_mbps: The minimum required write speed in MB/s.
+
+        Returns:
+            ValidatorResult: Contains the pass/fail outcome, write speed metrics, and 
+                any captured I/O fault traces from dmesg if the write failed.
         """
         test_file = f"{mount_point}/.mes_eol_speed_test.bin"
         context_data: Dict[str, Any] = {}
@@ -173,8 +184,15 @@ class BlockDeviceValidator:
 
     @staticmethod
     def verify_emmc_health(dut: DutTransport, device_path: str = "/dev/mmcblk0") -> ValidatorResult:
-        """
-        Parses S.M.A.R.T data directly from the eMMC controller's EXTCSD registers via mmc-utils.
+        """Parses S.M.A.R.T data directly from the eMMC controller's EXTCSD registers.
+
+        Args:
+            dut: The transport interface connected to the target.
+            device_path: The /dev path of the eMMC block device.
+
+        Returns:
+            ValidatorResult: Contains the health status, passing unless the eMMC
+                Pre-EOL warning is active.
         """
         logger.info(f"[Storage] Interrogating S.M.A.R.T EXTCSD registers on {device_path}...")
         context_data: Dict[str, Any] = {}
