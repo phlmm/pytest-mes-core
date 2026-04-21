@@ -4,3 +4,4 @@ tags
 **/pytest_cache/**
 artifacts/
 projects/
+site/**
