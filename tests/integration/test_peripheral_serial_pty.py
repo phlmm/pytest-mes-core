@@ -70,20 +70,48 @@ def test_disconnect_when_not_connected_is_safe():
     os.close(slave_fd)
 
 
-def test_disconnect_exception_is_swallowed(caplog):
-    """If ser.close() raises, disconnect() must catch it and set ser=None."""
+def test_disconnect_exception_is_swallowed():
+    """If ser.close() raises, disconnect() must swallow it and set ser=None.
+
+    GC-safety note: pyserial's Serial object calls close() in its C-level
+    finalizer if the port is still open.  We must ensure that by the time this
+    test ends, the Serial instance no longer has an instance-level MagicMock
+    for close() — otherwise the GC finalizer will hit the Mock, raise OSError,
+    and emit a PytestUnraisableExceptionWarning on a completely unrelated test.
+
+    The safe pattern is:
+      1. Close the real port first (so the GC finalizer has nothing to do).
+      2. Swap in the Mock to exercise the exception path.
+      3. Call disconnect() — must not raise, must set ser=None.
+      4. Delete the mock attribute from the object so the original slot is
+         restored before any finalizer can run.
+    """
     master_fd, slave_fd = pty.openpty()
     slave_name = os.ttyname(slave_fd)
     adapter = _make_adapter(slave_name)
     adapter.connect()
 
-    # Manually close the real port first so the fd doesn't leak,
-    # then inject a poisoned close() to exercise the exception path.
-    real_close = adapter.ser.close
-    real_close()
-    adapter.ser.close = MagicMock(side_effect=OSError("fd already closed"))
-    adapter.disconnect()  # Must not raise; ser must be set to None
+    # Step 1: close the real fd so the OS resource is released immediately.
+    # After this the Serial object is in is_open=False state — the finalizer
+    # will be a no-op on the underlying fd.
+    real_ser = adapter.ser
+    real_ser.close()   # actual close — fd released to OS
+
+    # Step 2: inject a poisoned close() as an INSTANCE attribute to exercise
+    # the exception-handling path inside disconnect().
+    real_ser.close = MagicMock(side_effect=OSError("fd already closed"))
+
+    # Step 3: disconnect() must swallow the OSError and null out self.ser.
+    adapter.disconnect()
     assert adapter.ser is None
+
+    # Step 4: scrub the instance-level Mock so the GC finalizer falls through
+    # to the class-level no-op (port is already closed, nothing to do).
+    try:
+        del real_ser.close
+    except AttributeError:
+        pass  # Already cleaned up
+
     os.close(master_fd)
     os.close(slave_fd)
 

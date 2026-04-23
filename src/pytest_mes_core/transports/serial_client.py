@@ -47,8 +47,13 @@ class EphemeralSerialClient:
                 timeout=0.1,  # Short block for efficient OS-level I/O multiplexing
                 exclusive=True
             )
+            # Purge both FIFOs: any stale TX bytes left in the output queue
+            # by a previous session would appear as spurious RX to the next
+            # opener (e.g. TIO).  reset_output_buffer() drops them before the
+            # driver ever tries to transmit them.
+            self.ser.reset_output_buffer()
             self.flush_buffers()
-            logger.debug(f"[UART] Bound to {self.cfg.port} and flushed stale OS buffers.")
+            logger.debug(f"[UART] Bound to {self.cfg.port} and flushed stale OS buffers (TX+RX).")
             self.watchdog.start()
         except serial.SerialException as e:
             err_str = str(e).lower()
@@ -68,9 +73,21 @@ class EphemeralSerialClient:
             raise TransportConnectionError(f"Failed to bind Host UART {self.cfg.port}: {e}")
 
     def disconnect(self) -> None:
-        """Safely tears down the UART interface, stops the watchdog, and releases the OS lock."""
+        """Safely tears down the UART interface, stops the watchdog, and releases the OS lock.
+
+        Flushes both the input and output OS FIFOs before closing the file
+        descriptor.  Without this, any bytes that pyserial has queued in the
+        OS TX buffer but not yet transmitted remain in the UART driver and will
+        be seen as spurious RX by the next process that opens the port (e.g.
+        TIO, minicom).
+        """
         self.watchdog.stop()
         if self.ser and self.ser.is_open:
+            try:
+                self.ser.reset_output_buffer()
+                self.ser.reset_input_buffer()
+            except Exception:
+                pass  # Port may have already become inaccessible (USB unplug)
             self.ser.close()
 
     @property
@@ -132,7 +149,11 @@ class EphemeralSerialClient:
                 if pattern_bytes in clean_buffer:
                     return clean_buffer.decode('utf-8', errors='replace')
 
-                last_rx_time = time.perf_counter()
+                # Only refresh the silence timer when bytes actually arrived.
+                # BUG WAS HERE: unconditionally updating last_rx_time on every
+                # loop tick meant the 2-second threshold was unreachable.
+                if chunk:
+                    last_rx_time = time.perf_counter()
 
                 if active_redraw and (time.perf_counter() - last_rx_time > 2.0):
                     # Console is silent and a kernel log may have buried the prompt.
@@ -358,12 +379,18 @@ class EphemeralSerialClient:
 
 
     def read_clean_stream(self, filter_kernel: bool = True) -> Generator[str, None, None]:
-        """Provides a live, ANSI-stripped generator for real-time log trailing (e.g., UUU/TEZI)."""
-        if not self.ser or not self.ser.is_open: return
-        if self.ser.in_waiting > 0:
-            raw_bytes = self.ser.read(self.ser.in_waiting)
-            self.parser.ingest(raw_bytes)
-            
+        """Provides a live, ANSI-stripped generator for real-time log trailing (e.g., UUU/TEZI).
+
+        Guards the underlying read with execution_lock so the watchdog thread
+        cannot steal bytes from the OS FIFO simultaneously (data race fix).
+        """
+        if not self.ser or not self.ser.is_open:
+            return
+        with self.execution_lock():
+            if self.ser.in_waiting > 0:
+                raw_bytes = self.ser.read(self.ser.in_waiting)
+                self.parser.ingest(raw_bytes)
+
         for line in self.parser.extract_lines():
             if filter_kernel and self.KERNEL_LOG_PATTERN.match(line):
                 continue
