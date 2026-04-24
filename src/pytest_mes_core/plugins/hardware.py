@@ -63,22 +63,23 @@ def psu_hardware(
     if hasattr(mes_env.psu_hardware, "enable_data_logging") and mes_env.psu_hardware.enable_data_logging:
         psu.start_data_logger()
         
-    yield psu
-    
-    # Optional: Transfer the instrument-side data log at the end of the session
-    if hasattr(mes_env.psu_hardware, "enable_data_logging") and mes_env.psu_hardware.enable_data_logging:
-        spool_dir = getattr(request.config, "_mes_telemetry_spool_dir", None)
-        target_dir = getattr(request.config, "_mes_telemetry_target_dir", None)
-        
-        # Save to the ephemeral spool directory which gets synced later
-        if spool_dir:
-            psu.download_data_log(spool_dir / "instrument_logs")
-        elif target_dir:
-            psu.download_data_log(target_dir / "instrument_logs")
-        else:
-            psu.download_data_log(Path("artifacts/evse_telemetry/instrument_logs"))
+    try:
+        yield psu
+    finally:
+        # Optional: Transfer the instrument-side data log at the end of the session
+        if hasattr(mes_env.psu_hardware, "enable_data_logging") and mes_env.psu_hardware.enable_data_logging:
+            spool_dir = getattr(request.config, "_mes_telemetry_spool_dir", None)
+            target_dir = getattr(request.config, "_mes_telemetry_target_dir", None)
             
-    psu.close()
+            # Save to the ephemeral spool directory which gets synced later
+            if spool_dir:
+                psu.download_data_log(spool_dir / "instrument_logs")
+            elif target_dir:
+                psu.download_data_log(target_dir / "instrument_logs")
+            else:
+                psu.download_data_log(Path("artifacts/evse_telemetry/instrument_logs"))
+                
+        psu.close()
 
 @pytest.fixture(scope="session")
 def ssh_client(mes_env: StationEnvironment) -> Optional[EphemeralSSHClient]:

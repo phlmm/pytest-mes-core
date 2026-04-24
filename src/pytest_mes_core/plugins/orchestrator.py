@@ -62,24 +62,25 @@ def dut_state_machine(
         boot_profiler_cfg=boot_profiler_cfg
     )
 
-    yield sm
-
-    # Teardown: Print boot metrics for the run, then secure the hardware
-    if sm.boot_metrics:
-        logger.info(f"[Metrics] Final Boot Performance: {sm.boot_metrics}")
-        sink = getattr(request.config, "_mes_telemetry_sink", None)
-        if sink:
-            from pytest_mes_core.telemetry.base import TestRecord
-            record = TestRecord(
-                test_name="mes_fsm_boot_profiler",
-                passed=True,
-                duration_s=sm.boot_metrics.get("t_boot_total_to_shell_s", 0.0),
-                metrics=sm.boot_metrics,
-                context={}
-            )
-            sink.emit_record(record)
-
-    sm.power_off()
+    try:
+        yield sm
+    finally:
+        # Teardown: Print boot metrics for the run, then secure the hardware
+        if sm.boot_metrics:
+            logger.info(f"[Metrics] Final Boot Performance: {sm.boot_metrics}")
+            sink = getattr(request.config, "_mes_telemetry_sink", None)
+            if sink:
+                from pytest_mes_core.telemetry.base import TestRecord
+                record = TestRecord(
+                    test_name="mes_fsm_boot_profiler",
+                    passed=True,
+                    duration_s=sm.boot_metrics.get("t_boot_total_to_shell_s", 0.0),
+                    metrics=sm.boot_metrics,
+                    context={}
+                )
+                sink.emit_record(record)
+    
+        sm.power_off()
 
 @pytest.fixture(autouse=True)
 def enforce_physical_state(

@@ -344,9 +344,22 @@ class EphemeralSerialClient:
             return result
 
     def flush_buffers(self) -> None:
-        """Purges both the OS-level UART FIFO and our internal string buffer."""
+        """Purges both the OS-level UART FIFO and our internal string buffer.
+        
+        Uses a drain-loop strategy to mitigate USB-Serial hardware FIFO ghosts
+        where bytes might still be in transit across the USB bus after reset.
+        """
         if self.ser and self.ser.is_open:
+            self.ser.reset_output_buffer()
             self.ser.reset_input_buffer()
+            
+            # Allow any in-flight USB bulk packets to arrive at the host
+            time.sleep(0.05)
+            
+            # Physically drain the FIFO if the hardware pushed late data
+            while self.ser.in_waiting > 0:
+                self.ser.read(max(1, self.ser.in_waiting))
+                
         self.parser.clear_buffer()
 
     # ------------------------------------------------------------------

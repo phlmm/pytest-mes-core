@@ -39,6 +39,9 @@ class StationContext(BaseModel):
 
     # The Hardware BOM/Manifest of the specific board being tested
     dut_manifest: Dict[str, Any] = Field(default_factory=dict)
+    
+    # The OS / Software layer versions of the board
+    software_manifest: Dict[str, Any] = Field(default_factory=dict)
 
     facility: Optional[str] = None
     environment: str = "lab"

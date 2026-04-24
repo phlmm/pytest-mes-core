@@ -21,6 +21,9 @@ class HardwareManifest(BaseModel):
 
     # Allows for project-specific custom flags (e.g., "carrier_rev": "C")
     custom_flags: Dict[str, Any] = Field(default_factory=dict)
+    
+    # Software stack tracking populated by scrapers
+    software_manifest: Dict[str, Any] = Field(default_factory=dict)
 
     def to_dict(self) -> dict:
         """

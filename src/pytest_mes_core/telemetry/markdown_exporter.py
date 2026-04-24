@@ -119,6 +119,20 @@ class DeveloperMarkdownExporter:
                     footer += f"| `{pretty_key}` | **{v}** |\n"
             footer += "\n"
 
+        if self._context and getattr(self._context, "software_manifest", None):
+            for component_name, component_data in self._context.software_manifest.items():
+                if not isinstance(component_data, dict):
+                    # Fallback for old single-file format
+                    component_data = {component_name: component_data}
+                    component_name = "System"
+                    
+                footer += f"## Software Build Version: {component_name}\n"
+                footer += "| Key | Value |\n|---|---|\n"
+                for k, v in component_data.items():
+                    if v:
+                        footer += f"| `{k}` | **{v}** |\n"
+                footer += "\n"
+
         with open(self.filepath, "a", encoding="utf-8") as f:
             f.write(footer)
 

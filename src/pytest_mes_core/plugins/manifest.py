@@ -79,6 +79,7 @@ def dut_manifest(
         if telemetry_sink and telemetry_sink.context:
             telemetry_sink.context.dut_serial = _cached_manifest.serial_number
             telemetry_sink.context.dut_manifest = _cached_manifest.model_dump()
+            telemetry_sink.context.software_manifest = getattr(_cached_manifest, "software_manifest", {})
             logger.info(f"[Manifest] Live telemetry stream updated for SN-{_cached_manifest.serial_number}")
 
         return _cached_manifest

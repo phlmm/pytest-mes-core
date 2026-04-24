@@ -6,7 +6,7 @@ from typing import Dict, List, Optional, Type, TypeVar
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from pytest_mes_core.config.base import (
-    StationMetaConfig, TelemetryConfig, StateMachineConfig
+    StationMetaConfig, TelemetryConfig, StateMachineConfig, GitAuthConfig
 )
 from pytest_mes_core.config.instruments import (
     PsuVendorConfig, EStopConfig, JtagTargetConfig, MicrochipIcpConfig,
@@ -32,6 +32,7 @@ class StationEnvironment(BaseModel):
 
     station_meta: StationMetaConfig
     telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)
+    git_auth: Optional[GitAuthConfig] = None
     state_machine: Optional[StateMachineConfig] = None
     psu_hardware: Optional[PsuVendorConfig] = None
     e_stop: Optional[EStopConfig] = None

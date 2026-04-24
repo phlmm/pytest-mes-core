@@ -24,6 +24,16 @@ class TelemetryConfig(BaseHardwareConfig):
     log_directory: str = Field(default="/var/log/mes_core")
     influx_url: Optional[str] = None
 
+class GitAuthConfig(BaseModel):
+    user: Optional[str] = Field(default=None, description="Git Username (for Basic Auth)")
+    token: Optional[SecretStr] = Field(default=None, description="Git Bearer Token or Password")
+    client_cert: Optional[str] = Field(default=None, description="Path to mutual TLS client certificate")
+    client_key: Optional[str] = Field(default=None, description="Path to mutual TLS private key")
+    ignore_ssl: bool = Field(default=False, description="Disable SSL certificate verification")
+
+    def get_token(self) -> Optional[str]:
+        return self.token.get_secret_value() if self.token else None
+
 class StateMachineConfig(BaseHardwareConfig):
     bootloader_prompt: str = Field(default="=> ")
     bootloader_interrupt_pattern: str = Field(default="stop autoboot")

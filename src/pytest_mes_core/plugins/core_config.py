@@ -75,6 +75,36 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default=False,
         help="Bypasses physical transports. Injects a Mock Transport for CI/CD pipeline testing."
     )
+    group.addoption(
+        "--calibration-git-token",
+        action="store",
+        default=None,
+        help="Git Bearer Token for cloning the calibration values repository."
+    )
+    group.addoption(
+        "--calibration-git-user",
+        action="store",
+        default=None,
+        help="Git Username for Basic Authentication (paired with token/password)."
+    )
+    group.addoption(
+        "--calibration-git-ignore-ssl",
+        action="store_true",
+        default=False,
+        help="Disable SSL certificate verification when cloning the calibration repo."
+    )
+    group.addoption(
+        "--calibration-client-cert",
+        action="store",
+        default=None,
+        help="Path to the client certificate for Git mutual TLS."
+    )
+    group.addoption(
+        "--calibration-client-key",
+        action="store",
+        default=None,
+        help="Path to the client private key for Git mutual TLS."
+    )
 
 def pytest_load_initial_conftests(early_config: pytest.Config, parser: pytest.Parser, args: list[str]) -> None:
     """
@@ -293,6 +323,23 @@ def pytest_html_results_summary(prefix: list[str], summary: list[str], postfix: 
             html_block += f"<tr><td style='border: 1px solid #ddd; padding: 8px;'>{html.escape(pretty_key)}</td><td style='border: 1px solid #ddd; padding: 8px;'><b>{html.escape(str(v))}</b></td></tr>"
 
     html_block += "</table>"
+    
+    if getattr(ctx, "software_manifest", None):
+        for component_name, component_data in ctx.software_manifest.items():
+            if not isinstance(component_data, dict):
+                # Fallback for old single-file format
+                component_data = {component_name: component_data}
+                component_name = "System"
+                
+            html_block += f"<h2>Software Build Version: {html.escape(component_name)}</h2>"
+            html_block += "<table style='width: 100%; border-collapse: collapse; margin-bottom: 20px; font-family: monospace;'>"
+            html_block += "<tr style='background-color: #e6f7ff;'><th style='border: 1px solid #ddd; padding: 8px; text-align: left;'>Key</th><th style='border: 1px solid #ddd; padding: 8px; text-align: left;'>Value</th></tr>"
+            
+            for k, v in component_data.items():
+                if v:
+                    html_block += f"<tr><td style='border: 1px solid #ddd; padding: 8px;'>{html.escape(k)}</td><td style='border: 1px solid #ddd; padding: 8px;'><b>{html.escape(str(v))}</b></td></tr>"
+                    
+            html_block += "</table>"
     
     prefix.extend([html_block])
 

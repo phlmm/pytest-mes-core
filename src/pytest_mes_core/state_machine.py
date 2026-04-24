@@ -490,7 +490,7 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
         if not force:
             if self.psu is not None and self.state != DutState.DIRTY:
                 return  # PSU present: power-cycle history is tracked, trust the FSM
-            if self.state in (DutState.RECOVERY, DutState.BOOTLOADER):
+            if self.state in (DutState.RECOVERY, DutState.BOOTLOADER, DutState.POWER_OFF):
                 # Explicitly-commanded states — we know what the hardware is doing.
                 logger.debug(f"[State Machine] Probe skipped: state is explicitly-set {self.state.name}.")
                 return
