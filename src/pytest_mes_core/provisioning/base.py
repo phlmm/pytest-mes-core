@@ -1,4 +1,3 @@
-# src/pytest_mes_core/provisioning/base.py
 from abc import ABC, abstractmethod
 from pathlib import Path
 import logging
@@ -19,6 +18,7 @@ class BaseProvisioner(ABC):
     """
     Abstract Base Class for all factory provisioning tools (JTAG, Fastboot, TEZI, UUU).
     """
+
     @abstractmethod
     def provision(self, image_path: Path) -> bool:
         """Executes the provisioning process for the given image.

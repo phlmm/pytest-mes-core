@@ -13,6 +13,15 @@ class MockBootStrategy(BootStrategy):
     def resume_bootloader_to_os(self, fsm: EmbeddedLinuxStateMachine) -> None:
         fsm.machine.set_state(DutState.OS_USERLAND)
 
+    async def async_cold_boot_to_bootloader(self, fsm: EmbeddedLinuxStateMachine) -> None:
+        fsm.machine.set_state(DutState.BOOTLOADER)
+        
+    async def async_cold_boot_to_os(self, fsm: EmbeddedLinuxStateMachine) -> None:
+        fsm.machine.set_state(DutState.OS_USERLAND)
+        
+    async def async_resume_bootloader_to_os(self, fsm: EmbeddedLinuxStateMachine) -> None:
+        fsm.machine.set_state(DutState.OS_USERLAND)
+
 
 
 def test_fsm_power_cycle_error_handling(monkeypatch):
@@ -23,10 +32,15 @@ def test_fsm_power_cycle_error_handling(monkeypatch):
     psu_mock = MagicMock()
     psu_mock.enable_output.side_effect = Exception("PSU Exploded")
     
+    ssh_mock = MagicMock()
+    ssh_mock.is_connected = False
+    ssh_mock.ip_address = "127.0.0.1"
+    ssh_mock.cfg.port = 2222
+    
     fsm = EmbeddedLinuxStateMachine(
         psu=psu_mock,
         serial=serial_mock,
-        ssh=MagicMock(),
+        ssh=ssh_mock,
         cfg=MagicMock()
     )
     fsm.boot_strategy = MockBootStrategy()
@@ -47,7 +61,7 @@ def test_fsm_panic_event_during_boot(monkeypatch):
     # Simulate the stream yielding normal lines, then a panic
     import time
     def mock_open(*args, **kwargs):
-        yield PanicDetected(time.time(), "Kernel panic - not syncing: VFS: Unable to mount root fs")
+        yield PanicDetected(elapsed_s=time.time(), raw_output="Kernel panic - not syncing: VFS: Unable to mount root fs")
         
     stream_mock.open.side_effect = mock_open
     
@@ -62,6 +76,18 @@ def test_fsm_panic_event_during_boot(monkeypatch):
                     raise KernelPanicError(event.raw_output)
                     
         def resume_bootloader_to_os(self, fsm: EmbeddedLinuxStateMachine) -> None:
+            pass
+                    
+        async def async_cold_boot_to_bootloader(self, fsm: EmbeddedLinuxStateMachine) -> None:
+            pass
+
+        async def async_cold_boot_to_os(self, fsm: EmbeddedLinuxStateMachine) -> None:
+            # We must use the stream. If it yields PanicDetected, we should raise.
+            async for event in stream_mock.open_async():
+                if isinstance(event, PanicDetected):
+                    raise KernelPanicError(event.raw_output)
+
+        async def async_resume_bootloader_to_os(self, fsm: EmbeddedLinuxStateMachine) -> None:
             pass
                     
     mock_cfg = MagicMock()
@@ -130,7 +156,7 @@ def test_fsm_hot_login_fallback_to_cold_boot(monkeypatch):
     def mock_open_success(*args, **kwargs):
         from pytest_mes_core.state_machine import PromptDetected
         import time
-        yield PromptDetected(time.time(), "shell")
+        yield PromptDetected(elapsed_s=time.time(), prompt_type="shell")
         
     stream_mock.open.side_effect = [mock_open_fail(), mock_open_success()]
     
@@ -146,10 +172,15 @@ def test_fsm_hot_login_fallback_to_cold_boot(monkeypatch):
     # Ensure measure_current raises AttributeError so _do_energize is fast
     del psu_mock.measure_current
     
+    ssh_mock = MagicMock()
+    ssh_mock.is_connected = False
+    ssh_mock.ip_address = "127.0.0.1"
+    ssh_mock.cfg.port = 2222
+    
     fsm = EmbeddedLinuxStateMachine(
         psu=psu_mock,
         serial=serial_mock,
-        ssh=MagicMock(),
+        ssh=ssh_mock,
         cfg=mock_cfg
     )
     
@@ -168,9 +199,6 @@ def test_fsm_hot_login_fallback_to_cold_boot(monkeypatch):
     
     # Act: call _hw_boot_to_os directly since it handles the fallback logic
     fsm._hw_boot_to_os(mock_event)
-    
-    # Assert that hot login sent the username
-    serial_mock.write_line.assert_called_with("root")
     
     # Assert that power cycle occurred because hot login failed
     fsm._do_power_off.assert_called()

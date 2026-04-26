@@ -1,12 +1,10 @@
-# src/pytest_mes_core/transports/chunking.py
+import structlog
 import time
 import threading
 import logging
 from typing import List, Optional
-
 from pytest_mes_core.transports.base import DutTransport, TransportConnectionError
-
-logger = logging.getLogger("mes_core.transports.chunking")
+logger = structlog.get_logger('mes_core.transports.chunking')
 
 class HostSideBuffer:
     """
@@ -14,17 +12,14 @@ class HostSideBuffer:
     Continuously tails a remote log file across ANY transport and buffers it in Host PC RAM.
     Guarantees data survival even if the DUT kernel panics and the socket drops.
     """
-    def __init__(self, transport: DutTransport, remote_path: str, poll_interval_s: float = 1.0):
+
+    def __init__(self, transport: DutTransport, remote_path: str, poll_interval_s: float=1.0):
         self.transport = transport
         self.remote_path = remote_path
         self.poll_interval_s = poll_interval_s
-
-        # Shared State (Must be protected by Lock)
         self._buffer: List[str] = []
         self._lines_read = 0
         self._lock = threading.Lock()
-
-        # Thread Control
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._t0: float = 0.0
@@ -34,25 +29,18 @@ class HostSideBuffer:
         
         Ensures thread safety and floors the polling interval to protect DUT CPU.
         """
-        # THREAD SAFETY FIX: Prevent Ghost Threads
         if self._thread and self._thread.is_alive():
-            logger.warning(f"[HostBuffer] Vacuum for {self.remote_path} is already running. Ignoring start request.")
+            logger.warning('vacuum_for_remote_path_is_already_running_ignoring_start_request', remote_path=self.remote_path)
             return
-
-        # CPU PROTECTION FIX: Floor the polling interval
         if self.poll_interval_s < 0.5:
-            logger.warning(f"[HostBuffer] Poll interval {self.poll_interval_s}s is too fast. Flooring to 0.5s to protect DUT CPU.")
+            logger.warning('poll_interval_poll_interval_s_s_is_too_fast_flooring_to_0_5s_to_protect_dut_cpu', poll_interval_s=self.poll_interval_s)
             self.poll_interval_s = 0.5
-
-        logger.info(f"[HostBuffer] Arming asynchronous vacuum for {self.remote_path}...")
+        logger.info('arming_asynchronous_vacuum_for_remote_path', remote_path=self.remote_path)
         self._stop_event.clear()
         self._t0 = time.perf_counter()
-
-        # Reset state on fresh start
         with self._lock:
             self._buffer.clear()
             self._lines_read = 0
-
         self._thread = threading.Thread(target=self._poll_loop, daemon=True)
         self._thread.start()
 
@@ -62,89 +50,71 @@ class HostSideBuffer:
         Returns:
             List[str]: The extracted log lines secured in Host RAM.
         """
-        logger.debug("[HostBuffer] ZERO-LEAKAGE: Disarming vacuum and reaping thread...")
+        logger.debug('[HostBuffer] ZERO-LEAKAGE: Disarming vacuum and reaping thread...')
         self._stop_event.set()
-
         if self._thread and self._thread.is_alive():
-            # Because we use Event.wait() in the loop, it should exit almost instantly.
             self._thread.join(timeout=self.poll_interval_s + 0.5)
             if self._thread.is_alive():
-                logger.warning(f"[HostBuffer] Thread join timed out. Transport socket severely hung!")
-
+                logger.warning('thread_join_timed_out_transport_socket_severely_hung')
         duration = round(time.perf_counter() - self._t0, 2)
-
-        # Safely copy the payload before returning so the test logic doesn't mutate internal state
         with self._lock:
             survived_data = list(self._buffer)
-            logger.info(f"[HostBuffer] Vacuum disarmed. Extracted {len(survived_data)} lines over {duration}s.")
+            logger.info('vacuum_disarmed_extracted_val_lines_over_duration_s', val=len(survived_data), duration=duration)
             return survived_data
+
+    async def async_start(self) -> None:
+        """Async variant of start using anyio threads."""
+        import anyio
+        await anyio.to_thread.run_sync(self.start)
+
+    async def async_stop(self) -> List[str]:
+        """Async variant of stop using anyio threads."""
+        import anyio
+        return await anyio.to_thread.run_sync(self.stop)
 
     def _poll_loop(self) -> None:
         while not self._stop_event.is_set():
             try:
                 with self._lock:
                     start_line = self._lines_read + 1
-
-                cmd = f"tail -n +{start_line} {self.remote_path} 2>/dev/null"
-                
-                # Prevent Serial Starvation: Scrape passively if failed over
-                is_failed_over = getattr(self.transport, "is_failed_over", False)
+                cmd = f'tail -n +{start_line} {self.remote_path} 2>/dev/null'
+                is_failed_over = getattr(self.transport, 'is_failed_over', False)
                 if is_failed_over:
                     try:
-                        fallback = getattr(self.transport, "fallback", None)
+                        fallback = getattr(self.transport, 'fallback', None)
                         if fallback:
-                            # If it's a serial transport, it has a parser
-                            parser = getattr(fallback, "parser", None)
+                            parser = getattr(fallback, 'parser', None)
                             if parser:
                                 new_lines = parser.extract_lines()
                                 if new_lines:
                                     with self._lock:
                                         self._buffer.extend(new_lines)
                                         self._lines_read += len(new_lines)
-                                    logger.debug(f"[HostBuffer] Passive RX <- {len(new_lines)} lines from Watchdog (Total: {self._lines_read})")
+                                    logger.debug('passive_rx_val_lines_from_watchdog_total_lines_read', val=len(new_lines), _lines_read=self._lines_read)
                     except Exception:
                         pass
-                    
                     self._stop_event.wait(timeout=self.poll_interval_s)
                     continue
-
-                # 1. Transport Agnostic Execution
-                # We use a strict timeout to avoid deadlocking the background thread.
-                # We floor it at 2.0s so slow Serial connections aren't falsely flagged as dead.
                 run_timeout = max(2.0, self.poll_interval_s * 1.5)
-
-                # Matrix Tracing: Only visible in -vv to avoid spamming the console
-                logger.debug(f"[HostBuffer] TX -> {cmd}")
+                logger.debug('tx_cmd', cmd=cmd)
                 res = self.transport.safe_run(cmd, timeout_s=run_timeout)
-
                 if res.ok and res.stdout:
                     new_lines = [l for l in res.stdout.strip().split('\n') if l.strip()]
-
                     if new_lines:
                         with self._lock:
                             self._buffer.extend(new_lines)
                             self._lines_read += len(new_lines)
-
-                        # Matrix Tracing: Prove the data is arriving
-                        logger.debug(f"[HostBuffer] RX <- {len(new_lines)} new lines extracted (Total: {self._lines_read})")
-
+                        logger.debug('rx_val_new_lines_extracted_total_lines_read', val=len(new_lines), _lines_read=self._lines_read)
             except TransportConnectionError:
-                # Explicit Domain Exception caught (e.g., SSH Pipe Shattered)
                 with self._lock:
                     survived = len(self._buffer)
-                logger.warning(f"[HostBuffer] Transport severed (DUT Crash/Panic). Hardware disconnect detected!")
-                logger.warning(f"[HostBuffer] Vacuum aborting. {survived} lines successfully secured in Host RAM.")
+                logger.warning('transport_severed_dut_crash_panic_hardware_disconnect_detected')
+                logger.warning('vacuum_aborting_survived_lines_successfully_secured_in_host_ram', survived=survived)
                 break
-
             except Exception as e:
-                # Generic fallback for unexpected transport or thread faults
                 with self._lock:
                     survived = len(self._buffer)
-                logger.error(f"[HostBuffer] Vacuum thread encountered an unexpected fault: {e}")
-                logger.error(f"[HostBuffer] Aborting. {survived} lines successfully secured in Host RAM.")
+                logger.error('vacuum_thread_encountered_an_unexpected_fault_e', e=e)
+                logger.error('aborting_survived_lines_successfully_secured_in_host_ram', survived=survived)
                 break
-
-            # 2. Responsive Sleep (The Teardown Latency Fix)
-            # Instead of time.sleep(), we wait on the stop event.
-            # If stop() is called, this wakes up IMMEDIATELY and exits the loop.
             self._stop_event.wait(timeout=self.poll_interval_s)

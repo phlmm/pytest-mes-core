@@ -1,116 +1,107 @@
+import structlog
 import re
-import time
+import anyio
+import anyio.from_thread
 import logging
-import threading
 from typing import Any, Callable, Optional, Pattern
 
-logger = logging.getLogger("mes_core.transports.watchdog")
+from pytest_mes_core.events import bus, PanicDetected
+
+logger = structlog.get_logger('mes_core.transports.watchdog')
 
 class UartKernelWatchdog:
     """
-    Background thread that monitors the serial stream for kernel panics.
+    Background asyncio task that monitors the serial stream for kernel panics.
     Runs only when the UART is not actively locked by an expect() call.
+    Uses AnyIO for async concurrency and Pluggy for decoupled event dispatch.
     """
-    
-    # Matches Linux kernel panics and fatal hardware events seen on i.MX6/i.MX8 deployments.
-    # Ordered roughly by frequency of occurrence in factory floor environments.
-    PANIC_PATTERN: Pattern[bytes] = re.compile(
-        br"("
-        # --- Kernel Panics ---
-        br"Kernel panic - not syncing"
-        br"|Unable to handle kernel paging request"   # ARM null-deref: most common panic header
-        br"|Oops - undefined instruction"             # ARMv7 illegal instruction / bad binary
-        # --- Memory Pressure ---
-        br"|Out of memory: Killed process"
-        # --- CPU / Scheduler Stalls ---
-        br"|BUG: soft lockup - CPU"
-        br"|rcu_preempt detected stalls"
-        br"|task blocked for more than 120 seconds"
-        # --- Hardware / Bus Errors ---
-        br"|synchronous external abort"               # i.MX8 bus fault
-        br"|mmc\d+: error -110"                      # eMMC command timeout (post-flash lockup)
-        # --- Filesystem Corruption ---
-        br"|EXT4-fs error"                            # eMMC corruption during/after flashing
-        br"|UBIFS error"                              # NAND-based board filesystem fault
-        # --- Secure Boot / HAB ---
-        br"|HAB Events"
-        br"|SEC_ERR"
-        br"|Signature Verification Failed"
-        br")"
-    )
+    PANIC_PATTERN: Pattern[bytes] = re.compile(b'(Kernel panic - not syncing|Unable to handle kernel paging request|Oops - undefined instruction|Out of memory: Killed process|BUG: soft lockup - CPU|rcu_preempt detected stalls|task blocked for more than 120 seconds|synchronous external abort|mmc\\d+: error -110|EXT4-fs error|UBIFS error|HAB Events|SEC_ERR|Signature Verification Failed)')
 
     def __init__(self, serial_client: Any):
         self.serial_client = serial_client
-        self._panic_event = threading.Event()
-        self._stop_event = threading.Event()
-        self._thread: Optional[threading.Thread] = None
-        self._panic_msg = ""
-        self._panic_callbacks = []
+        # anyio Events must be created inside an event loop. We'll use a thread-safe flag instead.
+        self._panic_event_set = False
+        self._cancel_scope = None
+        self._panic_msg = ''
+        self._rolling_window = b''
+        self._thread = None
+        self._stop_event = None
 
     def start(self) -> None:
-        """Spawns the background watchdog thread to monitor the serial stream."""
+        """Spawns the background watchdog task to monitor the serial stream."""
         if self._thread and self._thread.is_alive():
             return
-        self._stop_event.clear()
-        self._panic_event.clear()
-        self._panic_msg = ""
-        self._thread = threading.Thread(target=self._monitor_loop, daemon=True)
+            
+        import threading
+        self._stop_event = threading.Event()
+        self._panic_event_set = False
+        self._panic_msg = ''
+        
+        self._thread = threading.Thread(target=self._run_async_in_thread, daemon=True)
         self._thread.start()
-        logger.debug("[Watchdog] Kernel panic background watchdog started.")
+        logger.debug('[Watchdog] Kernel panic background watchdog started.')
+
+    def _run_async_in_thread(self):
+        anyio.run(self._monitor_loop)
 
     def stop(self) -> None:
-        """Safely stops the watchdog thread and waits for it to exit."""
-        self._stop_event.set()
+        """Safely stops the watchdog task."""
+        if self._stop_event:
+            self._stop_event.set()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=1.0)
         self._thread = None
-        logger.debug("[Watchdog] Kernel panic background watchdog stopped.")
+        logger.debug('[Watchdog] Kernel panic background watchdog stopped.')
 
-    def register_panic_callback(self, callback: Callable[[], None]) -> None:
-        """Register a callback to be fired immediately upon panic detection."""
-        self._panic_callbacks.append(callback)
+    async def async_start(self) -> None:
+        """Async variant of start."""
+        import anyio
+        await anyio.to_thread.run_sync(self.start)
+
+    async def async_stop(self) -> None:
+        """Async variant of stop."""
+        import anyio
+        await anyio.to_thread.run_sync(self.stop)
 
     def is_panicked(self) -> bool:
-        return self._panic_event.is_set()
+        return self._panic_event_set
 
     def get_panic_message(self) -> str:
         return self._panic_msg
 
-    def _monitor_loop(self) -> None:
+    async def _monitor_loop(self) -> None:
+        import queue
         while not self._stop_event.is_set():
             if not self.serial_client.is_connected:
-                time.sleep(0.5)
+                await anyio.sleep(0.5)
                 continue
-
-            # Don't steal bytes if the transport is locked or actively executing an expect/safe_run
-            if getattr(self.serial_client, "_is_locked", False) or getattr(self.serial_client, "_is_executing", False):
-                time.sleep(0.1)
-                continue
-
+                
+            q = self.serial_client.subscribe(maxsize=0)
             try:
-                # Read whatever is in the buffer without blocking
-                if self.serial_client.ser and self.serial_client.ser.in_waiting > 0:
-                    chunk = self.serial_client.ser.read(self.serial_client.ser.in_waiting)
-                    self.serial_client.parser.ingest(chunk)
-                    clean_buffer = self.serial_client.ANSI_ESCAPE_B.sub(b'', chunk)
-                    
-                    if self.PANIC_PATTERN.search(clean_buffer):
-                        logger.critical("="*60)
-                        logger.critical("[Watchdog] FATAL: ASYNC KERNEL PANIC DETECTED ON UART!")
-                        logger.critical("="*60)
-                        self._panic_msg = "Async Kernel Panic detected during idle/background monitoring."
-                        self._panic_event.set()
-                        
-                        # Fire callbacks (e.g., to sever SSH sockets and abort blocking calls)
-                        for cb in self._panic_callbacks:
-                            try:
-                                cb()
-                            except Exception as e:
-                                logger.debug(f"[Watchdog] Panic callback error: {e}")
-                                
-                        break
-            except Exception as e:
-                # If serial port fails (e.g. disconnected), sleep a bit
-                time.sleep(0.5)
-
-            time.sleep(0.1)
+                while not self._stop_event.is_set() and self.serial_client.is_connected:
+                    try:
+                        chunk = await anyio.to_thread.run_sync(q.get, True, 0.1)
+                        clean_chunk = self.serial_client.ANSI_ESCAPE_B.sub(b'', chunk)
+                        self._rolling_window += clean_chunk
+                        if len(self._rolling_window) > 1024:
+                            self._rolling_window = self._rolling_window[-1024:]
+                        if self.PANIC_PATTERN.search(self._rolling_window):
+                            logger.critical('=' * 60)
+                            logger.critical('[Watchdog] FATAL: ASYNC KERNEL PANIC DETECTED ON UART!')
+                            logger.critical('=' * 60)
+                            self._panic_msg = 'Async Kernel Panic detected during idle/background monitoring.'
+                            self._panic_event_set = True
+                            
+                            # Dispatch Pydantic Event via Pluggy EventBus
+                            import time
+                            bus.emit_uart_event(PanicDetected(elapsed_s=time.time(), raw_output=self._panic_msg))
+                            break
+                    except queue.Empty:
+                        await anyio.sleep(0.05)
+                    except Exception as e:
+                        logger.error(f"Unexpected error in watchdog monitor loop: {e}")
+                        await anyio.sleep(0.5)
+            finally:
+                self.serial_client.unsubscribe(q)
+            
+            await anyio.sleep(0.5)

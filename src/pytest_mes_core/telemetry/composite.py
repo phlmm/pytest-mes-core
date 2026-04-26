@@ -1,11 +1,8 @@
+import structlog
 import logging
 from typing import List, Optional
-
-from pytest_mes_core.telemetry.base import (
-    StationContext, TestRecord, TelemetryExporter, TelemetryDeliveryError
-)
-
-logger = logging.getLogger("mes_core.telemetry.composite")
+from pytest_mes_core.telemetry.base import StationContext, TestRecord, TelemetryExporter, TelemetryDeliveryError
+logger = structlog.get_logger('mes_core.telemetry.composite')
 
 class CompositeTelemetryExporter:
     """
@@ -13,6 +10,7 @@ class CompositeTelemetryExporter:
     Implements the TelemetryExporter protocol and forwards calls to N underlying exporters.
     Strictly raises exceptions if ANY exporter fails, guaranteeing Zero-Leakage visibility.
     """
+
     def __init__(self, exporters: List[TelemetryExporter]):
         self.exporters = exporters
 
@@ -43,12 +41,10 @@ class CompositeTelemetryExporter:
             try:
                 exporter.emit_record(record)
             except Exception as e:
-                logger.error(f"[Telemetry] Router failed to emit to {type(exporter).__name__}: {e}")
+                logger.error('router_failed_to_emit_to_name_e', __name__=type(exporter).__name__, e=e)
                 errors.append(str(e))
-
-        # THE FIX: Do not swallow the exception!
         if errors:
-            raise TelemetryDeliveryError(f"Composite router failed to deliver payload: {errors}")
+            raise TelemetryDeliveryError(f'Composite router failed to deliver payload: {errors}')
 
     def end_session(self, session_passed: bool) -> None:
         """Finalizes the session on all registered exporters.
@@ -64,8 +60,7 @@ class CompositeTelemetryExporter:
             try:
                 exporter.end_session(session_passed)
             except Exception as e:
-                logger.error(f"[Telemetry] Exporter {type(exporter).__name__} failed teardown: {e}")
+                logger.error('exporter_name_failed_teardown_e', __name__=type(exporter).__name__, e=e)
                 errors.append(str(e))
-
         if errors:
-            raise TelemetryDeliveryError(f"Composite router failed during teardown: {errors}")
+            raise TelemetryDeliveryError(f'Composite router failed during teardown: {errors}')

@@ -70,3 +70,22 @@ class DutTransport(Protocol):
         Must raise TransportTimeoutError if the timeout_s is exceeded.
         """
         ...
+
+    async def async_connect(self) -> None:
+        """Async variant of connect."""
+        ...
+
+    async def async_disconnect(self) -> None:
+        """Async variant of disconnect."""
+        ...
+
+    async def async_safe_run(
+        self,
+        cmd: str,
+        timeout_s: float = 30.0,
+        check_exit_code: bool = False,
+        auto_retry: bool = False,
+        **kwargs: Any
+    ) -> CommandResult:
+        """Async variant of safe_run."""
+        ...

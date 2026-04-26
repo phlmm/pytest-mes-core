@@ -1,42 +1,49 @@
-# src/pytest_mes_core/provisioning/bootstrap.py
+import structlog
 import time
 import logging
 from typing import Any, Optional, List
 
-# ==========================================
-# CROSS-PLATFORM STATIC TYPING STUBS
-# ==========================================
 class _DummyLine:
-    def request(self, *args: Any, **kwargs: Any) -> None: pass
-    def set_value(self, value: int) -> None: pass
-    def release(self) -> None: pass
+
+    def request(self, *args: Any, **kwargs: Any) -> None:
+        pass
+
+    def set_value(self, value: int) -> None:
+        pass
+
+    def release(self) -> None:
+        pass
 
 class _DummyChip:
-    def __init__(self, *args: Any, **kwargs: Any) -> None: pass
-    def get_line(self, offset: int) -> _DummyLine: return _DummyLine()
-    def close(self) -> None: pass
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        pass
+
+    def get_line(self, offset: int) -> _DummyLine:
+        return _DummyLine()
+
+    def close(self) -> None:
+        pass
 
 class _DummyGpiod:
     LINE_REQ_DIR_OUT: int = 2
     Chip = _DummyChip
-
 try:
-    import gpiod # type: ignore
+    import gpiod
     HAS_GPIOD = True
 except ImportError:
     HAS_GPIOD = False
-    gpiod = _DummyGpiod() # type: ignore
-
+    gpiod = _DummyGpiod()
 from pytest_mes_core.config import BootstrapConfig
 from pytest_mes_core.provisioning.base import ProvisioningError
-
-logger = logging.getLogger("mes_core.provisioning.bootstrap")
+logger = structlog.get_logger('mes_core.provisioning.bootstrap')
 
 class HardwareBootstrapper:
     """
     Manipulates up to 4 physical Host PC GPIOs connected to the DUT's Boot Mode pins.
     Forces complex SoCs into specific states (eMMC, USB Recovery, SD Card) dynamically.
     """
+
     def __init__(self, cfg: BootstrapConfig):
         self.cfg = cfg
 
@@ -51,20 +58,14 @@ class HardwareBootstrapper:
         """
         if mode_name not in self.cfg.boot_modes:
             err_msg = f"Boot mode '{mode_name}' is not defined in the station configuration."
-            logger.critical(f"[Bootstrap] FATAL: {err_msg}")
+            logger.critical('fatal_err_msg', err_msg=err_msg)
             raise ProvisioningError(err_msg)
-
         target_states = self.cfg.boot_modes[mode_name]
-
         if len(target_states) != len(self.cfg.boot_pins):
-            err_msg = (
-                f"Mismatch: Mode '{mode_name}' provides {len(target_states)} states, "
-                f"but {len(self.cfg.boot_pins)} boot pins are configured."
-            )
-            logger.critical(f"[Bootstrap] FATAL: {err_msg}")
+            err_msg = f"Mismatch: Mode '{mode_name}' provides {len(target_states)} states, but {len(self.cfg.boot_pins)} boot pins are configured."
+            logger.critical('fatal_err_msg', err_msg=err_msg)
             raise ProvisioningError(err_msg)
-
-        logger.info(f"[Bootstrap] Forcing silicon into '{mode_name.upper()}' mode (States: {target_states})...")
+        logger.info('forcing_silicon_into_val_mode_states_target_states', val=mode_name.upper(), target_states=target_states)
         self._strobe_hardware(target_states)
 
     def _strobe_hardware(self, target_states: List[int]) -> None:
@@ -78,81 +79,60 @@ class HardwareBootstrapper:
             ProvisioningError: If the physical GPIO toggling fails.
         """
         if not HAS_GPIOD:
-            logger.warning("[Bootstrap] gpiod missing. Hardware boot state bypassed! (OK if testing on Windows/Mac)")
+            logger.warning('[Bootstrap] gpiod missing. Hardware boot state bypassed! (OK if testing on Windows/Mac)')
             return
-
-        # DEFENSIVE: Initialize variables to prevent UnboundLocalError in finally block
         chip: Optional[Any] = None
         b_lines: List[Any] = []
         r_line: Optional[Any] = None
-
         try:
-            logger.debug(f"[Bootstrap] Binding to GPIO chip{self.cfg.gpiochip}...")
-            chip = gpiod.Chip(f"gpiochip{self.cfg.gpiochip}")
-
-            # Request the exact number of Boot Mode lines
+            logger.debug('binding_to_gpio_chip_gpiochip', gpiochip=self.cfg.gpiochip)
+            chip = gpiod.Chip(f'gpiochip{self.cfg.gpiochip}')
             for i, pin in enumerate(self.cfg.boot_pins):
-                logger.debug(f"[Bootstrap] Acquiring lock on Boot Pin {pin}...")
+                logger.debug('acquiring_lock_on_boot_pin_pin', pin=pin)
                 line = chip.get_line(pin)
-                line.request(consumer=f"mes_boot_{i}", type=gpiod.LINE_REQ_DIR_OUT)
+                line.request(consumer=f'mes_boot_{i}', type=gpiod.LINE_REQ_DIR_OUT)
                 b_lines.append(line)
-
-            # Request Reset line
-            logger.debug(f"[Bootstrap] Acquiring lock on Reset Pin {self.cfg.reset_pin}...")
+            logger.debug('acquiring_lock_on_reset_pin_reset_pin', reset_pin=self.cfg.reset_pin)
             r_line = chip.get_line(self.cfg.reset_pin)
-            r_line.request(consumer="mes_reset", type=gpiod.LINE_REQ_DIR_OUT)
-
-            # 1. Assert the multiplexed Boot States
-            logger.debug(f"[Bootstrap] Asserting boot pins to states: {target_states}")
+            r_line.request(consumer='mes_reset', type=gpiod.LINE_REQ_DIR_OUT)
+            logger.debug('asserting_boot_pins_to_states_target_states', target_states=target_states)
             for line, state in zip(b_lines, target_states):
                 line.set_value(state)
-
-            # 2. Assert Reset
             reset_assert_val = 0 if self.cfg.reset_active_low else 1
             reset_release_val = 1 if self.cfg.reset_active_low else 0
-
-            logger.debug(f"[Bootstrap] Asserting Reset Line (Value: {reset_assert_val})...")
+            logger.debug('asserting_reset_line_value_reset_assert_val', reset_assert_val=reset_assert_val)
             r_line.set_value(reset_assert_val)
-            time.sleep(0.1) # Allow silicon capacitors to drain
-
-            # 3. Release Reset (Silicon samples BOOT pins on the rising/falling edge of reset)
-            logger.debug(f"[Bootstrap] Releasing Reset Line (Value: {reset_release_val}). Silicon sampling boot pins now...")
+            time.sleep(0.1)
+            logger.debug('releasing_reset_line_value_reset_release_val_silicon_sampling_boot_pins_now', reset_release_val=reset_release_val)
             r_line.set_value(reset_release_val)
-            time.sleep(0.5) # Wait for Boot ROM to lock in the mode
-
+            time.sleep(0.5)
         except Exception as e:
-            err_msg = f"Failed to toggle physical bootstrap pins: {e}"
-            logger.critical(f"[Bootstrap] FATAL: {err_msg}")
+            err_msg = f'Failed to toggle physical bootstrap pins: {e}'
+            logger.critical('fatal_err_msg', err_msg=err_msg)
             raise ProvisioningError(err_msg)
-
         finally:
-            # ZERO-LEAKAGE: Safely release all GPIO lines back to the Linux Kernel
-            logger.debug("[Bootstrap] ZERO-LEAKAGE: Releasing GPIO locks back to OS.")
+            logger.debug('[Bootstrap] ZERO-LEAKAGE: Releasing GPIO locks back to OS.')
             for line in b_lines:
                 try:
                     line.release()
                 except Exception:
                     pass
-
             if r_line:
                 try:
                     r_line.release()
                 except Exception:
                     pass
-
             if chip:
                 try:
                     chip.close()
                 except Exception:
                     pass
 
-    # Convenience Wrappers for standard Pytest Fixtures
     def force_recovery_mode(self) -> None:
         """Convenience wrapper to force the silicon into 'recovery' mode."""
-        self.set_boot_mode("recovery")
+        self.set_boot_mode('recovery')
 
     def force_normal_boot(self) -> None:
         """Convenience wrapper to force the silicon into 'normal' or 'emmc' mode."""
-        # Fallback to "emmc" if defined, otherwise use "normal"
-        mode = "emmc" if "emmc" in self.cfg.boot_modes else "normal"
+        mode = 'emmc' if 'emmc' in self.cfg.boot_modes else 'normal'
         self.set_boot_mode(mode)

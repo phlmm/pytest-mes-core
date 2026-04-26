@@ -1,46 +1,47 @@
-# src/pytest_mes_core/host_adapters/hid_scanner.py
+import structlog
 import os
 import select
 import logging
 from typing import Optional, Any, List, TYPE_CHECKING
 
-# ==========================================
-# CROSS-PLATFORM STATIC TYPING STUBS
-# ==========================================
-# Evdev is Linux-only. We use dummy stubs to satisfy strict Pylance/MyPy
-# type checkers when developing/linting on Windows or macOS.
-
 class _DummyInputDevice:
-        name: str
-        path: str
-        fd: int
-        def grab(self) -> None: pass
-        def ungrab(self) -> None: pass
-        def read_one(self) -> Any: pass
-        def read(self) -> Any: pass
-        def close(self) -> None: pass
+    name: str
+    path: str
+    fd: int
+
+    def grab(self) -> None:
+        pass
+
+    def ungrab(self) -> None:
+        pass
+
+    def read_one(self) -> Any:
+        pass
+
+    def read(self) -> Any:
+        pass
+
+    def close(self) -> None:
+        pass
 
 class _DummyEcodes:
-        EV_KEY: int = 1
+    EV_KEY: int = 1
 try:
     from evdev import InputDevice, categorize, ecodes, list_devices
     HAS_EVDEV = True
 except ImportError:
     HAS_EVDEV = False
-    InputDevice = _DummyInputDevice                   # type: ignore
-    ecodes = _DummyEcodes()                           # type: ignore
-    def list_devices() -> List[str]: return []        # type: ignore
-    def categorize(event: Any) -> Any: return None    # type: ignore
+    InputDevice = _DummyInputDevice
+    ecodes = _DummyEcodes()
 
+    def list_devices() -> List[str]:
+        return []
 
+    def categorize(event: Any) -> Any:
+        return None
 from pytest_mes_core.config import HidScannerConfig
-from pytest_mes_core.host_adapters.base import (
-    BaseHostAdapter,
-    HostAdapterError,
-    HostHardwareDisconnectError
-)
-
-logger = logging.getLogger("mes_core.host_adapters.hid")
+from pytest_mes_core.host_adapters.base import BaseHostAdapter, HostAdapterError, HostHardwareDisconnectError
+logger = structlog.get_logger('mes_core.host_adapters.hid')
 
 class HidScannerTimeoutError(HostAdapterError):
     """Raised when the operator fails to scan within the time limit."""
@@ -52,13 +53,7 @@ class HeadlessBarcodeScanner(BaseHostAdapter):
     Bypasses the OS keyboard buffer, sanitizes stale inputs,
     and complies with the zero-leakage BaseHostAdapter contract.
     """
-
-    KEY_MAPPING = {
-        'KEY_0': '0', 'KEY_1': '1', 'KEY_2': '2', 'KEY_3': '3', 'KEY_4': '4',
-        'KEY_5': '5', 'KEY_6': '6', 'KEY_7': '7', 'KEY_8': '8', 'KEY_9': '9',
-        'KEY_MINUS': '-', 'KEY_EQUAL': '=', 'KEY_SPACE': ' ', 'KEY_DOT': '.',
-        'KEY_SLASH': '/', 'KEY_BACKSLASH': '\\', 'KEY_SEMICOLON': ':'
-    }
+    KEY_MAPPING = {'KEY_0': '0', 'KEY_1': '1', 'KEY_2': '2', 'KEY_3': '3', 'KEY_4': '4', 'KEY_5': '5', 'KEY_6': '6', 'KEY_7': '7', 'KEY_8': '8', 'KEY_9': '9', 'KEY_MINUS': '-', 'KEY_EQUAL': '=', 'KEY_SPACE': ' ', 'KEY_DOT': '.', 'KEY_SLASH': '/', 'KEY_BACKSLASH': '\\', 'KEY_SEMICOLON': ':'}
 
     def __init__(self, cfg: HidScannerConfig):
         self.cfg = cfg
@@ -66,48 +61,36 @@ class HeadlessBarcodeScanner(BaseHostAdapter):
 
     def __enter__(self) -> 'HeadlessBarcodeScanner':
         if not HAS_EVDEV:
-            raise HostAdapterError("evdev library is missing or running on non-Linux OS.")
-
+            raise HostAdapterError('evdev library is missing or running on non-Linux OS.')
         target = self.cfg.device_name_substring.lower()
-        logger.debug(f"[HID] Hunting for scanner matching '{target}' in /dev/input/...")
-
+        logger.debug('hunting_for_scanner_matching_target_in_dev_input', target=target)
         for path in list_devices():
             try:
                 dev = InputDevice(path)
                 if dev.name and target in dev.name.lower():
-                    logger.info(f"[HID] Hardware bound: '{dev.name}' at {path}")
+                    logger.info('hardware_bound_name_at_path', name=dev.name, path=path)
                     self.device = dev
-
-                    # 1. Exclusively grab the input.
                     self.device.grab()
-
-                    # 2. BUFFER PURGE: Clear any partial keystrokes from premature operator scans
                     purged_count = 0
                     while self.device.read_one() is not None:
                         purged_count += 1
-
                     if purged_count > 0:
-                        logger.debug(f"[HID] Purged {purged_count} stale keystrokes from hardware buffer.")
-
+                        logger.debug('purged_purged_count_stale_keystrokes_from_hardware_buffer', purged_count=purged_count)
                     return self
             except (IOError, PermissionError) as e:
-                # Log at DEBUG because X11/Wayland aggressively locks keyboards and mice,
-                # causing expected permission errors on standard desktop inputs.
-                logger.debug(f"[HID] Cannot access {path} ({e}). Skipping...")
-
-        # If we exit the loop, the scanner wasn't found
+                logger.debug('cannot_access_path_e_skipping', path=path, e=e)
         err_msg = f"HID Scanner '{target}' not found or unplugged."
-        logger.critical(f"[HID] FATAL: {err_msg}")
+        logger.critical('fatal_err_msg', err_msg=err_msg)
         raise HostHardwareDisconnectError(err_msg)
 
     def __exit__(self, _exc_type: Any, _exc_val: Any, _exc_tb: Any) -> None:
         """ZERO-LEAKAGE: Release the kernel lock on the USB device."""
         if self.device:
-            logger.debug(f"[HID] ZERO-LEAKAGE: Ungrabbing scanner {self.device.path}.")
+            logger.debug('zero_leakage_ungrabbing_scanner_path', path=self.device.path)
             try:
                 self.device.ungrab()
             except Exception:
-                pass # Device might have already been physically unplugged
+                pass
             finally:
                 self.device.close()
                 self.device = None
@@ -128,40 +111,31 @@ class HeadlessBarcodeScanner(BaseHostAdapter):
         """
         if not self.device:
             raise HostAdapterError("Scanner not initialized. Must be used within a 'with' context manager.")
-
-        # Always visible Operator prompt
-        logger.warning(f">>> [OPERATOR ACTION] SCAN BARCODE NOW (Timeout: {self.cfg.scan_timeout_s}s) <<<")
-        barcode = ""
-
+        logger.warning('operator_action_scan_barcode_now_timeout_scan_timeout_s_s', scan_timeout_s=self.cfg.scan_timeout_s)
+        barcode = ''
         try:
             while True:
-                # DEFENSIVE: Use select to wait for I/O readiness with a strict timeout
                 r, _, _ = select.select([self.device.fd], [], [], self.cfg.scan_timeout_s)
-
                 if not r:
-                    logger.error(f"[HID] Operator failed to scan within {self.cfg.scan_timeout_s}s.")
-                    raise HidScannerTimeoutError(f"Barcode scan timed out after {self.cfg.scan_timeout_s}s.")
-
+                    logger.error('operator_failed_to_scan_within_scan_timeout_s_s', scan_timeout_s=self.cfg.scan_timeout_s)
+                    raise HidScannerTimeoutError(f'Barcode scan timed out after {self.cfg.scan_timeout_s}s.')
                 for event in self.device.read():
                     if event.type == ecodes.EV_KEY and event.value == 1:
                         key = categorize(event)
                         keycode = key.keycode[0] if isinstance(key.keycode, list) else key.keycode
-
                         if keycode == 'KEY_ENTER':
-                            logger.info(f"[HID] Scan successfully captured: '{barcode}'")
+                            logger.info('scan_successfully_captured_barcode', barcode=barcode)
                             return barcode
-
                         if keycode in self.KEY_MAPPING:
                             char = self.KEY_MAPPING[keycode]
-                            logger.debug(f"[HID] RX: {keycode} -> '{char}'")
+                            logger.debug('rx_keycode_char', keycode=keycode, char=char)
                             barcode += char
                         elif keycode.startswith('KEY_') and len(keycode) == 5:
                             char = keycode.replace('KEY_', '')
-                            logger.debug(f"[HID] RX: {keycode} -> '{char}'")
+                            logger.debug('rx_keycode_char', keycode=keycode, char=char)
                             barcode += char
                         else:
-                            logger.debug(f"[HID] RX: {keycode} (Unmapped/Ignored)")
-
+                            logger.debug('rx_keycode_unmapped_ignored', keycode=keycode)
         except OSError as e:
-            logger.critical(f"[HID] Hardware disconnect mid-scan: {e}")
-            raise HostHardwareDisconnectError(f"Scanner physically disconnected during read operation: {e}")
+            logger.critical('hardware_disconnect_mid_scan_e', e=e)
+            raise HostHardwareDisconnectError(f'Scanner physically disconnected during read operation: {e}')

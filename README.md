@@ -50,11 +50,11 @@ The machine physically wired to the test jig running the Pytest runner.
 The `pytest-mes-core` framework is divided into distinct, strictly-typed modules to handle different layers of hardware testing:
 
 * **`pytest_mes_core.config`**: Parses the physical Station Bill of Materials (BOM) from TOML. Validates that all expected test jig hardware exists before execution.
-* **`pytest_mes_core.state_machine`**: A physical Finite State Machine (`EmbeddedLinuxStateMachine`) that transitions the target between `POWER_OFF`, `BOOTLOADER`, `OS_USERLAND`, and `RECOVERY`.
-* **`pytest_mes_core.transports`**: Contains the `FailoverTransport` matrix. Catches shattered SSH connections and seamlessly fails over to the out-of-band Serial Console.
-* **`pytest_mes_core.protocols`**: Target-side validation logic. Instead of writing bash scripts, tests use Python abstractions for `I2C`, `CAN`, `Ethernet`, and `SysFS`.
+* **`pytest_mes_core.state_machine`**: Dual physical Finite State Machines. `EmbeddedLinuxStateMachine` transitions ELinux targets between OS and U-Boot, while `BareMetalStateMachine` handles MCUs (HALTED, ENERGIZED, OTA).
+* **`pytest_mes_core.transports`**: Contains the `FailoverTransport` matrix for ELinux, and `PyOcdTransport` for Bare-Metal SWD/JTAG debug probes.
+* **`pytest_mes_core.protocols`**: Target-side validation logic. Includes high-level Pydantic-based `RPC` clients alongside abstractions for `I2C`, `CAN`, `SPI`, and `Ethernet`.
 * **`pytest_mes_core.host_adapters` & `instruments`**: Host-side drivers for barcode scanners, SCPI power supplies, JTAG debuggers, and CAN bus adapters.
-* **`pytest_mes_core.provisioning`**: Bootstraps blank silicon (e.g., using NXP `uuu` to push Toradex Easy Installer into RAM over USB OTG).
+* **`pytest_mes_core.provisioning`**: Bootstraps blank silicon (e.g., using NXP `uuu` for Linux, or `Stm32Provisioner` for mass-flashing `.bin` payloads to MCUs).
 * **`pytest_mes_core.telemetry`**: A composite telemetry router outputting to JSONL, Markdown, and TXT receipts. Intercepts failures to automatically harvest `dmesg` and `coredumpctl`.
 
 ---
@@ -115,6 +115,109 @@ def test_secure_element_i2c(dut_transport, telemetry_sink):
 
     assert res.stdout == "0xABCD"
 ```
+
+### Strictly-Typed RPC Framework (Pydantic to C-Structs)
+
+When communicating with heterogeneous targets (like Bare-Metal MCUs over UART or ELinux daemons over TCP), `pytest-mes-core` provides a unified `async_invoke` RPC API. It automatically compiles strictly-typed `Pydantic` schemas down into dense binary C-Structs (for MCUs) or JSON payloads (for ELinux).
+
+```python
+import pytest
+from pytest_mes_core.protocols.rpc_schemas import RpcMessage
+from pydantic import Field
+
+# 1. Define the physical binary layout
+class OtaTriggerRequest(RpcMessage):
+    METHOD_ID = 0x02
+    STRUCT_FORMAT = "<I I" # Maps to two Little-Endian uint32 variables in C firmware
+    image_size_bytes: int
+    image_crc32: int
+
+class OtaTriggerResponse(RpcMessage):
+    METHOD_ID = 0x02
+    STRUCT_FORMAT = "<B" # Maps to a uint8
+    accepted: bool
+
+@pytest.mark.anyio
+async def test_mcu_rejects_invalid_ota(mcu_rpc_client):
+    req = OtaTriggerRequest(image_size_bytes=1024, image_crc32=0xDEADBEEF)
+    
+    # 2. Automatically compiles to bytes, COBS-frames it, transmits, and validates response!
+    response = await mcu_rpc_client.async_invoke(req, response_type=OtaTriggerResponse)
+    
+    assert isinstance(response, OtaTriggerResponse)
+    assert response.accepted is False
+```
+
+### Writing an Asynchronous Factory Test
+
+The framework supports a **Dual-Pipeline Architecture**, providing native `async`/`await` support for high-throughput, parallel hardware testing using `anyio`. This allows you to orchestrate multiple DUTs concurrently on a single test jig without blocking the event loop.
+
+```python
+import pytest
+import anyio
+from pytest_mes_core.state_machine import DutState
+from pytest_mes_core.telemetry.profiler import AsyncHardwareProfiler
+
+@pytest.mark.anyio
+async def test_parallel_firmware_flash(dut_transport, fsm, psu_hardware):
+    # 1. Start the hardware watchdog asynchronously
+    await dut_transport.watchdog.async_start()
+    
+    # 2. Start the Continuous Profiler in the background
+    async with AsyncHardwareProfiler(dut_transport, psu_hardware, interval_s=0.5) as profiler:
+        # 3. Boot to bootloader asynchronously (yields CPU to other DUTs)
+        await fsm.async_hw_boot_to_bootloader()
+        
+        # 4. Flash firmware while tracking power usage and thermals
+        res = await dut_transport.async_safe_run("fastboot flash boot_a boot.img", timeout_s=120.0)
+        assert res.ok
+        
+        # 5. Boot to OS
+        await fsm.async_hw_boot_to_os()
+    
+    # 6. Retrieve continuous background telemetry!
+    summary = profiler.summarize()
+    print(f"Peak flash current: {summary['peak_current_a']}A")
+    print(f"Peak CPU Temp: {summary['peak_temp_c']}°C")
+    
+    await dut_transport.watchdog.async_stop()
+```
+
+### Profiling an Entire Test Automatically
+
+If you want to automatically collect power and thermal telemetry for the *entire duration of a test* without writing the `async with` block every time, you can create a custom Pytest fixture in your `conftest.py`. This fixture will yield the profiler to your test and seamlessly attach the peak metrics to your JSONL telemetry records when the test finishes.
+
+```python
+# conftest.py
+import pytest
+from pytest_mes_core.telemetry.profiler import AsyncHardwareProfiler
+
+@pytest.fixture
+async def hardware_profiler(dut_transport, psu_hardware, request):
+    """Automatically profiles hardware metrics for the duration of a single test."""
+    async with AsyncHardwareProfiler(dut_transport, psu_hardware, interval_s=0.5) as profiler:
+        yield profiler
+        
+        # When the test finishes, attach the peak metrics to the MES JSONL report!
+        record = getattr(request.node, 'mes_telemetry_record', None)
+        if record:
+            record.context.update(profiler.summarize())
+
+# test_factory.py
+@pytest.mark.anyio
+async def test_full_system_stress(dut_transport, hardware_profiler):
+    # The profiler is already running in the background!
+    
+    # 1. Engage heavy compute workload
+    await dut_transport.async_safe_run("stress-ng --matrix 0 --timeout 60s")
+    
+    # 2. You can access live stats mid-test if needed
+    summary = hardware_profiler.summarize()
+    assert summary.get('peak_current_a', 0) < 3.0, "Board drew too much current!"
+    assert summary.get('peak_temp_c', 0) < 85.0, "Thermal limits exceeded!"
+```
+
+*(Note: If you want to log power usage for the entire Pytest **session** rather than per-test, you can simply set `enable_data_logging = true` in your TOML config. The `psu_hardware` fixture will automatically configure the PSU's internal SCPI datalogger during setup and download the CSV payload at the end of the run).*
 
 ### Execution
 Run the test suite on the factory floor, defining the operator and the hardware BOM:

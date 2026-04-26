@@ -1,22 +1,15 @@
-# src/pytest_mes_core/transports/ssh.py
+import structlog
 import time
 import socket
 import logging
 from typing import Any, Dict
-
 from tenacity import retry, stop_after_attempt, wait_fixed, before_sleep_log
-from fabric import Connection, Config  # type: ignore
-from paramiko.ssh_exception import SSHException  # type: ignore
-from invoke.exceptions import CommandTimedOut, ThreadException  # type: ignore
-
+from fabric import Connection, Config
+from paramiko.ssh_exception import SSHException
+from invoke.exceptions import CommandTimedOut, ThreadException
 from pytest_mes_core.config import SshTargetConfig
-from pytest_mes_core.transports.base import (
-    CommandResult,
-    TransportConnectionError,
-    TransportTimeoutError
-)
-
-logger = logging.getLogger("mes_core.transports.ssh")
+from pytest_mes_core.transports.base import CommandResult, TransportConnectionError, TransportTimeoutError
+logger = structlog.get_logger('mes_core.transports.ssh')
 
 class EphemeralSSHClient:
     """
@@ -24,6 +17,7 @@ class EphemeralSSHClient:
     Adapts to open debug builds or highly secured production builds via TOML identities.
     Strictly adheres to the DutTransport protocol.
     """
+
     def __init__(self, cfg: SshTargetConfig):
         self.cfg = cfg
         self.ip_address = cfg.ip_address
@@ -31,56 +25,26 @@ class EphemeralSSHClient:
 
     def _build_connection(self, cfg: SshTargetConfig) -> Connection:
         """Dynamically constructs the Fabric/Paramiko configuration matrix."""
-
-        connect_kwargs: Dict[str, Any] = {
-            "look_for_keys": False,  # Strict IaC mode: no snooping in ~/.ssh/
-            "allow_agent": False,    # Strict IaC mode: no background agents
-            "banner_timeout": 5.0,
-            "auth_timeout": 5.0,
-            "timeout": cfg.connect_timeout_s,
-            # Prevents Paramiko from triggering the Dropbear 2022 negotiation crash
-            "disabled_algorithms": dict(pubkeys=["rsa-sha2-512", "rsa-sha2-256"])
-        }
-
+        connect_kwargs: Dict[str, Any] = {'look_for_keys': False, 'allow_agent': False, 'banner_timeout': 5.0, 'auth_timeout': 5.0, 'timeout': cfg.connect_timeout_s, 'disabled_algorithms': dict(pubkeys=['rsa-sha2-512', 'rsa-sha2-256'])}
         if cfg.password:
-            connect_kwargs["password"] = cfg.get_password()
-
+            connect_kwargs['password'] = cfg.get_password()
         identity_file_path = getattr(cfg, 'identity_file', None)
-
         if identity_file_path:
-            logger.debug(f"[SSH] Loading strict PKI identity: {identity_file_path}")
-            # The clean, generic way to pass keys to Fabric/Paramiko
-            connect_kwargs["key_filename"] = identity_file_path
+            logger.debug('loading_strict_pki_identity_identity_file_path', identity_file_path=identity_file_path)
+            connect_kwargs['key_filename'] = identity_file_path
         else:
-            logger.warning("[SSH] No identity_file defined in TOML! Paramiko will attempt a blank login.")
-
-        conn = Connection(
-            host=cfg.ip_address,
-            user=cfg.user,
-            port=cfg.port,
-            connect_kwargs=connect_kwargs
-        )
-
+            logger.warning('[SSH] No identity_file defined in TOML! Paramiko will attempt a blank login.')
+        conn = Connection(host=cfg.ip_address, user=cfg.user, port=cfg.port, connect_kwargs=connect_kwargs)
         import paramiko
         conn.client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-
         return conn
 
-    # ==========================================
-    # LIFECYCLE MANAGEMENT
-    # ==========================================
     @property
     def is_connected(self) -> bool:
         """Required by DutTransport Contract."""
         return self.conn is not None and self.conn.is_connected
 
-    # Wire the retry loop into the logger so operators can see the boot polling
-    @retry(
-        stop=stop_after_attempt(10),
-        wait=wait_fixed(2.0),
-        reraise=True,
-        before_sleep=before_sleep_log(logger, logging.WARNING)
-    )
+    @retry(stop=stop_after_attempt(10), wait=wait_fixed(2.0), reraise=True, before_sleep=before_sleep_log(logger, logging.DEBUG))
     def connect(self) -> None:
         """
         Actively polls the DUT until the OpenSSH daemon binds and accepts authentication.
@@ -88,35 +52,34 @@ class EphemeralSSHClient:
         """
         if self.is_connected:
             return
-
-        logger.debug(f"[SSH] Polling {self.ip_address}:{self.cfg.port} for OpenSSH Daemon...")
+        logger.debug('polling_ip_address_port_for_openssh_daemon', ip_address=self.ip_address, port=self.cfg.port)
         try:
             self.conn.open()
-            logger.info(f"[SSH] Successfully authenticated with {self.ip_address} as {self.cfg.user}")
+            logger.info('successfully_authenticated_with_ip_address_as_user', ip_address=self.ip_address, user=self.cfg.user)
         except Exception as e:
-            logger.debug(f"[SSH] Connection refused/auth failed. Retrying... ({e})")
-            raise TransportConnectionError(f"Failed to connect to OpenSSH daemon: {e}")
+            logger.debug('connection_refused_auth_failed_retrying_e', e=e)
+            raise TransportConnectionError(f'Failed to connect to OpenSSH daemon: {e}')
 
     def disconnect(self) -> None:
         """Zero-Leakage teardown (Required by DutTransport Contract)."""
         if self.is_connected:
             try:
-                logger.debug(f"[SSH] ZERO-LEAKAGE: Tearing down TCP socket to {self.ip_address}...")
+                logger.debug('zero_leakage_tearing_down_tcp_socket_to_ip_address', ip_address=self.ip_address)
                 self.conn.close()
             except Exception as e:
-                logger.debug(f"[SSH] Teardown exception (Safe to ignore): {e}")
+                logger.debug('teardown_exception_safe_to_ignore_e', e=e)
 
-    # ==========================================
-    # COMMAND EXECUTION
-    # ==========================================
-    def safe_run(
-        self,
-        cmd: str,
-        timeout_s: float = 30.0,
-        check_exit_code: bool = False,
-        auto_retry: bool = False,
-        **kwargs: Any
-    ) -> CommandResult:
+    async def async_connect(self) -> None:
+        """Async variant of connect."""
+        import anyio
+        await anyio.to_thread.run_sync(self.connect)
+
+    async def async_disconnect(self) -> None:
+        """Async variant of disconnect."""
+        import anyio
+        await anyio.to_thread.run_sync(self.disconnect)
+
+    def safe_run(self, cmd: str, timeout_s: float=30.0, check_exit_code: bool=False, auto_retry: bool=False, **kwargs: Any) -> CommandResult:
         """Synchronous execution mapped to exact Domain Exceptions.
 
         Logs every command execution directly to the target's systemd journal for forensic auditing.
@@ -137,79 +100,50 @@ class EphemeralSSHClient:
             RuntimeError: If check_exit_code is True and the command fails or times out.
         """
         if not self.is_connected:
-            err_msg = "Cannot execute: SSH socket is disconnected."
-            logger.critical(f"[SSH] FATAL: {err_msg}")
+            err_msg = 'Cannot execute: SSH socket is disconnected.'
+            logger.critical('fatal_err_msg', err_msg=err_msg)
             raise TransportConnectionError(err_msg)
-
         kwargs.setdefault('hide', True)
         kwargs.setdefault('warn', True)
         kwargs.setdefault('in_stream', False)
-
-        # 1. Forensic Journal Interceptor (Truncated to prevent Base64 spam)
-        log_cmd = cmd if len(cmd) < 256 else cmd[:253] + "..."
+        log_cmd = cmd if len(cmd) < 256 else cmd[:253] + '...'
         escaped_cmd = log_cmd.replace("'", "'\\''")
-
-        # MES Forensic Hook: Record every command in system journal if opt-in
-        if getattr(self.cfg, "forensic_journaling", False):
+        if getattr(self.cfg, 'forensic_journaling', False):
             wrapped_cmd = f"logger -t MES_Factory 'EXEC: {escaped_cmd}' ; {cmd}"
         else:
             wrapped_cmd = cmd
-
-        # Matrix Tracing: Expose the clean shell command to Pytest
-        logger.debug(f"[SSH] TX -> {log_cmd}")
+        logger.debug('tx_log_cmd', log_cmd=log_cmd)
         t0 = time.perf_counter()
-
         try:
-            # 2. Execute via Fabric using the wrapped command
             res = self.conn.run(wrapped_cmd, timeout=timeout_s, **kwargs)
             duration = round(time.perf_counter() - t0, 3)
-
-            # 3. Catch the "Silent Closure" bug inherent to Paramiko
-            if not res.ok and ("closed" in str(res.stderr).lower() or res.exited == -1):
+            if not res.ok and ('closed' in str(res.stderr).lower() or res.exited == -1):
                 self.disconnect()
-                err_msg = "SSH Socket silently closed during execution."
-                logger.critical(f"[SSH] FATAL: {err_msg}")
+                err_msg = 'SSH Socket silently closed during execution.'
+                logger.critical('fatal_err_msg', err_msg=err_msg)
                 raise TransportConnectionError(err_msg)
-
-            # Matrix Tracing
-            logger.debug(f"[SSH] RX <- Exited {res.exited} in {duration}s")
-
-            # 4. Construct the Immutable Contract
-            result = CommandResult(
-                command=cmd,
-                stdout=res.stdout.strip() if res.stdout else "",
-                stderr=res.stderr.strip() if res.stderr else "",
-                exited=res.exited if res.exited is not None else -1,
-                ok=res.ok,
-                duration_s=duration
-            )
-
-            # 5. Handle the explicit check_exit_code contract
-            if check_exit_code and not result.ok:
+            logger.debug('rx_exited_exited_in_duration_s', exited=res.exited, duration=duration)
+            result = CommandResult(command=cmd, stdout=res.stdout.strip() if res.stdout else '', stderr=res.stderr.strip() if res.stderr else '', exited=res.exited if res.exited is not None else -1, ok=res.ok, duration_s=duration)
+            if check_exit_code and (not result.ok):
                 raise RuntimeError(f"Command '{log_cmd}' failed with exit code {result.exited}: {result.stderr}")
-
             return result
-
         except CommandTimedOut as e:
             duration = round(time.perf_counter() - t0, 3)
-            logger.warning(f"[SSH] Execution timed out after {timeout_s}s: {log_cmd}")
-
-            result = CommandResult(
-                command=cmd,
-                stdout=e.result.stdout if hasattr(e, 'result') and e.result else "",
-                stderr=f"Command timed out after {timeout_s}s",
-                exited=-1,
-                ok=False,
-                duration_s=duration
-            )
-
+            logger.warning('execution_timed_out_after_timeout_s_s_log_cmd', timeout_s=timeout_s, log_cmd=log_cmd)
+            result = CommandResult(command=cmd, stdout=e.result.stdout if hasattr(e, 'result') and e.result else '', stderr=f'Command timed out after {timeout_s}s', exited=-1, ok=False, duration_s=duration)
             if check_exit_code:
                 raise RuntimeError(f"Command '{log_cmd}' timed out after {timeout_s}s")
-
             return result
-
         except (SSHException, socket.error, EOFError, ThreadException) as e:
             self.disconnect()
             err_msg = f"Physical TCP/SSH link severed during execution of '{log_cmd}': {e}"
-            logger.critical(f"[SSH] FATAL: {err_msg}")
+            logger.critical('fatal_err_msg', err_msg=err_msg)
             raise TransportConnectionError(err_msg) from e
+
+    async def async_safe_run(self, cmd: str, timeout_s: float=30.0, check_exit_code: bool=False, auto_retry: bool=False, **kwargs: Any) -> CommandResult:
+        """Async variant of safe_run using thread offloading."""
+        import anyio
+        from functools import partial
+        return await anyio.to_thread.run_sync(
+            partial(self.safe_run, cmd, timeout_s=timeout_s, check_exit_code=check_exit_code, auto_retry=auto_retry, **kwargs)
+        )

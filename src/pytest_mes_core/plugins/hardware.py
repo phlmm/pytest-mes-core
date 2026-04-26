@@ -1,3 +1,4 @@
+import structlog
 """
 Hardware Transports Plugin
 
@@ -6,33 +7,18 @@ It provisions Power Supplies, Serial TTYs, and SSH sockets, wrapping them in
 robust failover mechanisms. This ensures tests can communicate with the hardware
 regardless of whether it is sitting at a U-Boot prompt or a fully booted Linux OS.
 """
-
 import pytest
 import logging
 from pathlib import Path
 from typing import Optional, Any, Generator
 from dataclasses import dataclass
-
 from pytest_mes_core.config import StationEnvironment
 from pytest_mes_core.instruments.power_supplies import ScpiPowerSupply
-from pytest_mes_core.transports import (
-    EphemeralSSHClient,
-    EphemeralSerialClient,
-    FailoverTransport,
-    TransportConnectionError,
-    TransportTimeoutError
-)
+from pytest_mes_core.transports import EphemeralSSHClient, EphemeralSerialClient, FailoverTransport, TransportConnectionError, TransportTimeoutError
+logger = structlog.get_logger('mes_core.hardware')
 
-logger = logging.getLogger("mes_core.hardware")
-
-
-
-
-@pytest.fixture(scope="session")
-def psu_hardware(
-    request: pytest.FixtureRequest,
-    mes_env: StationEnvironment
-) -> Generator[Optional[ScpiPowerSupply], None, None]:
+@pytest.fixture(scope='session')
+def psu_hardware(request: pytest.FixtureRequest, mes_env: StationEnvironment) -> Generator[Optional[ScpiPowerSupply], None, None]:
     """
     Initializes and manages the Programmable Power Supply (PSU) for the jig.
 
@@ -55,33 +41,25 @@ def psu_hardware(
     if not mes_env.psu_hardware or not mes_env.psu_hardware.enabled:
         yield None
         return
-
     psu = ScpiPowerSupply(mes_env.psu_hardware)
     psu.connect()
-    
-    # Optional: Start instrument-side data logging for power telemetry
-    if hasattr(mes_env.psu_hardware, "enable_data_logging") and mes_env.psu_hardware.enable_data_logging:
+    if hasattr(mes_env.psu_hardware, 'enable_data_logging') and mes_env.psu_hardware.enable_data_logging:
         psu.start_data_logger()
-        
     try:
         yield psu
     finally:
-        # Optional: Transfer the instrument-side data log at the end of the session
-        if hasattr(mes_env.psu_hardware, "enable_data_logging") and mes_env.psu_hardware.enable_data_logging:
-            spool_dir = getattr(request.config, "_mes_telemetry_spool_dir", None)
-            target_dir = getattr(request.config, "_mes_telemetry_target_dir", None)
-            
-            # Save to the ephemeral spool directory which gets synced later
+        if hasattr(mes_env.psu_hardware, 'enable_data_logging') and mes_env.psu_hardware.enable_data_logging:
+            spool_dir = getattr(request.config, '_mes_telemetry_spool_dir', None)
+            target_dir = getattr(request.config, '_mes_telemetry_target_dir', None)
             if spool_dir:
-                psu.download_data_log(spool_dir / "instrument_logs")
+                psu.download_data_log(spool_dir / 'instrument_logs')
             elif target_dir:
-                psu.download_data_log(target_dir / "instrument_logs")
+                psu.download_data_log(target_dir / 'instrument_logs')
             else:
-                psu.download_data_log(Path("artifacts/evse_telemetry/instrument_logs"))
-                
+                psu.download_data_log(Path('artifacts/evse_telemetry/instrument_logs'))
         psu.close()
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope='session')
 def ssh_client(mes_env: StationEnvironment) -> Optional[EphemeralSSHClient]:
     """
     Initializes the high-speed Ethernet/SSH transport client.
@@ -89,11 +67,11 @@ def ssh_client(mes_env: StationEnvironment) -> Optional[EphemeralSSHClient]:
     Returns:
         Optional[EphemeralSSHClient]: The SSH client configured with the DUT's IP, or None.
     """
-    if "primary" in mes_env.ssh_targets and mes_env.ssh_targets["primary"].enabled:
-        return EphemeralSSHClient(mes_env.ssh_targets["primary"])
+    if 'primary' in mes_env.ssh_targets and mes_env.ssh_targets['primary'].enabled:
+        return EphemeralSSHClient(mes_env.ssh_targets['primary'])
     return None
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope='session')
 def serial_client(mes_env: StationEnvironment) -> Optional[EphemeralSerialClient]:
     """
     Initializes the low-level UART/Serial transport client.
@@ -101,17 +79,12 @@ def serial_client(mes_env: StationEnvironment) -> Optional[EphemeralSerialClient
     Returns:
         Optional[EphemeralSerialClient]: The Serial client configured with the debug COM port, or None.
     """
-    if "debug_port" in mes_env.host_serial and mes_env.host_serial["debug_port"].enabled:
-        return EphemeralSerialClient(mes_env.host_serial["debug_port"])
+    if 'debug_port' in mes_env.host_serial and mes_env.host_serial['debug_port'].enabled:
+        return EphemeralSerialClient(mes_env.host_serial['debug_port'])
     return None
 
-@pytest.fixture(scope="session")
-def dut_transport(
-    request: pytest.FixtureRequest,
-    mes_env: StationEnvironment,
-    ssh_client: Optional[EphemeralSSHClient],
-    serial_client: Optional[EphemeralSerialClient]
-) -> Generator[Any, None, None]:
+@pytest.fixture(scope='session')
+def dut_transport(request: pytest.FixtureRequest, mes_env: StationEnvironment, ssh_client: Optional[EphemeralSSHClient], serial_client: Optional[EphemeralSerialClient]) -> Generator[Any, None, None]:
     """
     The Master Hardware Transport Abstraction.
 
@@ -134,18 +107,15 @@ def dut_transport(
             temp_c = int(res.stdout.strip()) / 1000.0
             assert temp_c < 85.0
     """
-    if request.config.getoption("--mock-hardware"):
-        logger.warning("="*60)
-        logger.warning("[WARNING] --mock-hardware ENABLED. Bypassing physical connections!")
-        logger.warning("="*60)
+    if request.config.getoption('--mock-hardware'):
+        logger.warning('=' * 60)
+        logger.warning('[WARNING] --mock-hardware ENABLED. Bypassing physical connections!')
+        logger.warning('=' * 60)
         import sys
         from pathlib import Path
-
-        # Add the workspace root to sys.path so we can import 'tests'
         workspace_root = Path(__file__).parent.parent.parent.parent
         if str(workspace_root) not in sys.path:
             sys.path.insert(0, str(workspace_root))
-
         from tests.mocks.virtual_transport import MockTransport
         transport = MockTransport()
         transport.connect()
@@ -159,27 +129,19 @@ def dut_transport(
     elif serial_client:
         transport = serial_client
     else:
-        pytest.skip("No enabled transport targets found in the TOML configuration.")
+        pytest.skip('No enabled transport targets found in the TOML configuration.')
         return
-
-    # Split-Brain Prevention:
-    # If the State Machine is enabled, it completely owns the connection timing.
-    # It must power cycle the board before connecting. Therefore, we defer connection.
-    # If the FSM is disabled (e.g., pure software testing), we blind-connect immediately.
-    fsm_active = hasattr(mes_env, "state_machine") and mes_env.state_machine and mes_env.state_machine.enabled
-
+    fsm_active = hasattr(mes_env, 'state_machine') and mes_env.state_machine and mes_env.state_machine.enabled
     if not fsm_active:
         try:
             transport.connect()
-            logger.info("[Fixture] DUT Transport Matrix connected successfully (Legacy Mode).")
+            logger.info('[Fixture] DUT Transport Matrix connected successfully (Legacy Mode).')
         except (TransportConnectionError, TransportTimeoutError) as e:
-            logger.warning(f"[Fixture] DUT Transport offline during setup. Reason: {e}")
+            logger.warning('dut_transport_offline_during_setup_reason_e', e=e)
         except Exception as e:
-            logger.error(f"[Fixture] Unexpected transport failure: {e}")
+            logger.error('unexpected_transport_failure_e', e=e)
     else:
-        logger.info("[Fixture] FSM is active. Deferring Transport socket binding to State Machine.")
-
-    # Yield the transport wrapper to the test session
+        logger.info('[Fixture] FSM is active. Deferring Transport socket binding to State Machine.')
     try:
         yield transport
     finally:

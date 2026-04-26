@@ -1,3 +1,4 @@
+import structlog
 """
 State Machine Orchestrator Plugin
 
@@ -5,27 +6,18 @@ This module integrates the core Finite State Machine (FSM) into the Pytest lifec
 It provides the master session-level state machine and an automatic wrapper fixture
 that enforces physical hardware states before a test is allowed to execute.
 """
-
 import pytest
 import logging
 from datetime import datetime, timezone
 from typing import Generator, Optional
-
 from pytest_mes_core.config import StationEnvironment
 from pytest_mes_core.instruments.power_supplies import ScpiPowerSupply
 from pytest_mes_core.transports import EphemeralSSHClient, EphemeralSerialClient
 from pytest_mes_core.state_machine import EmbeddedLinuxStateMachine
+logger = structlog.get_logger('mes_core.orchestrator')
 
-logger = logging.getLogger("mes_core.orchestrator")
-
-@pytest.fixture(scope="session")
-def dut_state_machine(
-    request: pytest.FixtureRequest,
-    mes_env: StationEnvironment,
-    psu_hardware: Optional[ScpiPowerSupply],
-    serial_client: Optional[EphemeralSerialClient],
-    ssh_client: Optional[EphemeralSSHClient]
-) -> Generator[Optional[EmbeddedLinuxStateMachine], None, None]:
+@pytest.fixture(scope='session')
+def dut_state_machine(request: pytest.FixtureRequest, mes_env: StationEnvironment, psu_hardware: Optional[ScpiPowerSupply], serial_client: Optional[EphemeralSerialClient], ssh_client: Optional[EphemeralSSHClient]) -> Generator[Optional[EmbeddedLinuxStateMachine], None, None]:
     """
     Initializes the master session State Machine for the Device Under Test.
 
@@ -43,50 +35,29 @@ def dut_state_machine(
             # so the framework forces a hard reboot before the next test.
             dut_state_machine.machine.mark_dirty()
     """
-    if not hasattr(mes_env, "state_machine") or not mes_env.state_machine or not mes_env.state_machine.enabled:
+    if not hasattr(mes_env, 'state_machine') or not mes_env.state_machine or (not mes_env.state_machine.enabled):
         yield None
         return
-
     if not serial_client or not ssh_client:
-        logger.warning("[State Machine] Missing required UART or SSH transports. State machine disabled.")
+        logger.warning('[State Machine] Missing required UART or SSH transports. State machine disabled.')
         yield None
         return
-
-    boot_profiler_cfg = mes_env.boot_profilers.get("linux_boot") if mes_env.boot_profilers else None
-
-    sm = EmbeddedLinuxStateMachine(
-        psu=psu_hardware,
-        serial=serial_client,
-        ssh=ssh_client,
-        cfg=mes_env.state_machine,
-        boot_profiler_cfg=boot_profiler_cfg
-    )
-
+    boot_profiler_cfg = mes_env.boot_profilers.get('linux_boot') if mes_env.boot_profilers else None
+    sm = EmbeddedLinuxStateMachine(psu=psu_hardware, serial=serial_client, ssh=ssh_client, cfg=mes_env.state_machine, boot_profiler_cfg=boot_profiler_cfg)
     try:
         yield sm
     finally:
-        # Teardown: Print boot metrics for the run, then secure the hardware
         if sm.boot_metrics:
-            logger.info(f"[Metrics] Final Boot Performance: {sm.boot_metrics}")
-            sink = getattr(request.config, "_mes_telemetry_sink", None)
+            logger.info('final_boot_performance_boot_metrics', boot_metrics=sm.boot_metrics)
+            sink = getattr(request.config, '_mes_telemetry_sink', None)
             if sink:
                 from pytest_mes_core.telemetry.base import TestRecord
-                record = TestRecord(
-                    test_name="mes_fsm_boot_profiler",
-                    passed=True,
-                    duration_s=sm.boot_metrics.get("t_boot_total_to_shell_s", 0.0),
-                    metrics=sm.boot_metrics,
-                    context={}
-                )
+                record = TestRecord(test_name='mes_fsm_boot_profiler', passed=True, duration_s=sm.boot_metrics.get('t_boot_total_to_shell_s', 0.0), metrics=sm.boot_metrics, context={})
                 sink.emit_record(record)
-    
         sm.power_off()
 
 @pytest.fixture(autouse=True)
-def enforce_physical_state(
-    request: pytest.FixtureRequest,
-    dut_state_machine: Optional[EmbeddedLinuxStateMachine]
-) -> Generator[None, None, None]:
+def enforce_physical_state(request: pytest.FixtureRequest, dut_state_machine: Optional[EmbeddedLinuxStateMachine]) -> Generator[None, None, None]:
     """
     The Master Hardware Router.
 
@@ -107,64 +78,51 @@ def enforce_physical_state(
         Generator[None, None, None]: Yields to the test body once the hardware is ready.
     """
     if not dut_state_machine:
-        # Fallback: Run standard test flow if FSM is disabled
         yield
         return
-
-    marker = request.node.get_closest_marker("requires_state")
-
-    # Safely extract the Target State as a String
-    target_state_name = marker.args[0].name if marker and marker.args else 'OS_USERLAND'
-
-    # Safely extract the Current State from the FSM Enum as a String
-    current_state_name = dut_state_machine.state.name if hasattr(dut_state_machine.state, 'name') else str(dut_state_machine.state)
-
-    # State Routing Logic
-    if current_state_name == target_state_name:
-        if target_state_name == 'OS_USERLAND' and hasattr(dut_state_machine, 'verify_heartbeat'):
-            if not dut_state_machine.verify_heartbeat():
-                logger.warning("[Router] Target is OS_USERLAND but heartbeat failed! Marking DIRTY and rebooting.")
-                dut_state_machine.mark_dirty()  # type: ignore
-                dut_state_machine.boot_to_os()  # type: ignore
+    marker = request.node.get_closest_marker('requires_state')
+    is_async = request.node.get_closest_marker('anyio') is not None
+    
+    if is_async and marker:
+        logger.warning('[Router] requires_state marker ignored on anyio test. You must use await fsm.async_hw_boot_to_os() directly in your test body.')
+        
+    if marker and not is_async:
+        target_state_name = marker.args[0].name if marker and marker.args else 'OS_USERLAND'
+        current_state_name = dut_state_machine.state.name if hasattr(dut_state_machine.state, 'name') else str(dut_state_machine.state)
+        if current_state_name == target_state_name:
+            if target_state_name == 'OS_USERLAND' and hasattr(dut_state_machine, 'verify_heartbeat'):
+                if not dut_state_machine.verify_heartbeat():
+                    logger.warning('[Router] Target is OS_USERLAND but heartbeat failed! Marking DIRTY and rebooting.')
+                    dut_state_machine.mark_dirty()
+                    dut_state_machine.boot_to_os()
+                else:
+                    logger.debug('board_is_already_in_current_state_name_and_heartbeat_ok_bypassing_boot_sequence', current_state_name=current_state_name)
             else:
-                logger.debug(f"[Router] Board is already in {current_state_name} and heartbeat OK. Bypassing boot sequence.")
-        else:
-            logger.debug(f"[Router] Board is already in {current_state_name}. Bypassing boot sequence.")
-    elif target_state_name == 'POWER_OFF':
-        dut_state_machine.power_off()  # type: ignore
-    elif target_state_name == 'ENERGIZED':
-        dut_state_machine.energize()  # type: ignore
-    elif target_state_name == 'BOOTLOADER':
-        dut_state_machine.boot_to_bootloader()  # type: ignore
-    elif target_state_name == 'OS_USERLAND':
-        dut_state_machine.boot_to_os()  # type: ignore
-
-    # Yield control to the actual test function
+                logger.debug('board_is_already_in_current_state_name_bypassing_boot_sequence', current_state_name=current_state_name)
+        elif target_state_name == 'POWER_OFF':
+            dut_state_machine.power_off()
+        elif target_state_name == 'ENERGIZED':
+            dut_state_machine.energize()
+        elif target_state_name == 'BOOTLOADER':
+            dut_state_machine.boot_to_bootloader()
+        elif target_state_name == 'OS_USERLAND':
+            dut_state_machine.boot_to_os()
+            
     yield
-
-    # Forensic Check: Intercept failures and poison the FSM state
-    rep_call = getattr(request.node, "rep_call", None)
+    rep_call = getattr(request.node, 'rep_call', None)
     if rep_call and rep_call.failed:
-
-        # Dump the State Graph on Failure
         if hasattr(dut_state_machine.machine, 'get_graph'):
             try:
                 import os
-                os.makedirs("artifacts", exist_ok=True)
-
-                # Clean the test name for the filesystem
-                clean_name = request.node.name.replace("/", "_").replace(":", "_").replace("[", "_").replace("]", "")
-                graph_path = f"artifacts/fsm_crash_{clean_name}.png"
-
-                # Generate and save the flowchart
+                os.makedirs('artifacts', exist_ok=True)
+                clean_name = request.node.name.replace('/', '_').replace(':', '_').replace('[', '_').replace(']', '')
+                graph_path = f'artifacts/fsm_crash_{clean_name}.png'
                 dut_state_machine.machine.get_graph().draw(graph_path, prog='dot')
-                logger.critical(f"[FSM] Crash graph generated: {graph_path}")
+                logger.critical('crash_graph_generated_graph_path', graph_path=graph_path)
             except Exception as e:
-                logger.debug(f"[FSM] Failed to generate graphviz image: {e}")
-
-        # Force a hard reset before the next test
-        dut_state_machine.mark_dirty()  # type: ignore
-        logger.warning(f"[Router] Test '{request.node.name}' failed. State marked DIRTY.")
+                logger.debug('failed_to_generate_graphviz_image_e', e=e)
+        dut_state_machine.mark_dirty()
+        logger.warning('test_name_failed_state_marked_dirty', name=request.node.name)
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     """
@@ -176,14 +134,11 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         items: The list of collected test items.
     """
     for item in items:
-        retry_marker = item.get_closest_marker("hardware_retry")
+        retry_marker = item.get_closest_marker('hardware_retry')
         if retry_marker:
-            # Extract the number of retries (default to 1 if not specified)
             retries = 1
             if retry_marker.args:
                 retries = retry_marker.args[0]
-            elif "retries" in retry_marker.kwargs:
-                retries = retry_marker.kwargs["retries"]
-
-            # Inject the backend flaky marker
+            elif 'retries' in retry_marker.kwargs:
+                retries = retry_marker.kwargs['retries']
             item.add_marker(pytest.mark.flaky(reruns=retries))

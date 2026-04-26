@@ -1,17 +1,12 @@
-# src/pytest_mes_core/provisioning/pki.py
+import structlog
 import hashlib
 import base64
 import logging
 from pathlib import Path
-
 from pytest_mes_core.transports import DutTransport
 from pytest_mes_core.provisioning import ProvisioningError
-
-# If you decide to move the Validator to protocols/pki.py later, that's perfectly fine.
-# For now, we keep it here to maintain your workflow.
 from pytest_mes_core.protocols import ValidatorResult
-
-logger = logging.getLogger("mes_core.provisioning.pki")
+logger = structlog.get_logger('mes_core.provisioning.pki')
 
 class PkiProvisioner:
     """
@@ -20,12 +15,7 @@ class PkiProvisioner:
     """
 
     @staticmethod
-    def provision_credential(
-        transport: DutTransport,
-        local_filepath: Path,
-        remote_dest: str,
-        permissions: str = "400"
-    ) -> None:
+    def provision_credential(transport: DutTransport, local_filepath: Path, remote_dest: str, permissions: str='400') -> None:
         """Pushes a local certificate/key to the DUT over ANY transport (SSH or Serial).
 
         Enforces strict chmod permissions and cryptographically verifies the transit.
@@ -43,83 +33,57 @@ class PkiProvisioner:
                 or cryptographic transit verification fails.
         """
         if not local_filepath.exists():
-            err_msg = f"Local credential file not found at {local_filepath}"
-            logger.critical(f"[PKI] FATAL: {err_msg}")
+            err_msg = f'Local credential file not found at {local_filepath}'
+            logger.critical('fatal_err_msg', err_msg=err_msg)
             raise ProvisioningError(err_msg)
-
-        # 1. Compute Local Hash
         hasher = hashlib.sha256()
-        with open(local_filepath, "rb") as f:
+        with open(local_filepath, 'rb') as f:
             raw_data = f.read()
             hasher.update(raw_data)
         local_hash = hasher.hexdigest()
-
-        logger.info(f"[PKI] Injecting {local_filepath.name} to {remote_dest} (SHA256: {local_hash[:8]}...)")
-
-        # 2. Defensive Idempotency: Check if correct file is already there
+        logger.info('injecting_name_to_remote_dest_sha256_val', name=local_filepath.name, remote_dest=remote_dest, val=local_hash[:8])
         check_cmd = f"sha256sum {remote_dest} 2>/dev/null | awk '{{print $1}}'"
-        logger.debug(f"[PKI] Executing Idempotency Check: {check_cmd}")
+        logger.debug('executing_idempotency_check_check_cmd', check_cmd=check_cmd)
         res_check = transport.safe_run(check_cmd)
-
         if res_check.exited == 0 and res_check.stdout.strip() == local_hash:
-            logger.info("[PKI] Credential already exists on target with correct hash. Skipping transit.")
-            logger.debug(f"[PKI] Enforcing strict permissions: chmod {permissions} {remote_dest}")
-            transport.safe_run(f"chmod {permissions} {remote_dest}")
+            logger.info('[PKI] Credential already exists on target with correct hash. Skipping transit.')
+            logger.debug('enforcing_strict_permissions_chmod_permissions_remote_dest', permissions=permissions, remote_dest=remote_dest)
+            transport.safe_run(f'chmod {permissions} {remote_dest}')
             return
-
-        # 3. Base64 Encode and Chunk (CRITICAL FOR UART LINE BUFFERS)
         b64_string = base64.b64encode(raw_data).decode('utf-8')
-        b64_chunks = [b64_string[i:i+64] for i in range(0, len(b64_string), 64)]
-
-        # Security: Do not log the actual payload to avoid leaking private keys into CI artifacts
-        logger.debug(f"[PKI] Base64 payload formatted: {len(b64_chunks)} lines, {len(b64_string)} bytes.")
-
-        # 4. Create remote directory tree
-        remote_dir = "/".join(remote_dest.split("/")[:-1])
-        logger.debug(f"[PKI] Building remote directory tree: mkdir -p {remote_dir}")
-        transport.safe_run(f"mkdir -p {remote_dir}")
-
-        # 5. Inject iteratively to prevent UART FIFO overflow
-        logger.debug(f"[PKI] Transmitting payload iteratively (Secrets masked in trace)...")
-        b64_temp = f"{remote_dest}.b64"
-        transport.safe_run(f"> {b64_temp}")  # Clear temp file
-        
+        b64_chunks = [b64_string[i:i + 64] for i in range(0, len(b64_string), 64)]
+        logger.debug('base64_payload_formatted_val_lines_val_1_bytes', val=len(b64_chunks), val_1=len(b64_string))
+        remote_dir = '/'.join(remote_dest.split('/')[:-1])
+        logger.debug('building_remote_directory_tree_mkdir_p_remote_dir', remote_dir=remote_dir)
+        transport.safe_run(f'mkdir -p {remote_dir}')
+        logger.debug('transmitting_payload_iteratively_secrets_masked_in_trace')
+        b64_temp = f'{remote_dest}.b64'
+        transport.safe_run(f'> {b64_temp}')
         for chunk in b64_chunks:
             res_chunk = transport.safe_run(f"echo '{chunk}' >> {b64_temp}")
             if res_chunk.exited != 0:
-                err_msg = f"Failed to write payload chunk to DUT: {res_chunk.stderr.strip()}"
-                logger.critical(f"[PKI] FATAL: {err_msg}")
+                err_msg = f'Failed to write payload chunk to DUT: {res_chunk.stderr.strip()}'
+                logger.critical('fatal_err_msg', err_msg=err_msg)
                 raise ProvisioningError(err_msg)
-            
-            # UART Hardware Throttle
             import time
             time.sleep(0.05)
-
-        res_decode = transport.safe_run(f"base64 -d {b64_temp} > {remote_dest}")
-        transport.safe_run(f"rm -f {b64_temp}")
-
+        res_decode = transport.safe_run(f'base64 -d {b64_temp} > {remote_dest}')
+        transport.safe_run(f'rm -f {b64_temp}')
         if res_decode.exited != 0:
-            err_msg = f"Failed to decode base64 payload on DUT: {res_decode.stderr.strip()}"
-            logger.critical(f"[PKI] FATAL: {err_msg}")
+            err_msg = f'Failed to decode base64 payload on DUT: {res_decode.stderr.strip()}'
+            logger.critical('fatal_err_msg', err_msg=err_msg)
             raise ProvisioningError(err_msg)
-
-        logger.debug(f"[PKI] Enforcing strict permissions: chmod {permissions} {remote_dest}")
-        transport.safe_run(f"chmod {permissions} {remote_dest}")
-
-        # 6. Remote Hash Verification
-        logger.debug("[PKI] Requesting remote SHA256 verification hash...")
+        logger.debug('enforcing_strict_permissions_chmod_permissions_remote_dest', permissions=permissions, remote_dest=remote_dest)
+        transport.safe_run(f'chmod {permissions} {remote_dest}')
+        logger.debug('[PKI] Requesting remote SHA256 verification hash...')
         remote_hash = transport.safe_run(check_cmd).stdout.strip()
-        logger.debug(f"[PKI] Remote Hash computed: {remote_hash}")
-
+        logger.debug('remote_hash_computed_remote_hash', remote_hash=remote_hash)
         if local_hash != remote_hash:
-            # ZERO LEAKAGE: Destroy the corrupted credential immediately
-            logger.critical(f"[PKI] FATAL: Transit corruption! Local: {local_hash}, Remote: {remote_hash}")
-            logger.debug(f"[PKI] ZERO-LEAKAGE: Destroying corrupted payload: rm -f {remote_dest}")
-            transport.safe_run(f"rm -f {remote_dest}")
-            raise ProvisioningError("Cryptographic transit failure. Corrupted payload destroyed on target.")
-
-        logger.info(f"[PKI] Injection successful and cryptographically verified ({remote_dest}).")
-
+            logger.critical('fatal_transit_corruption_local_local_hash_remote_remote_hash', local_hash=local_hash, remote_hash=remote_hash)
+            logger.debug('zero_leakage_destroying_corrupted_payload_rm_f_remote_dest', remote_dest=remote_dest)
+            transport.safe_run(f'rm -f {remote_dest}')
+            raise ProvisioningError('Cryptographic transit failure. Corrupted payload destroyed on target.')
+        logger.info('injection_successful_and_cryptographically_verified_remote_dest', remote_dest=remote_dest)
 
 class PkiPairingValidator:
     """
@@ -128,11 +92,7 @@ class PkiPairingValidator:
     """
 
     @staticmethod
-    def verify_x509_pairing(
-        transport: DutTransport,
-        remote_cert_path: str,
-        remote_key_path: str
-    ) -> ValidatorResult:
+    def verify_x509_pairing(transport: DutTransport, remote_cert_path: str, remote_key_path: str) -> ValidatorResult:
         """Verifies cryptographic pairing of a certificate and private key on the target.
 
         Args:
@@ -143,37 +103,28 @@ class PkiPairingValidator:
         Returns:
             ValidatorResult: Contains success status and any relevant error messages.
         """
-        logger.info(f"[PKI] Verifying cryptographic pairing of {remote_cert_path} and {remote_key_path}...")
-
-        # Extract modulus from Certificate
-        cmd_cert = f"openssl x509 -noout -modulus -in {remote_cert_path} | openssl md5"
-        logger.debug(f"[PKI] Extracting Cert Modulus: {cmd_cert}")
+        logger.info('verifying_cryptographic_pairing_of_remote_cert_path_and_remote_key_path', remote_cert_path=remote_cert_path, remote_key_path=remote_key_path)
+        cmd_cert = f'openssl x509 -noout -modulus -in {remote_cert_path} | openssl md5'
+        logger.debug('extracting_cert_modulus_cmd_cert', cmd_cert=cmd_cert)
         res_cert = transport.safe_run(cmd_cert)
-
-        # Extract modulus from Private Key
-        cmd_key = f"openssl rsa -noout -modulus -in {remote_key_path} | openssl md5"
-        logger.debug(f"[PKI] Extracting Key Modulus: {cmd_key}")
+        cmd_key = f'openssl rsa -noout -modulus -in {remote_key_path} | openssl md5'
+        logger.debug('extracting_key_modulus_cmd_key', cmd_key=cmd_key)
         res_key = transport.safe_run(cmd_key)
-
         if res_cert.exited != 0 or res_key.exited != 0:
-            logger.error(f"[PKI] OpenSSL error on DUT. Cert Exit: {res_cert.exited}, Key Exit: {res_key.exited}")
-            if res_cert.stderr: logger.debug(f"[PKI] Cert Stderr: {res_cert.stderr.strip()}")
-            if res_key.stderr: logger.debug(f"[PKI] Key Stderr: {res_key.stderr.strip()}")
-            return ValidatorResult(passed=False, error_msg="OpenSSL missing or files unreadable on target.")
-
+            logger.error('openssl_error_on_dut_cert_exit_exited_key_exit_exited_1', exited=res_cert.exited, exited_1=res_key.exited)
+            if res_cert.stderr:
+                logger.debug('cert_stderr_val', val=res_cert.stderr.strip())
+            if res_key.stderr:
+                logger.debug('key_stderr_val', val=res_key.stderr.strip())
+            return ValidatorResult(passed=False, error_msg='OpenSSL missing or files unreadable on target.')
         cert_mod = res_cert.stdout.strip()
         key_mod = res_key.stdout.strip()
-
-        logger.debug(f"[PKI] Certificate MD5 Modulus: {cert_mod}")
-        logger.debug(f"[PKI] Private Key MD5 Modulus: {key_mod}")
-
+        logger.debug('certificate_md5_modulus_cert_mod', cert_mod=cert_mod)
+        logger.debug('private_key_md5_modulus_key_mod', key_mod=key_mod)
         if cert_mod != key_mod:
-            logger.critical(f"[PKI] FATAL: PAIRING FAILED! Cert Modulus: {cert_mod}, Key Modulus: {key_mod}")
-
-            # ZERO LEAKAGE: A mismatched key pair is a fatal security liability. Destroy them.
-            logger.debug(f"[PKI] ZERO-LEAKAGE: Destroying mismatched key pair: rm -f {remote_cert_path} {remote_key_path}")
-            transport.safe_run(f"rm -f {remote_cert_path} {remote_key_path}")
-            return ValidatorResult(passed=False, error_msg="x509 Certificate and Private Key mismatch. Files destroyed.")
-
-        logger.info("[PKI] Cryptographic pairing mathematically proven.")
+            logger.critical('fatal_pairing_failed_cert_modulus_cert_mod_key_modulus_key_mod', cert_mod=cert_mod, key_mod=key_mod)
+            logger.debug('zero_leakage_destroying_mismatched_key_pair_rm_f_remote_cert_path_remote_key_path', remote_cert_path=remote_cert_path, remote_key_path=remote_key_path)
+            transport.safe_run(f'rm -f {remote_cert_path} {remote_key_path}')
+            return ValidatorResult(passed=False, error_msg='x509 Certificate and Private Key mismatch. Files destroyed.')
+        logger.info('[PKI] Cryptographic pairing mathematically proven.')
         return ValidatorResult(passed=True)

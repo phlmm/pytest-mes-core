@@ -1,9 +1,9 @@
+import structlog
 import logging
 from dataclasses import dataclass, asdict
 from typing import Optional, Dict, Any
 from abc import ABC, abstractmethod
-
-logger = logging.getLogger("mes_core.manifest")
+logger = structlog.get_logger('mes_core.manifest')
 
 @dataclass
 class ComponentIdentity:
@@ -22,14 +22,13 @@ class HardwareManifest(ABC):
     Abstract Base Class for hardware genealogy.
     Test projects must inherit from this to define their specific board schema.
     """
+
     def to_dict(self) -> Dict[str, Any]:
         """Generic serialization that strips null values to save JSONL space."""
         raw_dict = asdict(self)
 
         def remove_nulls(d):
-            return {k: remove_nulls(v) if isinstance(v, dict) else v
-                    for k, v in d.items() if v is not None}
-
+            return {k: remove_nulls(v) if isinstance(v, dict) else v for k, v in d.items() if v is not None}
         return remove_nulls(raw_dict)
 
     @abstractmethod

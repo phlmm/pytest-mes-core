@@ -26,7 +26,9 @@ WORKSPACE_SRC = str(Path(__file__).parent.parent.parent.absolute() / "src")
 
 def _inject_pythonpath():
     """Ensures the subprocess can import pytest_mes_core from the src/ layout."""
-    os.environ["PYTHONPATH"] = WORKSPACE_SRC + os.pathsep + os.environ.get("PYTHONPATH", "")
+    import site
+    user_site = site.getusersitepackages()
+    os.environ["PYTHONPATH"] = WORKSPACE_SRC + os.pathsep + user_site + os.pathsep + os.environ.get("PYTHONPATH", "")
 
 
 # ==========================================

@@ -1,9 +1,9 @@
+import structlog
 import logging
 import threading
 from typing import Any
 from pytest_mes_core.transports.base import DutTransport, CommandResult, TransportConnectionError
-
-logger = logging.getLogger("mes_core.transports.failover")
+logger = structlog.get_logger('mes_core.transports.failover')
 
 class FailoverTransport(DutTransport):
     """
@@ -14,14 +14,14 @@ class FailoverTransport(DutTransport):
     Explicitly implements the DutTransport protocol to enable proper static
     type checking across the framework.
     """
+
     def __init__(self, primary: DutTransport, fallback: DutTransport):
         self.primary = primary
         self.fallback = fallback
         self.is_failed_over = False
         self._recovery_thread = None
         self._stop_recovery = threading.Event()
-
-        if hasattr(self.fallback, "watchdog") and getattr(self.fallback, "watchdog", None):
+        if hasattr(self.fallback, 'watchdog') and getattr(self.fallback, 'watchdog', None):
             self.fallback.watchdog.register_panic_callback(self._on_panic)
 
     def _probe_primary_recovery(self) -> None:
@@ -35,9 +35,9 @@ class FailoverTransport(DutTransport):
                 try:
                     if not self.primary.is_connected:
                         self.primary.connect()
-                    res = self.primary.safe_run("echo MES_PING", timeout_s=2.0)
-                    if res.ok and "MES_PING" in res.stdout:
-                        logger.info("[Router] HIGH-SPEED RECOVERY: Primary transport recovered! Failing-back.")
+                    res = self.primary.safe_run('echo MES_PING', timeout_s=2.0)
+                    if res.ok and 'MES_PING' in res.stdout:
+                        logger.info('[Router] HIGH-SPEED RECOVERY: Primary transport recovered! Failing-back.')
                         self.is_failed_over = False
                 except Exception:
                     pass
@@ -49,7 +49,7 @@ class FailoverTransport(DutTransport):
         Actively severs the primary SSH connection to force an immediate failover to the
         serial console for forensic extraction.
         """
-        logger.critical("[Router] Watchdog detected panic! Severing Primary connection to fail fast...")
+        logger.critical('[Router] Watchdog detected panic! Severing Primary connection to fail fast...')
         if self.primary.is_connected:
             self.primary.disconnect()
 
@@ -65,15 +65,23 @@ class FailoverTransport(DutTransport):
         recovered from a failed state.
         """
         if not self.is_connected:
-            logger.info("[Router] Arming dual-transport failover matrix...")
-            self.primary.connect()
+            logger.info('[Router] Arming dual-transport failover matrix...')
+            
+            # Connect the reliable fallback (UART) first so it is available immediately
             self.fallback.connect()
             
+            # Attempt to connect the high-speed primary (SSH), but gracefully accept failure
+            # If the board is in BOOTLOADER or POWER_OFF, this will naturally fail.
+            try:
+                self.primary.connect()
+            except TransportConnectionError:
+                logger.warning('[Router] Primary transport offline during setup. Matrix starting in FAILOVER mode.')
+                self.is_failed_over = True
+                
             self._stop_recovery.clear()
             self._recovery_thread = threading.Thread(target=self._probe_primary_recovery, daemon=True)
             self._recovery_thread.start()
-            
-            logger.debug("[Router] Primary and Fallback transports bound and active.")
+            logger.debug('[Router] Dual-transport routing matrix armed.')
 
     def disconnect(self) -> None:
         """Tears down the dual-transport matrix and stops the recovery thread.
@@ -84,19 +92,42 @@ class FailoverTransport(DutTransport):
         self._stop_recovery.set()
         if self._recovery_thread and self._recovery_thread.is_alive():
             self._recovery_thread.join(timeout=1.0)
-            
-        logger.debug("[Router] ZERO-LEAKAGE: Tearing down dual-transport matrix.")
+        logger.debug('[Router] ZERO-LEAKAGE: Tearing down dual-transport matrix.')
         self.primary.disconnect()
         self.fallback.disconnect()
 
-    def safe_run(
-        self,
-        cmd: str,
-        timeout_s: float = 30.0,
-        check_exit_code: bool = False,
-        auto_retry: bool = False,
-        **kwargs: Any
-    ) -> CommandResult:
+    async def async_connect(self) -> None:
+        """Async variant of connect."""
+        if not self.is_connected:
+            logger.info('[Router] Arming dual-transport failover matrix (Async)...')
+            import anyio
+            
+            # Always ensure fallback is connected
+            await self.fallback.async_connect()
+            
+            try:
+                await self.primary.async_connect()
+            except TransportConnectionError:
+                logger.warning('[Router] Primary transport offline during async setup. Matrix starting in FAILOVER mode.')
+                self.is_failed_over = True
+                
+            self._stop_recovery.clear()
+            self._recovery_thread = threading.Thread(target=self._probe_primary_recovery, daemon=True)
+            self._recovery_thread.start()
+            logger.debug('[Router] Dual-transport routing matrix armed.')
+
+    async def async_disconnect(self) -> None:
+        """Async variant of disconnect."""
+        self._stop_recovery.set()
+        import anyio
+        if self._recovery_thread and self._recovery_thread.is_alive():
+            await anyio.to_thread.run_sync(self._recovery_thread.join, 1.0)
+        logger.debug('[Router] ZERO-LEAKAGE: Tearing down dual-transport matrix.')
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(self.primary.async_disconnect)
+            tg.start_soon(self.fallback.async_disconnect)
+
+    def safe_run(self, cmd: str, timeout_s: float=30.0, check_exit_code: bool=False, auto_retry: bool=False, **kwargs: Any) -> CommandResult:
         """Executes a command on the target, failing over to the fallback transport if necessary.
 
         Args:
@@ -112,33 +143,97 @@ class FailoverTransport(DutTransport):
         Raises:
             TransportConnectionError: If the primary transport fails and the command is not marked for auto_retry.
         """
-
-        # If we already failed over earlier in this session, stay on fallback
         if self.is_failed_over:
-            logger.debug("[Router] Routing via Fallback Transport...")
+            logger.debug('[Router] Routing via Fallback Transport...')
             return self.fallback.safe_run(cmd, timeout_s, check_exit_code, auto_retry, **kwargs)
-
         try:
-            # Attempt Primary (SSH)
             return self.primary.safe_run(cmd, timeout_s, check_exit_code, auto_retry, **kwargs)
-
         except TransportConnectionError as e:
-            # THE SURVIVAL EVENT: Primary Shattered physically.
-            logger.critical("="*60)
-            logger.critical(f"[Router] FATAL: Primary transport severed! {e}")
-            logger.critical("[Router] ENGAGING OUT-OF-BAND HARDWARE FALLBACK...")
-            logger.critical("="*60)
-
+            logger.critical('=' * 60)
+            logger.critical('fatal_primary_transport_severed_e', e=e)
+            logger.critical('[Router] ENGAGING OUT-OF-BAND HARDWARE FALLBACK...')
+            logger.critical('=' * 60)
             self.is_failed_over = True
-
-            # Send a carriage return to wake up the serial console login prompt if sleeping
-            logger.debug("[Router] Transmitting wake-up pulse to fallback console...")
-            self.fallback.safe_run("\n", timeout_s=1.0, check_exit_code=False)
-
-            # IDEMPOTENCY GUARD: Only auto-retry if explicitly marked safe
+            logger.debug('[Router] Transmitting wake-up pulse to fallback console...')
+            self.fallback.safe_run('\n', timeout_s=1.0, check_exit_code=False)
             if auto_retry:
-                logger.info(f"[Router] Hardware Failover successful. Retrying idempotent command: '{cmd}'")
+                logger.info('hardware_failover_successful_retrying_idempotent_command_cmd', cmd=cmd)
                 return self.fallback.safe_run(cmd, timeout_s, check_exit_code, auto_retry, **kwargs)
             else:
-                logger.warning(f"[Router] Failover successful, but command '{cmd}' lacks auto_retry=True. Escalating failure to FSM.")
-                raise # Let the FSM catch it, mark the board DIRTY, and force a hard reboot
+                logger.warning('failover_successful_but_command_cmd_lacks_auto_retry_true_escalating_failure_to_fsm', cmd=cmd)
+                raise
+
+    async def async_safe_run(self, cmd: str, timeout_s: float=30.0, check_exit_code: bool=False, auto_retry: bool=False, **kwargs: Any) -> CommandResult:
+        """Async variant of safe_run."""
+        if self.is_failed_over:
+            logger.debug('[Router] Routing via Fallback Transport...')
+            return await self.fallback.async_safe_run(cmd, timeout_s, check_exit_code, auto_retry, **kwargs)
+        try:
+            return await self.primary.async_safe_run(cmd, timeout_s, check_exit_code, auto_retry, **kwargs)
+        except TransportConnectionError as e:
+            logger.critical('=' * 60)
+            logger.critical('fatal_primary_transport_severed_e', e=e)
+            logger.critical('[Router] ENGAGING OUT-OF-BAND HARDWARE FALLBACK...')
+            logger.critical('=' * 60)
+            self.is_failed_over = True
+            logger.debug('[Router] Transmitting wake-up pulse to fallback console...')
+            await self.fallback.async_safe_run('\n', timeout_s=1.0, check_exit_code=False)
+            if auto_retry:
+                logger.info('hardware_failover_successful_retrying_idempotent_command_cmd', cmd=cmd)
+                return await self.fallback.async_safe_run(cmd, timeout_s, check_exit_code, auto_retry, **kwargs)
+            else:
+                logger.warning('failover_successful_but_command_cmd_lacks_auto_retry_true_escalating_failure_to_fsm', cmd=cmd)
+                raise
+
+    # ==========================================
+    # PUB/SUB & OUT-OF-BAND UART PASSTHROUGH
+    # ==========================================
+    # These methods provide immortal access to the Fallback Transport (UART)
+    # regardless of the Primary Transport's (SSH) current state.
+
+    def subscribe(self, maxsize: int = 1024):
+        """Pass-through to Fallback Transport's Pub/Sub subscribe."""
+        if hasattr(self.fallback, 'subscribe'):
+            return self.fallback.subscribe(maxsize)
+        raise NotImplementedError("Fallback transport does not support subscribe().")
+
+    def unsubscribe(self, q) -> None:
+        """Pass-through to Fallback Transport's Pub/Sub unsubscribe."""
+        if hasattr(self.fallback, 'unsubscribe'):
+            return self.fallback.unsubscribe(q)
+
+    def expect(self, pattern: str, timeout_s: float = 5.0, blast_char: str = '', active_redraw: bool = True) -> str:
+        """Pass-through to Fallback Transport's expect()."""
+        if hasattr(self.fallback, 'expect'):
+            return self.fallback.expect(pattern, timeout_s=timeout_s, blast_char=blast_char, active_redraw=active_redraw)
+        raise NotImplementedError("Fallback transport does not support expect().")
+
+    async def async_expect(self, pattern: str, timeout_s: float = 5.0, blast_char: str = '', active_redraw: bool = True) -> str:
+        """Pass-through to Fallback Transport's async_expect()."""
+        if hasattr(self.fallback, 'async_expect'):
+            return await self.fallback.async_expect(pattern, timeout_s=timeout_s, blast_char=blast_char, active_redraw=active_redraw)
+        raise NotImplementedError("Fallback transport does not support async_expect().")
+
+    def write_line(self, cmd: str, sensitive: bool = False) -> None:
+        """Pass-through to Fallback Transport's write_line()."""
+        if hasattr(self.fallback, 'write_line'):
+            return self.fallback.write_line(cmd, sensitive=sensitive)
+        raise NotImplementedError("Fallback transport does not support write_line().")
+
+    def raw_write(self, data: bytes) -> None:
+        """Pass-through to Fallback Transport's raw_write()."""
+        if hasattr(self.fallback, 'raw_write'):
+            return self.fallback.raw_write(data)
+        raise NotImplementedError("Fallback transport does not support raw_write().")
+
+    def raw_read_chunk(self) -> bytes:
+        """Pass-through to Fallback Transport's raw_read_chunk()."""
+        if hasattr(self.fallback, 'raw_read_chunk'):
+            return self.fallback.raw_read_chunk()
+        raise NotImplementedError("Fallback transport does not support raw_read_chunk().")
+
+    def read_clean_stream(self):
+        """Pass-through to Fallback Transport's read_clean_stream()."""
+        if hasattr(self.fallback, 'read_clean_stream'):
+            return self.fallback.read_clean_stream()
+        raise NotImplementedError("Fallback transport does not support read_clean_stream().")

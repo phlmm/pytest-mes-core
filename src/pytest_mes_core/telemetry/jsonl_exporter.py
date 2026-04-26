@@ -1,23 +1,15 @@
-# src/pytest_mes_core/telemetry/jsonl_exporter.py
+import structlog
 import os
 import time
 import logging
 from pathlib import Path
 from datetime import datetime
-
 try:
     import fcntl
 except ImportError:
-    fcntl = None  # Graceful fallback for developers testing on Windows PCs
-
-from pytest_mes_core.telemetry.base import (
-    StationContext,
-    TestRecord,
-    TelemetryDeliveryError,
-    TelemetrySerializationError
-)
-
-logger = logging.getLogger("mes_core.telemetry.jsonl")
+    fcntl = None
+from pytest_mes_core.telemetry.base import StationContext, TestRecord, TelemetryDeliveryError, TelemetrySerializationError
+logger = structlog.get_logger('mes_core.telemetry.jsonl')
 
 class JsonlTelemetryExporter:
     """
@@ -25,6 +17,7 @@ class JsonlTelemetryExporter:
     Atomically appends minified records to disk to survive hard crashes.
     Enforces strict OS-level locks and hardware syncs.
     """
+
     def __init__(self, base_log_dir: Path):
         self.base_log_dir = Path(base_log_dir)
         self.active_file: Path | None = None
@@ -34,85 +27,57 @@ class JsonlTelemetryExporter:
     def context(self) -> StationContext | None:
         return self._context
 
-    # ==========================================
-    # TELEMETRY EXPORTER CONTRACT
-    # ==========================================
     def start_session(self, context: StationContext) -> None:
         """Initializes the session and dynamically generates the file path."""
         self._context = context
-
-        # 🚨 STRATEGY SYNC: Route to 'jsonl_streams' grouped by day
-        date_str = datetime.now().strftime("%Y-%m-%d")
-        session_dir = self.base_log_dir / "jsonl_streams" / date_str
+        date_str = datetime.now().strftime('%Y-%m-%d')
+        session_dir = self.base_log_dir / 'jsonl_streams' / date_str
         session_dir.mkdir(parents=True, exist_ok=True)
-
-        # 🚨 STRATEGY SYNC: Pure UUID filename so log shippers never double-read
-        self.active_file = session_dir / f"{context.run_id}.jsonl"
-
-        logger.info(f"[Telemetry] Session armed. Streaming localized JSONL to {self.active_file}")
+        self.active_file = session_dir / f'{context.run_id}.jsonl'
+        logger.info('session_armed_streaming_localized_jsonl_to_active_file', active_file=self.active_file)
 
     def emit_record(self, record: TestRecord) -> None:
         """Serializes and flushes a single payload to the active file."""
-        # 1. Defensive Serialization
         if not self.active_file:
-            err_msg = "Attempted to emit record before starting telemetry session."
-            logger.critical(f"[Telemetry] FATAL: {err_msg}")
+            err_msg = 'Attempted to emit record before starting telemetry session.'
+            logger.critical('fatal_err_msg', err_msg=err_msg)
             raise TelemetryDeliveryError(err_msg)
-
         try:
-            # Pydantic natively handles Enums, bytes, and JSON encoding flawlessly
-            payload_str = record.model_dump_json(exclude_none=True) + "\n"
+            payload_str = record.model_dump_json(exclude_none=True) + '\n'
         except Exception as e:
-            logger.critical("="*60)
-            logger.critical(f"[Telemetry] FATAL: Pydantic Serialization Failure!")
-            logger.critical(f"[Telemetry] Failed to encode record for test: {record.test_name}")
-            logger.critical(f"[Telemetry] Exception: {e}")
-            logger.critical("="*60)
-            raise TelemetrySerializationError(f"Failed to serialize record for {record.test_name}")
-
-        # Matrix Tracing: Show the payload moving to disk (visible in -vv)
-        logger.debug(f"[Telemetry] TX -> Flushing record '{record.test_name}' to SSD...")
-
-        # 2. Atomic Physical Write
+            logger.critical('=' * 60)
+            logger.critical('fatal_pydantic_serialization_failure')
+            logger.critical('failed_to_encode_record_for_test_test_name', test_name=record.test_name)
+            logger.critical('exception_e', e=e)
+            logger.critical('=' * 60)
+            raise TelemetrySerializationError(f'Failed to serialize record for {record.test_name}')
+        logger.debug('tx_flushing_record_test_name_to_ssd', test_name=record.test_name)
         try:
             self._atomic_append(self.active_file, payload_str)
         except OSError as e:
-            # 🚨 FORENSIC HOST PC INTERCEPTOR 🚨
-            logger.critical("="*60)
-            logger.critical(f"[Telemetry] FATAL: HOST PC DISK WRITE FAILED!")
-            logger.critical(f"[Telemetry] Target: {self.active_file}")
-            logger.critical(f"[Telemetry] Is the factory PC hard drive full? Is the SSD dead/read-only?")
-            logger.critical(f"[Telemetry] OS Error: {e}")
-            logger.critical("="*60)
-
+            logger.critical('=' * 60)
+            logger.critical('fatal_host_pc_disk_write_failed')
+            logger.critical('target_active_file', active_file=self.active_file)
+            logger.critical('is_the_factory_pc_hard_drive_full_is_the_ssd_dead_read_only')
+            logger.critical('os_error_e', e=e)
+            logger.critical('=' * 60)
             self._execute_emergency_dump(payload_str)
-
-            # We raise the Domain Exception so the master framework knows the telemetry backend is crippled
-            raise TelemetryDeliveryError("Telemetry flush failed! Disk full? Emergency dump attempted.")
+            raise TelemetryDeliveryError('Telemetry flush failed! Disk full? Emergency dump attempted.')
 
     def end_session(self, session_passed: bool) -> None:
         """Finalizes the run. (JSONL does not require EOF markers, so we just log it)."""
-        logger.info(f"[Telemetry] Machine stream finalized. Overall Result: {'PASS' if session_passed else 'FAIL'}")
+        logger.info('machine_stream_finalized_overall_result_val', val='PASS' if session_passed else 'FAIL')
 
-    # ==========================================
-    # INTERNAL HARDWARE I/O HELPERS
-    # ==========================================
     def _atomic_append(self, filepath: Path, payload: str) -> None:
         """Writes data to the physical silicon with extreme paranoia."""
-        with open(filepath, "a", encoding="utf-8") as f:
-            # 1. Blocking OS-level lock (prevents overlapping writes if parallel Pytest workers are running)
+        with open(filepath, 'a', encoding='utf-8') as f:
             if fcntl:
                 fcntl.flock(f, fcntl.LOCK_EX)
-
             try:
-                # 2. Write to Python buffer
                 f.write(payload)
-                # 3. Flush to OS Page Cache
                 f.flush()
-                # 4. DEFENSIVE: Force OS to write Page Cache to physical silicon
                 os.fsync(f.fileno())
             finally:
-                # 5. Guarantee lock release even if the disk errors out during write
                 if fcntl:
                     fcntl.flock(f, fcntl.LOCK_UN)
 
@@ -122,22 +87,18 @@ class JsonlTelemetryExporter:
         Args:
             payload: The string payload to salvage.
         """
-        fallback_file = Path(f"/tmp/mes_emergency_dump_{int(time.time())}_{os.getpid()}.jsonl")
-        logger.critical(f"[Telemetry] Executing RAM-disk emergency dump to {fallback_file}...")
-
+        fallback_file = Path(f'/tmp/mes_emergency_dump_{int(time.time())}_{os.getpid()}.jsonl')
+        logger.critical('executing_ram_disk_emergency_dump_to_fallback_file', fallback_file=fallback_file)
         try:
-            # We don't bother locking /tmp, we just need the data to survive
-            with open(fallback_file, "a", encoding="utf-8") as fb:
+            with open(fallback_file, 'a', encoding='utf-8') as fb:
                 fb.write(payload)
                 fb.flush()
                 os.fsync(fb.fileno())
-            logger.critical(f"[Telemetry] Emergency dump successful. Data survived in RAM.")
+            logger.critical('emergency_dump_successful_data_survived_in_ram')
         except OSError as e:
-            # If /tmp is full (e.g., Out of RAM), we are completely dead.
-            # Log it so at least journalctl catches the telemetry string.
-            logger.critical("="*60)
-            logger.critical(f"[Telemetry] FATAL: TOTAL HOST PC CATASTROPHE!")
-            logger.critical(f"[Telemetry] Emergency RAM-disk dump failed: {e}")
-            logger.critical(f"[Telemetry] RAW PAYLOAD SALVAGE:")
+            logger.critical('=' * 60)
+            logger.critical('fatal_total_host_pc_catastrophe')
+            logger.critical('emergency_ram_disk_dump_failed_e', e=e)
+            logger.critical('raw_payload_salvage')
             logger.critical(payload.strip())
-            logger.critical("="*60)
+            logger.critical('=' * 60)

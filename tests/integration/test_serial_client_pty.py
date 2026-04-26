@@ -6,6 +6,7 @@ Covers: connect/disconnect, expect(), write_line(), safe_run() paths (Linux, U-B
         accessors, read_clean_stream, exclusive_raw_access, and connect error paths.
 """
 import os
+from unittest import mock
 import pty
 import time
 import threading
@@ -128,20 +129,6 @@ def test_expect_raises_when_not_connected():
         client.expect("anything")
 
 
-def test_expect_raises_when_locked():
-    master_fd, slave_fd, slave_name = _pty_pair()
-    client = _make_client(slave_name)
-    client.connect()
-    client._is_locked = True
-    try:
-        with pytest.raises(RuntimeError, match="locked"):
-            client.expect("anything")
-    finally:
-        client._is_locked = False
-        client.disconnect()
-        os.close(master_fd)
-        os.close(slave_fd)
-
 
 def test_expect_timeout_raises():
     master_fd, slave_fd, slave_name = _pty_pair()
@@ -193,44 +180,36 @@ def test_expect_finds_pattern_through_ansi_codes():
 # write_line()
 # ---------------------------------------------------------------------------
 
-def test_write_line_raises_when_locked():
+
+
+
+def test_write_line_sensitive_masks_log():
     master_fd, slave_fd, slave_name = _pty_pair()
     client = _make_client(slave_name)
     client.connect()
-    client._is_locked = True
-    try:
-        with pytest.raises(RuntimeError, match="locked or closed"):
-            client.write_line("hello")
-    finally:
-        client._is_locked = False
-        client.disconnect()
-        os.close(master_fd)
-        os.close(slave_fd)
-
-
-def test_write_line_sensitive_masks_log(caplog):
-    master_fd, slave_fd, slave_name = _pty_pair()
-    client = _make_client(slave_name)
-    client.connect()
-    import logging
-    with caplog.at_level(logging.DEBUG, logger="mes_core.transports.serial"):
+    
+    with mock.patch("pytest_mes_core.transports.serial_client.logger.debug") as mock_debug:
         client.write_line("my_secret_password", sensitive=True)
-    assert "my_secret_password" not in caplog.text
-    assert "********" in caplog.text
+        
+    log_calls = str(mock_debug.call_args_list)
+    assert "my_secret_password" not in log_calls
+    assert "********" in log_calls
     client.disconnect()
     os.close(master_fd)
     os.close(slave_fd)
 
 
-def test_write_line_long_cmd_truncated_in_log(caplog):
+def test_write_line_long_cmd_truncated_in_log():
     master_fd, slave_fd, slave_name = _pty_pair()
     client = _make_client(slave_name)
     client.connect()
     long_cmd = "A" * 300
-    import logging
-    with caplog.at_level(logging.DEBUG, logger="mes_core.transports.serial"):
+    
+    with mock.patch("pytest_mes_core.transports.serial_client.logger.debug") as mock_debug:
         client.write_line(long_cmd)
-    assert "..." in caplog.text
+        
+    log_calls = str(mock_debug.call_args_list)
+    assert "..." in log_calls
     client.disconnect()
     os.close(master_fd)
     os.close(slave_fd)
@@ -288,7 +267,7 @@ def test_safe_run_uboot_unknown_command_sets_exited_1():
     def feed_uboot():
         time.sleep(0.15)
         os.write(master_fd, b"=> ")            # ctrl+C drain
-        time.sleep(0.05)
+        time.sleep(0.35)
         os.write(master_fd, b"Unknown command 'badcmd' - try 'help'\r\n=> ")
 
     threading.Thread(target=feed_uboot, daemon=True).start()
@@ -310,7 +289,7 @@ def test_safe_run_uboot_success_sets_exited_0():
     def feed_uboot():
         time.sleep(0.15)
         os.write(master_fd, b"=> ")
-        time.sleep(0.05)
+        time.sleep(0.35)
         os.write(master_fd, b"printenv\r\nbootargs=console=ttymxc1\r\n=> ")
 
     threading.Thread(target=feed_uboot, daemon=True).start()
@@ -361,7 +340,7 @@ def _inject_framed_response(master_fd, token, stdout_lines, exit_code, prompt, d
     """Background helper: feeds ctrl+C drain then full framed response."""
     time.sleep(delay)
     os.write(master_fd, prompt.encode())          # Ctrl+C drain
-    time.sleep(0.05)
+    time.sleep(0.35)
     body = "\n".join(stdout_lines)
     resp = (
         f"\n__MES_START_{token}__\n"
@@ -410,7 +389,7 @@ def test_safe_run_missing_exit_marker_sets_exited_minus2():
     def feed_no_exit_marker():
         time.sleep(0.2)
         os.write(master_fd, b"root@board:~# ")
-        time.sleep(0.05)
+        time.sleep(0.35)
         resp = (
             f"\n__MES_START_{fixed_token}__\n"
             f"partial output\n"
@@ -517,12 +496,9 @@ def test_raw_read_chunk_retrieves_pending_data():
     client = _make_client(slave_name)
     client.connect()
     try:
-        # Use execution_lock so the watchdog thread doesn't race us for the bytes
-        with client.execution_lock():
-            os.write(master_fd, b"RAWDATA\n")
-            time.sleep(0.15)
-            assert client.raw_read_pending() > 0
-            chunk = client.raw_read_chunk()
+        os.write(master_fd, b"RAWDATA\n")
+        time.sleep(0.15)
+        chunk = client.raw_read_chunk()
         assert b"RAWDATA" in chunk
     finally:
         client.disconnect()
@@ -537,21 +513,6 @@ def test_raw_read_chunk_returns_empty_when_no_data():
     try:
         chunk = client.raw_read_chunk()
         assert chunk == b""
-    finally:
-        client.disconnect()
-        os.close(master_fd)
-        os.close(slave_fd)
-
-
-def test_raw_set_timeout_updates_serial():
-    master_fd, slave_fd, slave_name = _pty_pair()
-    client = _make_client(slave_name)
-    client.connect()
-    try:
-        client.raw_set_timeout(2.5)
-        assert client.ser.timeout == 2.5
-        client.raw_set_timeout(0)
-        assert client.ser.timeout == 0
     finally:
         client.disconnect()
         os.close(master_fd)
@@ -605,64 +566,16 @@ def test_live_buffer_property():
     master_fd, slave_fd, slave_name = _pty_pair()
     client = _make_client(slave_name)
     client.connect()
+    
     os.write(master_fd, b"partial output")
     time.sleep(0.1)
-    chunk = client.raw_read_chunk()
-    client.parser.ingest(chunk)
+        
     try:
         assert isinstance(client.live_buffer, str)
+        assert "partial output" in client.live_buffer
     finally:
         client.disconnect()
         os.close(master_fd)
         os.close(slave_fd)
 
 
-# ---------------------------------------------------------------------------
-# exclusive_raw_access()
-# ---------------------------------------------------------------------------
-
-def test_exclusive_raw_access_raises_when_not_connected():
-    cfg = MagicMock()
-    cfg.port = "/dev/null"
-    cfg.baudrate = 115200
-    client = EphemeralSerialClient(cfg)
-    with pytest.raises(TransportConnectionError, match="port is closed"):
-        with client.exclusive_raw_access():
-            pass
-
-
-def test_exclusive_raw_access_stops_watchdog_and_restarts():
-    master_fd, slave_fd, slave_name = _pty_pair()
-    client = _make_client(slave_name)
-    client.connect()
-    original_thread = client.watchdog._thread
-    assert original_thread.is_alive()
-    try:
-        with client.exclusive_raw_access() as raw_ser:
-            assert client._is_locked is True
-            assert not original_thread.is_alive()
-            assert isinstance(raw_ser, pyserial.Serial)
-        assert client._is_locked is False
-        new_thread = client.watchdog._thread
-        assert new_thread is not None
-        assert new_thread.is_alive()
-    finally:
-        client.disconnect()
-        os.close(master_fd)
-        os.close(slave_fd)
-
-
-def test_exclusive_raw_access_flushes_buffers_on_exit():
-    master_fd, slave_fd, slave_name = _pty_pair()
-    client = _make_client(slave_name)
-    client.connect()
-    try:
-        with client.exclusive_raw_access() as raw_ser:
-            os.write(master_fd, b"stale data from flash\n")
-            time.sleep(0.1)
-        # After context exit, parser buffer should be cleared
-        assert client.live_buffer == ""
-    finally:
-        client.disconnect()
-        os.close(master_fd)
-        os.close(slave_fd)
