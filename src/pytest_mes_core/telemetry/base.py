@@ -1,7 +1,7 @@
 # src/pytest_mes_core/telemetry/base.py
 import time
 from datetime import datetime, timezone
-from typing import Dict, Any, Protocol, Optional
+from typing import Dict, Any, Protocol, Optional, Union
 from pydantic import BaseModel, Field, ConfigDict, model_validator
 from pytest_mes_core.protocols.base import ValidatorResult
 
@@ -65,7 +65,7 @@ class TestRecord(BaseModel):
     result: Optional[ValidatorResult] = Field(default=None, exclude=True)
 
     station_context: Optional[StationContext] = None
-    metrics: Dict[str, float] = Field(default_factory=dict)
+    metrics: Dict[str, Union[float, int, str]] = Field(default_factory=dict)
     context: Dict[str, Any] = Field(default_factory=dict)
     timestamp_utc: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 

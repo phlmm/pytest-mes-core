@@ -54,7 +54,12 @@ def dut_state_machine(request: pytest.FixtureRequest, mes_env: StationEnvironmen
                 from pytest_mes_core.telemetry.base import TestRecord
                 record = TestRecord(test_name='mes_fsm_boot_profiler', passed=True, duration_s=sm.boot_metrics.get('t_boot_total_to_shell_s', 0.0), metrics=sm.boot_metrics, context={})
                 sink.emit_record(record)
-        sm.power_off()
+        try:
+            sm.power_off()
+        except KeyboardInterrupt:
+            logger.warning("power_off_interrupted_by_ctrl_c", action="teardown_continuing")
+        except Exception as e:
+            logger.error("power_off_failed_during_teardown", error=str(e))
 
 @pytest.fixture(autouse=True)
 def enforce_physical_state(request: pytest.FixtureRequest, dut_state_machine: Optional[EmbeddedLinuxStateMachine]) -> Generator[None, None, None]:

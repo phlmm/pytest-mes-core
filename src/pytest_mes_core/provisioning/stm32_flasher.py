@@ -50,8 +50,15 @@ class Stm32Provisioner:
             self.swd.resume()
             return True
             
+        except KeyboardInterrupt:
+            logger.error('STM32 flash interrupted by operator (Ctrl+C). Attempting to halt probe...')
+            try:
+                self.swd.halt()
+            except Exception:
+                pass
+            return False
         except Exception as e:
-            logger.error("Failed to flash STM32", error=str(e))
+            logger.error('Failed to flash STM32', error=str(e))
             return False
 
     def _log_progress(self, progress: float) -> None:

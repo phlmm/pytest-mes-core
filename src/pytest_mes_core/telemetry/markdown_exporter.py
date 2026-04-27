@@ -35,7 +35,9 @@ class DeveloperMarkdownExporter:
         report_dir = self.base_log_dir / 'bringup_reports' / date_str
         report_dir.mkdir(parents=True, exist_ok=True)
         self.filepath = report_dir / f'Bringup_{time_str}_SN-{context.dut_serial}_{context.run_id}.md'
-        header = f'# MES Bring-up Report\n**Run ID:** `{context.run_id}`  \n**Jig ID:** `{context.jig_id}` | **Operator:** `{context.operator_id}`  \n**DUT Serial:** `{context.dut_serial}` | **FW Version:** `{context.firmware_version}`\n\n---\n\n'
+        hw_sn = context.dut_manifest.get('HW_SN_CARRIER', '') if context.dut_manifest else ''
+        hw_sn_line = f'  \n**PCB HW SN:** `{hw_sn}`' if hw_sn else ''
+        header = f'# MES Bring-up Report\n**Run ID:** `{context.run_id}`  \n**Jig ID:** `{context.jig_id}` | **Operator:** `{context.operator_id}`  \n**DUT Serial:** `{context.dut_serial}` | **FW Version:** `{context.firmware_version}`{hw_sn_line}\n\n---\n\n'
         with open(self.filepath, 'w', encoding='utf-8') as f:
             f.write(header)
 
@@ -92,7 +94,9 @@ class DeveloperMarkdownExporter:
             footer += '## Hardware Manifest (Station BOM)\n'
             footer += '| Component | Identifier |\n|---|---|\n'
             for k, v in self._context.dut_manifest.items():
-                if v:
+                # Skip nested dicts (e.g. a software_manifest that slipped through)
+                # and blank values — only flat scalar hardware identifiers belong here.
+                if v and not isinstance(v, dict):
                     pretty_key = k.replace('_', ' ').title()
                     footer += f'| `{pretty_key}` | **{v}** |\n'
             footer += '\n'
@@ -115,7 +119,9 @@ class DeveloperMarkdownExporter:
             run_id = self._context.run_id if self._context else 'UNKNOWN_RUN'
             safe_operator = self._context.operator_id.replace('/', '_') if self._context else 'UNKNOWN'
             serial = self._context.dut_serial if self._context else 'PENDING'
-            final_name = f'{status}_{time_str}_{safe_operator}_SN-{serial}_{run_id}.md'
+            hw_sn = self._context.dut_manifest.get('HW_SN_CARRIER', '') if (self._context and self._context.dut_manifest) else ''
+            hw_sn_part = f'_HW-{hw_sn}' if hw_sn else ''
+            final_name = f'{status}_{time_str}_{safe_operator}_SN-{serial}{hw_sn_part}_{run_id}.md'
             final_path = self.filepath.parent / final_name
             self.filepath.rename(final_path)
             self.filepath = final_path

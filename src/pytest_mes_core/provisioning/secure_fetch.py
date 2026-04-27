@@ -95,6 +95,10 @@ class SecureAssetFetcher:
                 raise SecureFetchError(f'HTTP {e.code} - Cannot fetch firmware.')
             logger.error('transient_server_error_http_code_reason', code=e.code, reason=e.reason)
             raise
+        except KeyboardInterrupt:
+            logger.warning('download_interrupted_by_operator', action='destroying_partial_file')
+            temp_dest.unlink(missing_ok=True)
+            raise SecureFetchError('Firmware download interrupted by operator (Ctrl+C).')
         except Exception as e:
             logger.error('network_io_failure_mid_stream_e', e=e)
             raise SecureFetchError(f'Failed to fetch asset: {e}')

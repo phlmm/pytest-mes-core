@@ -35,13 +35,13 @@ class GitAuthConfig(BaseModel):
         return self.token.get_secret_value() if self.token else None
 
 class StateMachineConfig(BaseHardwareConfig):
-    bootloader_prompt: str = Field(default="=> ")
+    bootloader_prompt: str = Field(default="=>")
     bootloader_interrupt_pattern: str = Field(default="stop autoboot")
     bootloader_interrupt_char: str = Field(default="\n")
     bootloader_boot_cmd: str = Field(default="boot")
 
-    os_login_prompt: str = Field(default="login: ")
-    os_password_prompt: str = Field(default="Password: ")
+    os_login_prompt: str = Field(default="login:")
+    os_password_prompt: str = Field(default="Password:")
     os_shell_prompt: str = Field(default="root@")
     os_user: str = Field(default="root")
 

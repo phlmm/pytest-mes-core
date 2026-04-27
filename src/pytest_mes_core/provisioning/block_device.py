@@ -47,7 +47,10 @@ class BmapBlockDeviceProvisioner(BaseProvisioner):
                     logger.warning('host_block_device_is_currently_mounted_attempting_unmount', host_block_device=self.host_block_device)
                     umount_cmd = f'umount {self.host_block_device}*'
                     logger.debug('executing_umount_cmd', umount_cmd=umount_cmd)
-                    subprocess.run(umount_cmd, shell=True, stderr=subprocess.DEVNULL)
+                    try:
+                        subprocess.run(umount_cmd, shell=True, stderr=subprocess.DEVNULL)
+                    except KeyboardInterrupt:
+                        raise ProvisioningError('Unmount operation interrupted by operator (Ctrl+C).')
                     with open('/proc/mounts', 'r') as f2:
                         if self.host_block_device in f2.read():
                             err_msg = f"Failed to unmount {self.host_block_device}. Device is busy (Check 'lsof')."
@@ -91,10 +94,13 @@ class BmapBlockDeviceProvisioner(BaseProvisioner):
                     raise ProvisioningError('Permission denied. Pytest must be run with sudo/root for block level access.')
                 else:
                     raise ProvisioningError(f'bmaptool execution failed with code {process.returncode}.')
-            logger.info('\n[Provisioning] Flash successful. Forcing kernel sync to flush RAM buffers to silicon...')
-            subprocess.run(['sync'], check=True)
-            logger.info('[Provisioning] Forcing kernel to rescan partition table geometry...')
-            subprocess.run(['partprobe', self.host_block_device], check=False)
+            try:
+                logger.info('\n[Provisioning] Flash successful. Forcing kernel sync to flush RAM buffers to silicon...')
+                subprocess.run(['sync'], check=True)
+                logger.info('[Provisioning] Forcing kernel to rescan partition table geometry...')
+                subprocess.run(['partprobe', self.host_block_device], check=False)
+            except KeyboardInterrupt:
+                raise ProvisioningError('Post-flash sync/partprobe interrupted by operator (Ctrl+C).')
             logger.info('image_successfully_provisioned_and_synced_in_duration_s_s', duration_s=process.duration_s)
         except ProcessTimeoutError:
             raise ProvisioningError('Block device flash timed out. Is the SD card physically defective?')

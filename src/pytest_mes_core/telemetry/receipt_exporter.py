@@ -59,10 +59,13 @@ class OperatorReceiptExporter:
         run_id = self._context.run_id
         safe_operator = self._context.operator_id.replace('/', '_')
         serial = self._context.dut_serial
-        filename = f'{status}_{time_str}_{safe_operator}_SN-{serial}_{run_id}.txt'
+        hw_sn = self._context.dut_manifest.get('HW_SN_CARRIER', '') if self._context.dut_manifest else ''
+        hw_sn_part = f'_HW-{hw_sn}' if hw_sn else ''
+        filename = f'{status}_{time_str}_{safe_operator}_SN-{serial}{hw_sn_part}_{run_id}.txt'
         filepath = receipt_dir / filename
         duration = round(time.perf_counter() - self.start_time, 2) if self.start_time else 0.0
-        receipt_body = f'=== EOL TEST RECEIPT ===\nRun ID       : {run_id}\nStatus       : {status}\nJig ID       : {self._context.jig_id}\nOperator     : {self._context.operator_id}\nDUT Serial   : {serial}\nDuration     : {duration} seconds\n------------------------\nTotal Tests  : {self.total_tests}\nFailed Tests : {self.failed_tests}\n========================\n'
+        hw_sn_line = f'PCB HW SN    : {hw_sn}\n' if hw_sn else ''
+        receipt_body = f'=== EOL TEST RECEIPT ===\nRun ID       : {run_id}\nStatus       : {status}\nJig ID       : {self._context.jig_id}\nOperator     : {self._context.operator_id}\nDUT Serial   : {serial}\n{hw_sn_line}Duration     : {duration} seconds\n------------------------\nTotal Tests  : {self.total_tests}\nFailed Tests : {self.failed_tests}\n========================\n'
         with open(filepath, 'w', encoding='utf-8') as f:
             f.write(receipt_body)
         logger.warning('generated_operator_receipt_name', name=filepath.name)

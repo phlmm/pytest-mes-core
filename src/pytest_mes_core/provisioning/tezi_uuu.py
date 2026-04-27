@@ -4,7 +4,7 @@ import time
 import logging
 import subprocess
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 from pytest_mes_core.provisioning.base import BaseProvisioner, ProvisioningError
 from pytest_mes_core.utils.process import LiveProcess, ProcessTimeoutError, ProcessExecutionError
 from pytest_mes_core.transports.serial_client import EphemeralSerialClient
@@ -53,19 +53,26 @@ class UuuTeziProvisioner(BaseProvisioner):
             logger.critical('err_msg', err_msg=err_msg)
             raise ProvisioningError(err_msg)
 
-    def provision(self, image_path: Path, serial_client: Optional[EphemeralSerialClient]=None, success_prompt: str='login:') -> bool:
-        """Pushes TEZI images into SoC RAM via USB Serial Downloader mode.
+    def provision(self, image_path: Path, serial_client: Optional[EphemeralSerialClient] = None,
+                  success_prompt: str = 'login:', fsm: Optional[Any] = None) -> bool:
+        """
+        Pushes TEZI images into SoC RAM via USB Serial Downloader mode.
 
         Hardware Flow:
             1. Blocks until the DUT physical USB enumerates in NXP Recovery Mode.
             2. Executes 'uuu' targeting the specific USB port and TEZI folder.
             3. Uses LiveProcess to handle telemetry and artifact dumping.
-            4. Optionally locks the UART and tails the OS boot until success_prompt is found.
+            4. Calls fsm.release_recovery() so the FSM/strategy decides whether to
+               auto-release a GPIO pin or prompt the operator to remove a jumper.
+            5. Optionally locks the UART and tails the OS boot until success_prompt is found.
 
         Args:
-            image_path: The directory containing the TEZI payload and uuu.auto script.
-            serial_client: Optional UART client to tail the live log for a success signature.
+            image_path:     The directory containing the TEZI payload and uuu.auto script.
+            serial_client:  Optional UART client to tail the live log for a success signature.
             success_prompt: The prompt to wait for before considering the boot successful.
+            fsm:            Optional FSM instance.  When supplied, release_recovery() is called
+                            after payload delivery so the configured RecoveryStrategy can
+                            release the strap (GPIO no-op or manual-jumper prompt).
 
         Returns:
             bool: True if the provisioning completes successfully.
@@ -92,7 +99,10 @@ class UuuTeziProvisioner(BaseProvisioner):
             if self._is_device_in_recovery():
                 device_found = True
                 break
-            time.sleep(0.5)
+            try:
+                time.sleep(0.5)
+            except KeyboardInterrupt:
+                raise ProvisioningError("USB polling interrupted by operator (Ctrl+C).")
         if not device_found:
             err_msg = f'Timeout waiting for USB Recovery mode{target_str}. Is the boot jumper set?'
             logger.critical('fatal_err_msg', err_msg=err_msg)
@@ -115,6 +125,10 @@ class UuuTeziProvisioner(BaseProvisioner):
                 logger.critical('tezi_fatal_uuu_falsely_exited_0_payload_never_executed_trace_saved_to_log_path', log_path=log_path)
                 raise ProvisioningError("uuu script failed to execute fully. Missing 'Done' confirmation.")
             logger.info('tezi_flash_successfully_pushed_to_soc_ram_in_duration_s_s', duration_s=process.duration_s)
+            # Delegate strap-release to the FSM's RecoveryStrategy.  GPIO-automated
+            # stations are a no-op; manual-jumper stations show the operator prompt.
+            if fsm is not None:
+                fsm.release_recovery()
         except ProcessTimeoutError:
             raise ProvisioningError(f'uuu execution timed out after {self.flash_timeout_s}s! USB EMI reset?')
         except ProcessExecutionError as e:
@@ -171,7 +185,15 @@ class UuuTeziProvisioner(BaseProvisioner):
                             except Exception as e:
                                 logger.warning('uart_write_blocked_e', e=e)
                     elif event.prompt_type in ("success_installed", "success_rebooting", "success_prompt"):
-                        logger.info('[TEZI] Installation Success Signature detected!')
+                        logger.info('[TEZI] Installation Success Signature detected! TEZI flash complete.')
+                        if fsm is not None:
+                            # The TEZI installer has finished and the board is rebooting
+                            # into the newly-flashed eMMC.  The framework has no further
+                            # control over the autonomous TEZI process — this is the
+                            # correct point to exit RECOVERY state.
+                            from pytest_mes_core.state_machine import DutState
+                            fsm.state = DutState.ENERGIZED
+                            logger.info('fsm_state_advanced_recovery_to_energized')
                         return True
 
             logger.critical(

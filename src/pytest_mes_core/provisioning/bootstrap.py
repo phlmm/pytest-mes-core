@@ -106,8 +106,11 @@ class HardwareBootstrapper:
             logger.debug('releasing_reset_line_value_reset_release_val_silicon_sampling_boot_pins_now', reset_release_val=reset_release_val)
             r_line.set_value(reset_release_val)
             time.sleep(0.5)
-        except Exception as e:
-            err_msg = f'Failed to toggle physical bootstrap pins: {e}'
+        except (KeyboardInterrupt, Exception) as e:
+            if isinstance(e, KeyboardInterrupt):
+                err_msg = 'Bootstrap GPIO sequencing interrupted by operator (Ctrl+C).'
+            else:
+                err_msg = f'Failed to toggle physical bootstrap pins: {e}'
             logger.critical('fatal_err_msg', err_msg=err_msg)
             raise ProvisioningError(err_msg)
         finally:

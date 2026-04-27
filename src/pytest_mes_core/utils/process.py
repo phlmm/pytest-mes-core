@@ -69,6 +69,13 @@ class LiveProcess:
             proc.wait()
             self.returncode = -1
             raise ProcessTimeoutError(f'Command timed out: {self.cmd_str}')
+        except KeyboardInterrupt:
+            # Ctrl+C: kill the child immediately so it doesn't become an orphan,
+            # then let the finally block run before propagating the interrupt.
+            proc.kill()
+            proc.wait()
+            self.returncode = -1
+            raise
         except Exception as e:
             self.logger.critical(f'\n[OS] FATAL: Subprocess failure: {e}')
             self.returncode = -2

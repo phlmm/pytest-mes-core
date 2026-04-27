@@ -52,7 +52,11 @@ class DaemonProcess:
                 self.logger.critical(f'[Daemon] FATAL: {err_msg}')
                 raise DaemonStartupError(err_msg)
         else:
-            time.sleep(0.5)
+            try:
+                time.sleep(0.5)
+            except KeyboardInterrupt:
+                self.stop()
+                raise DaemonStartupError('Daemon startup interrupted by operator (Ctrl+C).')
             if self.proc.poll() is not None:
                 retcode = self.proc.returncode
                 self.stop()

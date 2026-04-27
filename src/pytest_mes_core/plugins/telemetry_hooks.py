@@ -69,11 +69,34 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]) ->
                 html_parts.append(f"<span style='color: gray'>RootFS: {record.context['active_rootfs']}</span>")
             if 'boot_medium' in record.context:
                 html_parts.append(f"<span style='color: gray'>Boot: {record.context['boot_medium']}</span>")
+
+            # Merge metrics from both sources:
+            #   record.metrics  — direct dict populated by any test (e.g. calib_* from test_08)
+            #   record.result.metrics — from ValidatorResult.absorb() (e.g. hardware validators)
+            # record.metrics takes precedence on key conflicts.
+            merged_metrics: dict = {}
             if record.result and record.result.metrics:
+                merged_metrics.update(record.result.metrics)
+            if record.metrics:
+                merged_metrics.update(record.metrics)
+
+            if merged_metrics:
                 if html_parts:
                     html_parts.append("<hr style='margin: 4px 0; border: 0; border-top: 1px solid #ccc;'>")
-                metrics_html = '<br>'.join([f'<b>{k}:</b> {v}' for k, v in record.result.metrics.items()])
-                html_parts.append(metrics_html)
+                # Split calib_ keys into their own block for visual separation
+                hw_metrics = {k: v for k, v in merged_metrics.items() if not k.startswith('calib_')}
+                calib_metrics = {k: v for k, v in merged_metrics.items() if k.startswith('calib_')}
+                if hw_metrics:
+                    html_parts.append('<br>'.join([f'<b>{k}:</b> {v}' for k, v in hw_metrics.items()]))
+                if calib_metrics:
+                    if hw_metrics:
+                        html_parts.append("<hr style='margin: 4px 0; border: 0; border-top: 1px dashed #aaa;'>")
+                    html_parts.append("<span style='color:#555;font-size:0.9em'><b>Calibration</b></span>")
+                    html_parts.append('<br>'.join([
+                        f"<span style='color:#555'><b>{k[6:]}:</b> {v}</span>"  # strip 'calib_' prefix for display
+                        for k, v in calib_metrics.items()
+                    ]))
+
             if html_parts:
                 rep.custom_metrics_html = '<br>'.join(html_parts)
 

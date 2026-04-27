@@ -56,7 +56,12 @@ def dut_manifest(dut_transport, dut_state_machine, dut_manifest_scraper: Tuple[T
         _cached_manifest = scraper.harvest()
         if telemetry_sink and telemetry_sink.context:
             telemetry_sink.context.dut_serial = _cached_manifest.serial_number
-            telemetry_sink.context.dut_manifest = _cached_manifest.model_dump()
+            hw_dict = _cached_manifest.model_dump()
+            # Strip software_manifest — it lives in its own section of the report.
+            # Leaving it in dut_manifest would cause it to render inside the
+            # Hardware Manifest (Station BOM) table.
+            hw_dict.pop('software_manifest', None)
+            telemetry_sink.context.dut_manifest = hw_dict
             telemetry_sink.context.software_manifest = getattr(_cached_manifest, 'software_manifest', {})
             logger.info('live_telemetry_stream_updated_for_sn_serial_number', serial_number=_cached_manifest.serial_number)
         return _cached_manifest

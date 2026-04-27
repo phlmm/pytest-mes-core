@@ -86,21 +86,68 @@ def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line('markers', 'requires_state(state): Enforces physical hardware state (DutState) before test execution.')
     config.addinivalue_line('markers', 'hardware_retry(retries): If a test fails, marks hardware DIRTY, forces a cold-boot, and retries.')
     config.option.log_cli = True
-    config.option.log_cli_format = '%(asctime)s [%(levelname)7s] %(name)s: %(message)s'
+    config.option.log_cli_format = '%(asctime)s [%(levelname)-8s] %(name)s: %(message)s'
     config.option.log_cli_date_format = '%H:%M:%S'
+
     verbosity = config.getoption('verbose')
     if verbosity == 0:
-        config.option.log_cli_level = 'WARNING'
-        logging.getLogger('transitions').setLevel(logging.WARNING)
-        logging.getLogger('paramiko').setLevel(logging.WARNING)
+        _level = logging.WARNING
+        _level_name = 'WARNING'
     elif verbosity == 1:
-        config.option.log_cli_level = 'INFO'
-        logging.getLogger('transitions').setLevel(logging.INFO)
-        logging.getLogger('paramiko').setLevel(logging.INFO)
+        _level = logging.INFO
+        _level_name = 'INFO'
     else:
-        config.option.log_cli_level = 'DEBUG'
-        logging.getLogger('transitions').setLevel(logging.DEBUG)
-        logging.getLogger('paramiko').setLevel(logging.DEBUG)
+        _level = logging.DEBUG
+        _level_name = 'DEBUG'
+
+    # ── stdlib logging ────────────────────────────────────────────────────────
+    config.option.log_cli_level = _level_name
+    logging.getLogger('transitions').setLevel(_level)
+    logging.getLogger('paramiko').setLevel(_level)
+
+    # ── structlog → stdlib bridge ─────────────────────────────────────────────
+    # Route every structlog call through the Python stdlib logging tree so that
+    # pytest's log_cli_level, caplog, and --log-level all apply uniformly.
+    #
+    # Design: we use a plain string-rendering terminal processor instead of the
+    # wrap_for_formatter + ProcessorFormatter pattern.  ProcessorFormatter only
+    # works when YOU control every handler's formatter — pytest installs its own
+    # LogCaptureHandler AFTER pytest_configure returns, bypassing any formatter
+    # we set on the root logger.  A string renderer avoids this entirely:
+    # structlog converts the event dict to a string before handing off to stdlib,
+    # so pytest's %(message)s gets clean text regardless of which handler fires.
+    import structlog as _sl
+
+    # Keys that pytest's log_cli_format already provides — strip from inline output.
+    _BOILERPLATE = frozenset({"level", "logger", "timestamp"})
+
+    def _mes_log_renderer(logger_name, method, event_dict):
+        """Terminal structlog processor → clean stdlib-compatible string.
+
+        Output format:  <event>  [key=val ...]
+        Example:        tezi_flash_done  duration_s=3.93 target='eMMC'
+        """
+        msg = str(event_dict.pop("event", ""))
+        extras = "  ".join(
+            f"{k}={v}" for k, v in event_dict.items()
+            if k not in _BOILERPLATE
+        )
+        return f"{msg}  {extras}" if extras else msg
+
+    _sl.configure(
+        processors=[
+            _sl.contextvars.merge_contextvars,
+            _sl.processors.StackInfoRenderer(),
+            _sl.processors.format_exc_info,
+            _mes_log_renderer,          # terminal: returns a plain string
+        ],
+        logger_factory=_sl.stdlib.LoggerFactory(),
+        wrapper_class=_sl.make_filtering_bound_logger(_level),
+        cache_logger_on_first_use=True,
+    )
+
+    # Align root logger level so stdlib propagation doesn't silently drop records.
+    logging.getLogger().setLevel(_level)
     toml_path = Path(config.getoption('--env-config'))
     if toml_path.exists():
         try:
@@ -248,9 +295,11 @@ def pytest_unconfigure(config: pytest.Config) -> None:
                 time_str = datetime.now().strftime('%H-%M-%S')
                 safe_operator = ctx.operator_id.replace('/', '_') if ctx else 'UNKNOWN'
                 serial = ctx.dut_serial if ctx else 'PENDING'
+                hw_sn = ctx.dut_manifest.get('HW_SN_CARRIER', '') if ctx else ''
+                hw_sn_part = f'_HW-{hw_sn}' if hw_sn else ''
                 html_dir = getattr(config, '_mes_html_dir', Path('artifacts/evse_telemetry/html_reports'))
                 html_dir.mkdir(parents=True, exist_ok=True)
-                final_name = f'{status}_{time_str}_{safe_operator}_SN-{serial}.html'
+                final_name = f'{status}_{time_str}_{safe_operator}_SN-{serial}{hw_sn_part}.html'
                 final_path = html_dir / final_name
                 shutil.move(htmlpath, final_path)
                 logger.info('eol_certificate_html_saved_final_path', final_path=final_path)

@@ -107,27 +107,39 @@ class UartEventStream:
         Each prompt type is yielded at most once (dedup via ``detected_prompts``).
         Milestones are yielded once and removed from the pending set.
         PanicDetected terminates the generator and always dispatches to the EventBus.
+
+        IMPORTANT — private local buffer
+        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        _rx_daemon_loop is the *sole* writer to self.serial.parser.  open() must
+        never call parser.ingest() on the same chunk: that would double every byte
+        in the shared buffer, producing garbled, interleaved lines at any chunk
+        boundary.  Instead we maintain a private _local_buf here that is completely
+        independent of all other concurrent parser consumers (expect, safe_run, the
+        UartKernelWatchdog, etc.).
         """
         from pytest_mes_core.events import bus
         t_start = time.perf_counter()
         pending_milestones = dict(milestones) if milestones else {}
         autoboot_fired = False
-        detected_prompts: set = set()  # BUG-1 fix: yield each prompt type only once
+        detected_prompts: set = set()
 
         if flush:
             self.serial.flush_buffers()
 
-        # Subscribe to the pub/sub multiplexer — zero data loss even if the caller
-        # is slow, because the queue is unbounded.
         rx_queue = self.serial.subscribe(maxsize=0)
         last_rx_time = time.perf_counter()
+        _local_buf = ""  # private — never shared with self.serial.parser
 
         try:
             while time.perf_counter() - t_start < timeout_s:
                 try:
                     chunk = rx_queue.get(timeout=0.05)
                 except queue.Empty:
-                    if active_ping_char and (time.perf_counter() - last_rx_time > 2.0):
+                    # Raise silence threshold to 5 s: the Toradex module-loader
+                    # genuinely pauses 3+ s between printk bursts.  A 2-s ping
+                    # injects \n into the kernel console, echoing back noise that
+                    # interleaves with kernel messages.
+                    if active_ping_char and (time.perf_counter() - last_rx_time > 5.0):
                         logger.debug("[UART] Console silent. Injecting ping to redraw prompt...")
                         self.serial.raw_write(active_ping_char)
                         last_rx_time = time.perf_counter()
@@ -137,15 +149,20 @@ class UartEventStream:
                     continue
 
                 last_rx_time = time.perf_counter()
-                self.serial.parser.ingest(chunk)
-                clean = self.serial.parser.buffer.encode('utf-8')
+
+                # Decode into the private local buffer; strip ANSI escape codes.
+                decoded = chunk.decode('utf-8', errors='replace')
+                _local_buf += self.ansi_pattern.sub(b'', chunk).decode('utf-8', errors='replace')
                 elapsed = round(time.perf_counter() - t_start, 3)
+
+                # Encode current buffer state for byte-pattern matching.
+                clean = _local_buf.encode('utf-8')
 
                 # 1. Panic detection (always fatal — terminates the stream)
                 if self.panic_pattern.search(clean):
                     ev = PanicDetected(
                         elapsed_s=elapsed,
-                        raw_output=clean[-500:].decode('utf-8', errors='ignore'),
+                        raw_output=_local_buf[-500:],
                     )
                     bus.emit_uart_event(ev)
                     yield ev
@@ -158,7 +175,7 @@ class UartEventStream:
                     bus.emit_uart_event(ev)
                     yield ev
 
-                # 3. Prompt detection — each type yielded at most once (BUG-1)
+                # 3. Prompt detection — each type yielded at most once
                 for ptype, pbytes in prompts.items():
                     if ptype not in detected_prompts and pbytes in clean:
                         detected_prompts.add(ptype)
@@ -167,12 +184,19 @@ class UartEventStream:
                         bus.emit_uart_event(ev)
                         yield ev
 
-                # 4. Line-level processing (milestones + debug)
-                for line in self.serial.parser.extract_lines():
-                    ev = BootDataReceived(elapsed_s=elapsed, line=line.strip())
+                # 4. Line-level processing — extract complete lines from the
+                # local buffer; leave any incomplete trailing fragment for the
+                # next chunk.
+                _local_buf = _local_buf.replace('\r\n', '\n').replace('\r', '\n')
+                while '\n' in _local_buf:
+                    line, _local_buf = _local_buf.split('\n', 1)
+                    clean_line = line.strip()
+                    if not clean_line:
+                        continue
+                    ev = BootDataReceived(elapsed_s=elapsed, line=clean_line)
                     bus.emit_uart_event(ev)
                     yield ev
-                    found_keys = [k for k, v in pending_milestones.items() if v in line]
+                    found_keys = [k for k, v in pending_milestones.items() if v in clean_line]
                     for k in found_keys:
                         pending_milestones.pop(k)
                         ev2 = MilestoneReached(elapsed_s=elapsed, name=k)
@@ -196,18 +220,22 @@ class UartEventStream:
         Reads from the pub/sub subscriber queue via anyio offload so the event
         loop is never blocked.  Prompt deduplication and EventBus dispatch mirror
         the sync open() implementation.
+
+        Uses the same private-local-buffer strategy as open() — never touches
+        self.serial.parser to avoid the double-ingest race.
         """
         from pytest_mes_core.events import bus
         t_start = time.perf_counter()
         pending_milestones = dict(milestones) if milestones else {}
         autoboot_fired = False
-        detected_prompts: set = set()  # BUG-1 fix
+        detected_prompts: set = set()
 
         if flush:
             self.serial.flush_buffers()
 
         rx_queue = self.serial.subscribe(maxsize=0)
         last_rx_time = time.perf_counter()
+        _local_buf = ""  # private — never shared with self.serial.parser
 
         try:
             while time.perf_counter() - t_start < timeout_s:
@@ -217,7 +245,7 @@ class UartEventStream:
                         functools.partial(rx_queue.get, timeout=0.05)
                     )
                 except queue.Empty:
-                    if active_ping_char and (time.perf_counter() - last_rx_time > 2.0):
+                    if active_ping_char and (time.perf_counter() - last_rx_time > 5.0):
                         logger.debug("[UART] Console silent. Injecting ping to redraw prompt...")
                         self.serial.raw_write(active_ping_char)
                         last_rx_time = time.perf_counter()
@@ -227,14 +255,16 @@ class UartEventStream:
                     continue
 
                 last_rx_time = time.perf_counter()
-                self.serial.parser.ingest(chunk)
-                clean = self.serial.parser.buffer.encode('utf-8')
+
+                # Decode into the private local buffer; strip ANSI escape codes.
+                _local_buf += self.ansi_pattern.sub(b'', chunk).decode('utf-8', errors='replace')
                 elapsed = round(time.perf_counter() - t_start, 3)
+                clean = _local_buf.encode('utf-8')
 
                 if self.panic_pattern.search(clean):
                     ev = PanicDetected(
                         elapsed_s=elapsed,
-                        raw_output=clean[-500:].decode('utf-8', errors='ignore'),
+                        raw_output=_local_buf[-500:],
                     )
                     bus.emit_uart_event(ev)
                     yield ev
@@ -254,11 +284,16 @@ class UartEventStream:
                         bus.emit_uart_event(ev)
                         yield ev
 
-                for line in self.serial.parser.extract_lines():
-                    ev = BootDataReceived(elapsed_s=elapsed, line=line.strip())
+                _local_buf = _local_buf.replace('\r\n', '\n').replace('\r', '\n')
+                while '\n' in _local_buf:
+                    line, _local_buf = _local_buf.split('\n', 1)
+                    clean_line = line.strip()
+                    if not clean_line:
+                        continue
+                    ev = BootDataReceived(elapsed_s=elapsed, line=clean_line)
                     bus.emit_uart_event(ev)
                     yield ev
-                    found_keys = [k for k, v in pending_milestones.items() if v in line]
+                    found_keys = [k for k, v in pending_milestones.items() if v in clean_line]
                     for k in found_keys:
                         pending_milestones.pop(k)
                         ev2 = MilestoneReached(elapsed_s=elapsed, name=k)
@@ -402,9 +437,21 @@ class RecoveryStrategy(ABC):
     """
     Encapsulates how to force the hardware into a low-level USB/Serial recovery mode
     (e.g., NXP Serial Downloader, STM32 DFU, TI UART boot).
+
+    Two-phase lifecycle:
+      trigger_recovery() — called before payload delivery: asserts the recovery strap
+                           and power-cycles the board into BootROM / DFU mode.
+      release_recovery() — called after payload delivery: releases the recovery strap
+                           so the board can boot from the delivered payload.
+    For GPIO-automated stations release_recovery() is a no-op (pin was cleared
+    during trigger).  For manual-jumper stations it shows an operator prompt.
     """
     @abstractmethod
     def trigger_recovery(self, fsm: 'EmbeddedLinuxStateMachine') -> None:
+        ...
+
+    @abstractmethod
+    def release_recovery(self, fsm: 'EmbeddedLinuxStateMachine') -> None:
         ...
 
 
@@ -423,10 +470,33 @@ class GpioRecoveryStrategy(RecoveryStrategy):
         else:
             logger.warning("manual_action_required", instructions="PRESS AND HOLD THE RECOVERY BUTTON / SET JUMPER NOW.")
             try: input(">>> Press [ENTER] while holding the button... ")
-            except EOFError: pass
+            except (EOFError, KeyboardInterrupt): pass
 
             fsm._do_energize()
             logger.warning("manual_action_required", instructions="POWER IS ON. YOU CAN NOW RELEASE THE RECOVERY BUTTON.")
+
+    def release_recovery(self, fsm: 'EmbeddedLinuxStateMachine') -> None:
+        recovery_pin = getattr(fsm.cfg, "gpio_recovery_pin", "RECOVERY_BTN")
+        if fsm.gpio and recovery_pin:
+            # Automated stations: pin was already de-asserted inside trigger_recovery()
+            # after recovery_latch_time_s.  Nothing to do here.
+            logger.debug("release_recovery_gpio_no_op", pin=recovery_pin)
+        else:
+            # Manual-jumper stations: the strap is a persistent jumper, not a momentary
+            # button.  It must stay installed while the board enumerates on USB and while
+            # uuu pushes the payload.  Only NOW — after the SoC RAM is live — can the
+            # operator safely remove it so the board boots the delivered payload.
+            logger.warning("=" * 60)
+            logger.warning("[RECOVERY] *** MANUAL ACTION REQUIRED ***")
+            logger.warning("[RECOVERY] REMOVE THE RECOVERY JUMPER / STRAP NOW.")
+            logger.warning("[RECOVERY] The board will boot from the payload once removed.")
+            logger.warning("=" * 60)
+            try:
+                input(">>> Press [ENTER] once recovery jumper is removed... ")
+            except (EOFError, KeyboardInterrupt):
+                logger.warning("manual_prompt_interrupted", action="assuming_jumper_removed_continuing")
+
+
 
 
 class ContextValidationStrategy(ABC):
@@ -772,7 +842,8 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
         logger.warning("=" * 60)
         try:
             input(">>> Press [ENTER] once configured... ")
-        except EOFError:
+        except (EOFError, KeyboardInterrupt):
+            logger.warning("manual_prompt_interrupted", action="continuing_without_confirmation")
             time.sleep(2.0)
 
     def _do_hardware_reset(self) -> None:
@@ -817,7 +888,9 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
         else:
             logger.warning("manual_action_required", instructions="UNPLUG THE 12V POWER FROM THE BOARD NOW.")
             try: input(">>> Press [ENTER] once powered off... ")
-            except EOFError: time.sleep(2.0)
+            except (EOFError, KeyboardInterrupt):
+                logger.warning("manual_prompt_interrupted", action="assuming_power_off_continuing")
+                time.sleep(2.0)
 
     def _do_energize(self) -> None:
         """Applies physical voltage to the board and captures inrush current.
@@ -844,7 +917,9 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
         else:
             logger.warning("manual_action_required", instructions="PLUG IN THE 12V POWER NOW.")
             try: input(">>> Press [ENTER] once power is applied... ")
-            except EOFError: time.sleep(2.0)
+            except (EOFError, KeyboardInterrupt):
+                logger.warning("manual_prompt_interrupted", action="assuming_power_applied_continuing")
+                time.sleep(2.0)
 
         # Securely re-bind the serial port to recover the file descriptor.
         # If the USB-Serial adapter is physically on the board, it drops and re-enumerates during a power cycle.
@@ -1510,3 +1585,18 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
 
         self.recovery_strategy.trigger_recovery(self)
         time.sleep(2.0)
+
+    def release_recovery(self) -> None:
+        """Release the recovery strap after payload delivery.
+
+        Must be called by the provisioner (e.g. TEZI, DFU) once it has
+        successfully pushed a payload into SoC RAM.  Delegates to the
+        configured RecoveryStrategy:
+
+        - GPIO-automated stations: no-op (pin already de-asserted during
+          trigger_recovery after the SoC latch delay).
+        - Manual-jumper stations:  shows an operator prompt to physically
+          remove the strap so the board can boot from the payload.
+        """
+        logger.info("releasing_recovery_strap", strategy=type(self.recovery_strategy).__name__)
+        self.recovery_strategy.release_recovery(self)
