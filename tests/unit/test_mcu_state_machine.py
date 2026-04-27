@@ -46,7 +46,9 @@ async def test_async_hw_halt_core():
     swd = MagicMock()
     fsm = BareMetalStateMachine(swd_transport=swd)
     fsm.energize()
-    
-    await fsm.async_hw_halt_core()
+
+    # async_halt_core fires the FSM transition (ENERGIZED -> HALTED) and
+    # calls _hw_halt_core. async_hw_halt_core is the hardware-only bypass.
+    await fsm.async_halt_core()
     assert fsm.state == McuState.HALTED.value
     swd.halt.assert_called_once()

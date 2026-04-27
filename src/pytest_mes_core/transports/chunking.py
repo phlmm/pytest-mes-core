@@ -16,7 +16,8 @@ class HostSideBuffer:
     def __init__(self, transport: DutTransport, remote_path: str, poll_interval_s: float=1.0):
         self.transport = transport
         self.remote_path = remote_path
-        self.poll_interval_s = poll_interval_s
+        self.poll_interval_s = poll_interval_s           # user-visible; never mutated
+        self._effective_poll_s = max(poll_interval_s, 0.5)  # enforced floor
         self._buffer: List[str] = []
         self._lines_read = 0
         self._lock = threading.Lock()
@@ -26,15 +27,17 @@ class HostSideBuffer:
 
     def start(self) -> None:
         """Spawns the background daemon to begin data extraction.
-        
+
         Ensures thread safety and floors the polling interval to protect DUT CPU.
+        The user-visible ``poll_interval_s`` attribute is never mutated; the floor
+        is applied to the internal ``_effective_poll_s`` only.
         """
         if self._thread and self._thread.is_alive():
             logger.warning('vacuum_for_remote_path_is_already_running_ignoring_start_request', remote_path=self.remote_path)
             return
         if self.poll_interval_s < 0.5:
             logger.warning('poll_interval_poll_interval_s_s_is_too_fast_flooring_to_0_5s_to_protect_dut_cpu', poll_interval_s=self.poll_interval_s)
-            self.poll_interval_s = 0.5
+        self._effective_poll_s = max(self.poll_interval_s, 0.5)
         logger.info('arming_asynchronous_vacuum_for_remote_path', remote_path=self.remote_path)
         self._stop_event.clear()
         self._t0 = time.perf_counter()
@@ -46,14 +49,14 @@ class HostSideBuffer:
 
     def stop(self) -> List[str]:
         """Halts the polling instantly and returns a thread-safe copy of the surviving data.
-        
+
         Returns:
             List[str]: The extracted log lines secured in Host RAM.
         """
         logger.debug('[HostBuffer] ZERO-LEAKAGE: Disarming vacuum and reaping thread...')
         self._stop_event.set()
         if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=self.poll_interval_s + 0.5)
+            self._thread.join(timeout=self._effective_poll_s + 0.5)
             if self._thread.is_alive():
                 logger.warning('thread_join_timed_out_transport_socket_severely_hung')
         duration = round(time.perf_counter() - self._t0, 2)
@@ -117,4 +120,4 @@ class HostSideBuffer:
                 logger.error('vacuum_thread_encountered_an_unexpected_fault_e', e=e)
                 logger.error('aborting_survived_lines_successfully_secured_in_host_ram', survived=survived)
                 break
-            self._stop_event.wait(timeout=self.poll_interval_s)
+            self._stop_event.wait(timeout=self._effective_poll_s)

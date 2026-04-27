@@ -153,17 +153,18 @@ def mes_record(request: pytest.FixtureRequest, mes_env: StationEnvironment, tele
                                 logger.error('[Post-Mortem] OS failed to recover. Aborting forensic dumps.')
                         dump_context = {}
                         if dut_transport.is_connected:
-                            if is_async:
-                                import anyio
-                                async def async_dump():
-                                    for cmd in commands_to_run:
-                                        res = await dut_transport.async_safe_run(cmd, timeout_s=5.0, check_exit_code=False)
-                                        dump_context[cmd] = res.stdout if res.exited == 0 else f'NO DATA: {res.stderr}'
-                                anyio.run(async_dump)
-                            else:
-                                for cmd in commands_to_run:
+                            # Always use the sync path for post-mortem forensics.
+                            # Teardown runs *after* pytest-anyio has torn down the event loop,
+                            # so calling anyio.run() here would start a *second* loop and
+                            # crash with RuntimeError: "This event loop is already running".
+                            # safe_run() routes via SSH (primary) or UART (fallback) — either
+                            # transport supports the sync variant.
+                            for cmd in commands_to_run:
+                                try:
                                     res = dut_transport.safe_run(cmd, timeout_s=5.0, check_exit_code=False)
                                     dump_context[cmd] = res.stdout if res.exited == 0 else f'NO DATA: {res.stderr}'
+                                except Exception as dump_exc:
+                                    dump_context[cmd] = f'DUMP_FAILED: {dump_exc}'
                         record.context['post_mortem'] = dump_context
                         logger.info('[Post-Mortem] Forensic data successfully attached to telemetry payload.')
         if telemetry_sink:

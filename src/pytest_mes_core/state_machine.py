@@ -1,13 +1,17 @@
 import time
+import queue
 import socket
 import re
 import logging
+import functools
+import anyio
 from abc import ABC, abstractmethod
 from typing import Dict, Optional, Pattern, Any, Callable, List, Generator
 from dataclasses import dataclass, field
 from transitions import Machine, EventData
 from enum import Enum, auto
 from tenacity import retry, stop_after_attempt, wait_fixed, before_sleep_log
+from pytest_mes_core.transports.constants import ANSI_ESCAPE_B, PANIC_PATTERN_B
 
 from pytest_mes_core.config import StateMachineConfig, BootProfilerConfig
 from pytest_mes_core.instruments import ScpiPowerSupply
@@ -95,70 +99,87 @@ class UartEventStream:
         active_ping_char: Optional[bytes] = None,
     ) -> Generator[UartEvent, None, None]:
         """
-        Opens the UART event stream and yields typed events.
+        Opens the UART event stream via the pub/sub subscriber queue and yields
+        typed events.  Subscribing to the queue (rather than calling raw_read_chunk)
+        enables true UART multiplexing: the watchdog, state machine, and any other
+        consumer all receive every byte independently.
 
-        Each prompt type is yielded at most once. Milestones are yielded once
-        and removed from the pending set. PanicDetected terminates the generator.
-
-        Args:
-            prompts: Map of prompt_type → bytes pattern to watch for.
-            timeout_s: Maximum wall-clock seconds before the stream ends.
-            milestones: Optional boot profiler milestone map (name → substring).
-            autoboot_trigger: Optional bytes pattern for autoboot countdown detection.
-
-        Yields:
-            UartEvent subclasses in the order they are detected.
+        Each prompt type is yielded at most once (dedup via ``detected_prompts``).
+        Milestones are yielded once and removed from the pending set.
+        PanicDetected terminates the generator and always dispatches to the EventBus.
         """
+        from pytest_mes_core.events import bus
         t_start = time.perf_counter()
         pending_milestones = dict(milestones) if milestones else {}
         autoboot_fired = False
+        detected_prompts: set = set()  # BUG-1 fix: yield each prompt type only once
 
         if flush:
             self.serial.flush_buffers()
 
+        # Subscribe to the pub/sub multiplexer — zero data loss even if the caller
+        # is slow, because the queue is unbounded.
+        rx_queue = self.serial.subscribe(maxsize=0)
         last_rx_time = time.perf_counter()
 
-        while time.perf_counter() - t_start < timeout_s:
-            chunk = self.serial.raw_read_chunk()
-            if not chunk:
-                if active_ping_char and (time.perf_counter() - last_rx_time > 2.0):
-                    logger.debug("[UART] Console silent. Injecting ping to redraw prompt...")
-                    self.serial.raw_write(active_ping_char)
-                    last_rx_time = time.perf_counter()
-                time.sleep(0.01)
-                continue
+        try:
+            while time.perf_counter() - t_start < timeout_s:
+                try:
+                    chunk = rx_queue.get(timeout=0.05)
+                except queue.Empty:
+                    if active_ping_char and (time.perf_counter() - last_rx_time > 2.0):
+                        logger.debug("[UART] Console silent. Injecting ping to redraw prompt...")
+                        self.serial.raw_write(active_ping_char)
+                        last_rx_time = time.perf_counter()
+                    continue
 
-            last_rx_time = time.perf_counter()
-            self.serial.parser.ingest(chunk)
-            clean = self.serial.parser.buffer.encode('utf-8')
-            elapsed = round(time.perf_counter() - t_start, 3)
+                if not chunk:
+                    continue
 
-            # 1. Panic detection (always fatal — terminates the stream)
-            if self.panic_pattern.search(clean):
-                yield PanicDetected(
-                    elapsed_s=elapsed,
-                    raw_output=clean[-500:].decode('utf-8', errors='ignore'),
-                )
-                return
+                last_rx_time = time.perf_counter()
+                self.serial.parser.ingest(chunk)
+                clean = self.serial.parser.buffer.encode('utf-8')
+                elapsed = round(time.perf_counter() - t_start, 3)
 
-            # 2. Autoboot window detection (yields once)
-            if autoboot_trigger and not autoboot_fired and autoboot_trigger in clean:
-                autoboot_fired = True
-                yield AutobootWindowDetected(elapsed_s=elapsed)
+                # 1. Panic detection (always fatal — terminates the stream)
+                if self.panic_pattern.search(clean):
+                    ev = PanicDetected(
+                        elapsed_s=elapsed,
+                        raw_output=clean[-500:].decode('utf-8', errors='ignore'),
+                    )
+                    bus.emit_uart_event(ev)
+                    yield ev
+                    return
 
-            # 3. Prompt detection
-            for ptype, pbytes in prompts.items():
-                if pbytes in clean:
-                    logger.debug(f"[UART-FSM] Detected prompt {ptype} in buffer!")
-                    yield PromptDetected(elapsed_s=elapsed, prompt_type=ptype)
+                # 2. Autoboot window (once)
+                if autoboot_trigger and not autoboot_fired and autoboot_trigger in clean:
+                    autoboot_fired = True
+                    ev = AutobootWindowDetected(elapsed_s=elapsed)
+                    bus.emit_uart_event(ev)
+                    yield ev
 
-            # 4. Line-level processing (milestones + debug logging)
-            for line in self.serial.parser.extract_lines():
-                yield BootDataReceived(elapsed_s=elapsed, line=line.strip())
-                found_keys = [k for k, v in pending_milestones.items() if v in line]
-                for k in found_keys:
-                    pending_milestones.pop(k)
-                    yield MilestoneReached(elapsed_s=elapsed, name=k)
+                # 3. Prompt detection — each type yielded at most once (BUG-1)
+                for ptype, pbytes in prompts.items():
+                    if ptype not in detected_prompts and pbytes in clean:
+                        detected_prompts.add(ptype)
+                        logger.debug(f"[UART-FSM] Detected prompt '{ptype}' in buffer")
+                        ev = PromptDetected(elapsed_s=elapsed, prompt_type=ptype)
+                        bus.emit_uart_event(ev)
+                        yield ev
+
+                # 4. Line-level processing (milestones + debug)
+                for line in self.serial.parser.extract_lines():
+                    ev = BootDataReceived(elapsed_s=elapsed, line=line.strip())
+                    bus.emit_uart_event(ev)
+                    yield ev
+                    found_keys = [k for k, v in pending_milestones.items() if v in line]
+                    for k in found_keys:
+                        pending_milestones.pop(k)
+                        ev2 = MilestoneReached(elapsed_s=elapsed, name=k)
+                        bus.emit_uart_event(ev2)
+                        yield ev2
+        finally:
+            self.serial.unsubscribe(rx_queue)
 
     async def open_async(
         self,
@@ -170,55 +191,81 @@ class UartEventStream:
         active_ping_char: Optional[bytes] = None,
     ) -> 'AsyncGenerator[UartEvent, None]':
         """
-        Asynchronous variant of the UART event stream.
+        Async variant of the UART event stream.
+
+        Reads from the pub/sub subscriber queue via anyio offload so the event
+        loop is never blocked.  Prompt deduplication and EventBus dispatch mirror
+        the sync open() implementation.
         """
-        import anyio
+        from pytest_mes_core.events import bus
         t_start = time.perf_counter()
         pending_milestones = dict(milestones) if milestones else {}
         autoboot_fired = False
+        detected_prompts: set = set()  # BUG-1 fix
 
         if flush:
-            await self.serial.async_flush_buffers()
+            self.serial.flush_buffers()
 
+        rx_queue = self.serial.subscribe(maxsize=0)
         last_rx_time = time.perf_counter()
 
-        while time.perf_counter() - t_start < timeout_s:
-            chunk = await self.serial.async_raw_read_chunk()
-            if not chunk:
-                if active_ping_char and (time.perf_counter() - last_rx_time > 2.0):
-                    logger.debug("[UART] Console silent. Injecting ping to redraw prompt...")
-                    await self.serial.async_raw_write(active_ping_char)
-                    last_rx_time = time.perf_counter()
-                await anyio.sleep(0.01)
-                continue
+        try:
+            while time.perf_counter() - t_start < timeout_s:
+                # Offload blocking queue.get to thread so the event loop stays free
+                try:
+                    chunk = await anyio.to_thread.run_sync(
+                        functools.partial(rx_queue.get, timeout=0.05)
+                    )
+                except queue.Empty:
+                    if active_ping_char and (time.perf_counter() - last_rx_time > 2.0):
+                        logger.debug("[UART] Console silent. Injecting ping to redraw prompt...")
+                        self.serial.raw_write(active_ping_char)
+                        last_rx_time = time.perf_counter()
+                    continue
 
-            last_rx_time = time.perf_counter()
-            self.serial.parser.ingest(chunk)
-            clean = self.serial.parser.buffer.encode('utf-8')
-            elapsed = round(time.perf_counter() - t_start, 3)
+                if not chunk:
+                    continue
 
-            if self.panic_pattern.search(clean):
-                yield PanicDetected(
-                    elapsed_s=elapsed,
-                    raw_output=clean[-500:].decode('utf-8', errors='ignore'),
-                )
-                return
+                last_rx_time = time.perf_counter()
+                self.serial.parser.ingest(chunk)
+                clean = self.serial.parser.buffer.encode('utf-8')
+                elapsed = round(time.perf_counter() - t_start, 3)
 
-            if autoboot_trigger and not autoboot_fired and autoboot_trigger in clean:
-                autoboot_fired = True
-                yield AutobootWindowDetected(elapsed_s=elapsed)
+                if self.panic_pattern.search(clean):
+                    ev = PanicDetected(
+                        elapsed_s=elapsed,
+                        raw_output=clean[-500:].decode('utf-8', errors='ignore'),
+                    )
+                    bus.emit_uart_event(ev)
+                    yield ev
+                    return
 
-            for ptype, pbytes in prompts.items():
-                if pbytes in clean:
-                    logger.debug(f"[UART-FSM] Detected prompt {ptype} in buffer!")
-                    yield PromptDetected(elapsed_s=elapsed, prompt_type=ptype)
+                if autoboot_trigger and not autoboot_fired and autoboot_trigger in clean:
+                    autoboot_fired = True
+                    ev = AutobootWindowDetected(elapsed_s=elapsed)
+                    bus.emit_uart_event(ev)
+                    yield ev
 
-            for line in self.serial.parser.extract_lines():
-                yield BootDataReceived(elapsed_s=elapsed, line=line.strip())
-                found_keys = [k for k, v in pending_milestones.items() if v in line]
-                for k in found_keys:
-                    pending_milestones.pop(k)
-                    yield MilestoneReached(elapsed_s=elapsed, name=k)
+                for ptype, pbytes in prompts.items():
+                    if ptype not in detected_prompts and pbytes in clean:
+                        detected_prompts.add(ptype)
+                        logger.debug(f"[UART-FSM] Detected prompt '{ptype}' in buffer")
+                        ev = PromptDetected(elapsed_s=elapsed, prompt_type=ptype)
+                        bus.emit_uart_event(ev)
+                        yield ev
+
+                for line in self.serial.parser.extract_lines():
+                    ev = BootDataReceived(elapsed_s=elapsed, line=line.strip())
+                    bus.emit_uart_event(ev)
+                    yield ev
+                    found_keys = [k for k, v in pending_milestones.items() if v in line]
+                    for k in found_keys:
+                        pending_milestones.pop(k)
+                        ev2 = MilestoneReached(elapsed_s=elapsed, name=k)
+                        bus.emit_uart_event(ev2)
+                        yield ev2
+        finally:
+            self.serial.unsubscribe(rx_queue)
 
 from pydantic import BaseModel, Field
 
@@ -299,12 +346,10 @@ class AutobootStrategy(BootStrategy):
         fsm._event_boot_from_bootloader_to_os()
 
     async def async_cold_boot_to_bootloader(self, fsm: 'EmbeddedLinuxStateMachine') -> None:
-        import anyio
         await anyio.to_thread.run_sync(fsm._do_energize)
         await fsm.async_event_wait_for_bootloader(intercept_autoboot=True)
 
     async def async_cold_boot_to_os(self, fsm: 'EmbeddedLinuxStateMachine') -> None:
-        import anyio
         await anyio.to_thread.run_sync(fsm._do_energize)
         await fsm.async_event_wait_for_bootloader(intercept_autoboot=True)
         await fsm.async_event_boot_from_bootloader_to_os()
@@ -338,7 +383,6 @@ class TrapRebootStrategy(BootStrategy):
         fsm._event_boot_from_bootloader_to_os()
 
     async def async_cold_boot_to_bootloader(self, fsm: 'EmbeddedLinuxStateMachine') -> None:
-        import anyio
         await anyio.to_thread.run_sync(fsm._do_energize)
         await fsm.async_event_wait_for_os_shell()
         await anyio.to_thread.run_sync(fsm._finalize_os_boot)
@@ -346,12 +390,10 @@ class TrapRebootStrategy(BootStrategy):
         await fsm.async_event_wait_for_bootloader(intercept_autoboot=False)
 
     async def async_cold_boot_to_os(self, fsm: 'EmbeddedLinuxStateMachine') -> None:
-        import anyio
         await anyio.to_thread.run_sync(fsm._do_energize)
         await fsm.async_event_wait_for_os_shell()
 
     async def async_resume_bootloader_to_os(self, fsm: 'EmbeddedLinuxStateMachine') -> None:
-        import anyio
         await anyio.to_thread.run_sync(fsm._restore_uboot_trap)
         await fsm.async_event_boot_from_bootloader_to_os()
 
@@ -422,8 +464,10 @@ class DefaultSWUpdateStrategy(ContextValidationStrategy):
 
 class BaseDutStateMachine(ABC):
     STATES = [DutState.POWER_OFF, DutState.ENERGIZED, DutState.BOOTLOADER, DutState.OS_USERLAND, DutState.RECOVERY, DutState.DIRTY]
-    PANIC_WATCHDOG: Pattern[bytes] = re.compile(br"(Kernel panic - not syncing|Out of memory: Killed process|synchronous external abort|HAB Events|SEC_ERR|Signature Verification Failed)")
-    ANSI_ESCAPE_B: Pattern[bytes] = re.compile(br'\x1b\[[0-9;]*[a-zA-Z]')
+    # Imported from transports.constants — single source of truth shared with
+    # UartKernelWatchdog and UartEventStream.
+    PANIC_WATCHDOG: Pattern[bytes] = PANIC_PATTERN_B
+    ANSI_ESCAPE_B: Pattern[bytes] = ANSI_ESCAPE_B
     # Use 'Any' here so type checkers don't yell when a project uses its own Enum
     state: Any
 
@@ -587,56 +631,39 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
             time.sleep(0.1)
 
         # Robustness: Passive Listen First.
-        # Don't blindly inject \r\n yet! If the board is autobooting, an injected \n 
+        # Don't blindly inject \r\n yet! If the board is autobooting, an injected \n
         # will violently drop it into the U-Boot shell by accident.
         time.sleep(0.3)
         passive_chunk = self.serial.raw_read_chunk()
         if passive_chunk:
-            # Board is actively streaming logs. It's fully powered and transitioning.
+            # Board is actively streaming — inspect before declaring ENERGIZED
+            # (it may already be at a shell or bootloader prompt).
+            clean_passive = self.ANSI_ESCAPE_B.sub(b'', passive_chunk)
+            if self.cfg.os_shell_prompt.encode() in clean_passive:
+                return DutState.OS_USERLAND
+            if self.cfg.bootloader_prompt.encode() in clean_passive:
+                return DutState.BOOTLOADER
             logger.debug("probe_result", domain="serial", bytes_received=len(passive_chunk), state="ENERGIZED")
             return DutState.ENERGIZED
 
-        self.serial.flush_buffers()
-        self.serial.raw_write(b"\r\n")
-        time.sleep(0.4)
-
+        # BUG-3 fix: two-pass ping instead of broken triple-nested structure.
+        # Pass 1: fast (0.4 s) — catches agetty / idle login prompts.
+        # Pass 2: slow (2.0 s) — accounts for UART chip swallowing first byte.
         resp = bytearray()
-        while True:
-            chunk = self.serial.raw_read_chunk()
-            if not chunk:
+        for wait_s in (0.4, 2.0):
+            if resp:
                 break
-            resp.extend(chunk)
-            time.sleep(0.05)
-
-        # RETRY PASS: an idle login prompt (agetty) can take 1-3s to respond
-        # to an empty newline. Also, UART chips often swallow the first byte 
-        # after port initialization. If the fast pass returned nothing, ping
-        # again and wait longer before declaring POWER_OFF.
-        if not resp:
-            logger.debug("probe_fast_pass_silent", action="injecting_ping_and_retrying")
+            self.serial.flush_buffers()
             self.serial.raw_write(b"\r\n")
-            resp = bytearray()
+            time.sleep(wait_s)
             while True:
                 chunk = self.serial.raw_read_chunk()
                 if not chunk:
                     break
                 resp.extend(chunk)
                 time.sleep(0.05)
-
-            # RETRY PASS: an idle login prompt (agetty) can take 1-3s to respond
-            # to an empty newline. Also, UART chips often swallow the first byte 
-            # after port initialization. If the fast pass returned nothing, ping
-            # again and wait longer before declaring POWER_OFF.
             if not resp:
-                logger.debug("probe_fast_pass_silent", action="injecting_ping_and_retrying")
-                self.serial.raw_write(b"\r\n")
-                time.sleep(2.0)
-                while True:
-                    chunk = self.serial.raw_read_chunk()
-                    if not chunk:
-                        break
-                    resp.extend(chunk)
-                    time.sleep(0.05)
+                logger.debug("probe_pass_silent", wait_s=wait_s, action="retrying")
 
         # Strict ANSI stripping applied centrally
         clean_resp = self.ANSI_ESCAPE_B.sub(b'', resp)
@@ -721,24 +748,32 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
         Args:
             medium: The boot medium requested ("default", "emmc", "sd", etc).
         """
-        if medium == "default" or not medium: medium = "default"
+        if not medium:
+            medium = "default"
         straps = getattr(self.cfg, "boot_straps_gpio_map", {}).get(medium)
 
         if self.gpio:
             if straps:
-                for pin, state in straps.items(): self.gpio.set_pin(pin, state)
+                for pin, state in straps.items():
+                    self.gpio.set_pin(pin, state)
                 time.sleep(0.5)
+            elif medium != "default":
+                # BUG-5 fix: warn when GPIO controller present but no strap map
+                logger.warning("no_gpio_strap_map_for_medium", medium=medium,
+                               hint="Add boot_straps_gpio_map to your TOML config")
             return
 
-        if not self.gpio or (medium != "default" and not straps):
-            logger.warning("="*60)
-            if medium == "default":
-                logger.warning("[MANUAL ACTION] RESTORE HARDWARE BOOT STRAP PINS / DIP SWITCHES TO DEFAULT.")
-            else:
-                logger.warning(f"[MANUAL ACTION] SET HARDWARE BOOT STRAP PINS TO: **{medium.upper()}**")
-            logger.warning("="*60)
-            try: input(">>> Press [ENTER] once configured... ")
-            except EOFError: time.sleep(2.0)
+        # No GPIO controller — prompt the operator
+        logger.warning("=" * 60)
+        if medium == "default":
+            logger.warning("[MANUAL ACTION] RESTORE HARDWARE BOOT STRAP PINS / DIP SWITCHES TO DEFAULT.")
+        else:
+            logger.warning(f"[MANUAL ACTION] SET HARDWARE BOOT STRAP PINS TO: **{medium.upper()}**")
+        logger.warning("=" * 60)
+        try:
+            input(">>> Press [ENTER] once configured... ")
+        except EOFError:
+            time.sleep(2.0)
 
     def _do_hardware_reset(self) -> None:
         """Toggles the physical RESET pin on the board via GPIO.
@@ -914,9 +949,14 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
     async def async_event_boot_from_bootloader_to_os(self) -> None:
         """Send the boot command from U-Boot and wait for OS shell via async event stream."""
         logger.info("commanding_os_boot", boot_cmd=self.cfg.bootloader_boot_cmd)
-        import anyio
-        await self.serial.async_flush_buffers()
-        await self.serial.async_raw_write(f"{self.cfg.bootloader_boot_cmd}\n".encode())
+        # flush_buffers and raw_write are sync primitives — offload to a thread
+        # so the event loop is never blocked.  This also ensures compatibility
+        # with any DutTransport implementation (not just EphemeralSerialClient).
+        await anyio.to_thread.run_sync(self.serial.flush_buffers)
+        boot_cmd_bytes = f"{self.cfg.bootloader_boot_cmd}\n".encode()
+        await anyio.to_thread.run_sync(
+            functools.partial(self.serial.raw_write, boot_cmd_bytes)
+        )
         await self.async_event_wait_for_os_shell(flush=False)
 
     def _event_wait_for_os_shell(self, flush: bool = True) -> None:
@@ -977,7 +1017,6 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
     async def async_event_wait_for_bootloader(self, intercept_autoboot: bool) -> None:
         """Asynchronous event-driven bootloader interception."""
         logger.info("hunting_for_bootloader_prompt")
-        import anyio
 
         blast_bytes = self.cfg.bootloader_interrupt_char.encode('utf-8')
         prompts = {
@@ -1004,16 +1043,22 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
 
             elif isinstance(event, AutobootWindowDetected):
                 logger.info("autoboot_window_detected_sniping")
+                # Blast the interrupt character 3x to suppress the countdown.
+                # Use run_sync so raw_write doesn't block the event loop.
                 for _ in range(3):
-                    await self.serial.async_raw_write(blast_bytes)
+                    await anyio.to_thread.run_sync(
+                        functools.partial(self.serial.raw_write, blast_bytes)
+                    )
                     await anyio.sleep(0.05)
 
             elif isinstance(event, PromptDetected) and event.prompt_type in ("bootloader", "trap"):
-                await self.serial.async_raw_write(b"\n")
+                # Stabilise the prompt: send \n, wait, drain stale bytes.
+                await anyio.to_thread.run_sync(
+                    functools.partial(self.serial.raw_write, b"\n")
+                )
                 await anyio.sleep(0.1)
-                await self.serial.async_flush_buffers()
+                await anyio.to_thread.run_sync(self.serial.flush_buffers)
 
-                from functools import partial
                 res = await anyio.to_thread.run_sync(
                     partial(self.serial.safe_run, "echo MES_SYNC", expected_prompt=self.cfg.bootloader_prompt, timeout_s=3.0)
                 )
@@ -1034,7 +1079,6 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
         """Asynchronous event-driven OS boot monitor."""
         logger.info("waiting_for_linux_userland")
         self.boot_metrics.clear()
-        import anyio
 
         prompts: Dict[str, bytes] = {
             "shell": self.cfg.os_shell_prompt.encode('utf-8'),
@@ -1070,12 +1114,23 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
                 elif event.prompt_type == "login":
                     self.boot_metrics["t_boot_total_to_login_s"] = event.elapsed_s
                     await anyio.sleep(0.1)
-                    await anyio.to_thread.run_sync(self.serial.write_line, self.cfg.os_user or "root")
+                    # Use functools.partial so keyword args are forwarded correctly
+                    await anyio.to_thread.run_sync(
+                        functools.partial(self.serial.write_line, self.cfg.os_user or "root")
+                    )
                     self.serial.parser.clear_buffer()
 
                 elif event.prompt_type == "password":
                     await anyio.sleep(0.1)
-                    await anyio.to_thread.run_sync(self.serial.write_line, self.cfg.get_os_password() or "", True)
+                    # BUG-6 fix: passing True as positional arg to run_sync was binding
+                    # to cancellable=True, not sensitive=True — password was logged.
+                    await anyio.to_thread.run_sync(
+                        functools.partial(
+                            self.serial.write_line,
+                            self.cfg.get_os_password() or "",
+                            sensitive=True,
+                        )
+                    )
                     self.serial.parser.clear_buffer()
 
             elif isinstance(event, BootDataReceived):
@@ -1118,18 +1173,36 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
             except Exception:
                 pass
 
-        # 2. Establish the high-speed SSH pipeline
+        # 2. Establish the high-speed SSH pipeline.
+        # BUG-4 fix: sshd may not be listening yet even though the shell prompt is up.
+        # Retry for up to 10 s with 1 s intervals before propagating the error.
         logger.info("establishing_primary_ssh_transport")
+        self._connect_ssh_with_retry()
+
+    @retry(
+        stop=stop_after_attempt(10),
+        wait=wait_fixed(1.0),
+        reraise=True,
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+    )
+    def _connect_ssh_with_retry(self) -> None:
+        """Retrying SSH connect — sshd may not be ready the instant the shell prompt appears."""
         self.ssh.connect()
 
     async def async_finalize_os_boot(self) -> None:
-        """Async variant of finalize_os_boot."""
+        """Async variant of finalize_os_boot.
+
+        Applies the same SSH retry logic as the sync path: sshd may not be
+        listening the instant the shell prompt appears, so we retry for up to
+        10 seconds with 1-second intervals before propagating the error.
+        """
         if self.ssh.is_connected:
             return
-        import anyio
         await anyio.to_thread.run_sync(self._verify_linux_context)
 
-        res_sysd = await self.serial.async_safe_run("systemd-analyze time", timeout_s=5.0, check_exit_code=False)
+        res_sysd = await anyio.to_thread.run_sync(
+            functools.partial(self.serial.safe_run, "systemd-analyze time", timeout_s=5.0, check_exit_code=False)
+        )
         if res_sysd.ok and "Startup finished in" in res_sysd.stdout:
             try:
                 k_match = re.search(r'([\d\.]+)s\s*\(kernel\)', res_sysd.stdout)
@@ -1139,8 +1212,10 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
             except Exception:
                 pass
 
+        # BUG-4 async fix: use the same retrying SSH connect as the sync path.
         logger.info("establishing_primary_ssh_transport")
-        await self.ssh.async_connect()
+        await anyio.to_thread.run_sync(self._connect_ssh_with_retry)
+
 
     def verify_heartbeat(self) -> bool:
         """Ping the OS state via UART heartbeat to verify it's still alive.
@@ -1238,7 +1313,6 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
 
     async def async_hw_boot_to_bootloader(self, medium: str = None) -> None:
         """Asynchronous, manual bypass for boot_to_bootloader."""
-        import anyio
         await anyio.to_thread.run_sync(self._align_to_physical_state)
         target_medium = medium or self.context.active_boot_medium
         needs_strap_change = target_medium != self.context.active_boot_medium
@@ -1291,15 +1365,20 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
         if self.state == DutState.OS_USERLAND:
             if self._try_resume_existing_os():
                 return
-            self.machine.set_state(DutState.DIRTY)
+            # Zombie: SSH/UART heartbeat lost. Reset without a second power cycle.
+            # BUG-2 fix: _do_hardware_reset already calls _do_energize internally
+            # (via _do_power_off + _do_energize). Setting ENERGIZED here lets
+            # TRAP 2 attempt a hot-login instead of triggering another cold boot.
             self._do_hardware_reset()
+            self.machine.set_state(DutState.ENERGIZED)
 
         # --- TRAP 2: Hot-login from ENERGIZED ---
         if self.state == DutState.ENERGIZED:
             if self._try_hot_login():
                 return
+            # Board failed to produce a shell — cold boot from scratch.
             self.machine.set_state(DutState.DIRTY)
-            self._do_hardware_reset()
+            self._do_power_off()
 
         # --- TRAP 3: Cold boot via strategy ---
         if self.state in [DutState.RECOVERY, DutState.DIRTY, DutState.POWER_OFF]:
@@ -1320,7 +1399,6 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
     async def async_hw_boot_to_os(self, medium: str = None) -> None:
         """Asynchronous, manual bypass for boot_to_os. Allows event loop integration."""
         self.boot_metrics.clear()
-        import anyio
         await anyio.to_thread.run_sync(self._align_to_physical_state)
 
         target_medium = medium or self.context.active_boot_medium

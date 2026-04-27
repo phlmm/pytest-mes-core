@@ -122,48 +122,63 @@ class UuuTeziProvisioner(BaseProvisioner):
             logger.critical('fatal_err_msg', err_msg=err_msg)
             raise ProvisioningError(err_msg)
         if serial_client:
-            logger.info('[TEZI] Waiting for TEZI shell to start live log tailing...')
+            logger.info('[TEZI] Waiting for TEZI OS shell to begin live log tailing...')
             if not serial_client.is_connected:
                 serial_client.connect()
-            
-            serial_client.flush_buffers()
-            t_end = time.perf_counter() + self.flash_timeout_s
-            last_ping_time = time.perf_counter()
-            tail_command_sent = False
-            
-            while time.perf_counter() < t_end:
-                for line in serial_client.read_clean_stream(filter_kernel=False):
-                    logger.debug('line', line=line)
-                    last_ping_time = time.perf_counter()
-                    if 'Successfully installed' in line or 'Rebooting' in line or (success_prompt and success_prompt in line):
-                        logger.info('\n[TEZI] Installation Success Signature detected on completed line!')
+
+            # Subscribe via the pub/sub multiplexer so UartKernelWatchdog continues
+            # to receive every byte concurrently (zero data loss, no race window).
+            from pytest_mes_core.state_machine import UartEventStream
+            from pytest_mes_core.events import PromptDetected, PanicDetected
+            from pytest_mes_core.transports.constants import ANSI_ESCAPE_B, PANIC_PATTERN_B
+            import re
+
+            stream = UartEventStream(
+                serial=serial_client,
+                ansi_pattern=ANSI_ESCAPE_B,
+                panic_pattern=PANIC_PATTERN_B,
+            )
+            prompts = {
+                # TEZI shell acquired — inject the live log tail command
+                "tezi_shell_hash": b"~ #",
+                "tezi_shell_root": b"root@",
+                "tezi_shell_slash": b"/ #",
+                # Success signatures (written by TEZI itself)
+                "success_installed": b"Successfully installed",
+                "success_rebooting": b"Rebooting",
+                # Optional custom prompt (e.g. "login:")
+                "success_prompt": success_prompt.encode() if success_prompt else b"login:",
+            }
+            tail_sent = False
+            for event in stream.open(
+                prompts=prompts,
+                timeout_s=self.flash_timeout_s,
+                flush=True,
+                active_ping_char=b'\n',
+            ):
+                if isinstance(event, PanicDetected):
+                    logger.critical('[TEZI] Kernel panic detected during TEZI install! Aborting.')
+                    return False
+
+                if isinstance(event, PromptDetected):
+                    if event.prompt_type in ("tezi_shell_hash", "tezi_shell_root", "tezi_shell_slash"):
+                        if not tail_sent:
+                            logger.info('[TEZI] TEZI Shell acquired! Injecting live log tracker...')
+                            try:
+                                serial_client.raw_write(b'tail -n +1 -f /var/volatile/tezi.log\n')
+                                serial_client.parser.clear_buffer()
+                                tail_sent = True
+                            except Exception as e:
+                                logger.warning('uart_write_blocked_e', e=e)
+                    elif event.prompt_type in ("success_installed", "success_rebooting", "success_prompt"):
+                        logger.info('[TEZI] Installation Success Signature detected!')
                         return True
-                
-                if not tail_command_sent and any((p in serial_client.live_buffer for p in ['~ #', 'root@', '/ #'])):
-                    logger.debug('val', val=serial_client.live_buffer.strip())
-                    logger.info('\n[TEZI] TEZI Shell acquired! Injecting live log tracker...')
-                    try:
-                        serial_client.raw_write(b'tail -n +1 -f /var/volatile/tezi.log\n')
-                        tail_command_sent = True
-                        serial_client.parser.clear_buffer()
-                    except Exception as e:
-                        logger.warning('uart_write_blocked_e', e=e)
-                    last_ping_time = time.perf_counter()
-                    continue
-                
-                if 'Successfully installed' in serial_client.live_buffer or 'Rebooting' in serial_client.live_buffer or (success_prompt and success_prompt in serial_client.live_buffer):
-                    logger.debug('val', val=serial_client.live_buffer.strip())
-                    logger.info('\n[TEZI] Installation Success Signature detected in fragment!')
-                    return True
-                
-                time.sleep(0.1)
-                if not tail_command_sent and time.perf_counter() - last_ping_time > 3.0:
-                    try:
-                        serial_client.raw_write(b'\n')
-                    except Exception:
-                        pass
-                    last_ping_time = time.perf_counter()
-            
-            logger.critical('tezi_fatal_failed_to_complete_installation_within_flash_timeout_s_s', flash_timeout_s=self.flash_timeout_s)
+
+            logger.critical(
+                'tezi_fatal_failed_to_complete_installation_within_flash_timeout_s_s',
+                flash_timeout_s=self.flash_timeout_s,
+            )
             return False
+
+        # No serial_client supplied — uuu exit code 0 is sufficient proof of success.
         return True

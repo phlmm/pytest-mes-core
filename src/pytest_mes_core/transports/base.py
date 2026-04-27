@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from typing import Any, Protocol
+import queue as _queue
 
 # ==========================================
 # DOMAIN EXCEPTIONS
@@ -40,7 +41,11 @@ class CommandResult:
 class DutTransport(Protocol):
     """
     Structural subtype contract for physical Layer 1 / Layer 3 transports.
-    Enforces Command Execution AND Lifecycle State Management.
+    Enforces Command Execution, Lifecycle State Management, and the UART
+    pub/sub multiplexer interface.
+
+    All transports (EphemeralSerialClient, EphemeralSSHClient, FailoverTransport)
+    must satisfy this contract to be usable as a ``dut_transport`` fixture.
     """
 
     @property
@@ -89,3 +94,52 @@ class DutTransport(Protocol):
     ) -> CommandResult:
         """Async variant of safe_run."""
         ...
+
+    # ==========================================
+    # PUB/SUB MULTIPLEXER INTERFACE
+    # ==========================================
+
+    def subscribe(self, maxsize: int = 0) -> _queue.Queue:
+        """Subscribe to the UART pub/sub multiplexer.
+
+        Returns an independent Queue that receives a copy of every RX byte-chunk
+        published by the transport's RX daemon.  Multiple concurrent subscribers
+        (watchdog, FSM, external telemetry) all receive every byte independently
+        with zero data loss.
+
+        Args:
+            maxsize: Queue capacity.  0 = unbounded (recommended for FSM consumers
+                     that may be slow relative to the UART baud rate).
+        """
+        ...
+
+    def unsubscribe(self, q: _queue.Queue) -> None:
+        """Remove a previously registered subscriber queue.
+
+        Must be called in a ``finally`` block to guarantee zero-leakage.
+        The queue will no longer receive new chunks after this call.
+        """
+        ...
+
+    def write_line(self, line: str, sensitive: bool = False) -> None:
+        """Transmit ``line`` followed by a newline terminator.
+
+        Args:
+            line: The text to send (without trailing newline).
+            sensitive: If True, the payload must NOT be logged in plaintext
+                       (e.g. passwords, tokens).
+        """
+        ...
+
+    def raw_write(self, data: bytes) -> None:
+        """Transmit raw bytes without framing or newline injection."""
+        ...
+
+    def flush_buffers(self) -> None:
+        """Flush hardware RX/TX buffers and drain all subscriber queues.
+
+        Calling this before opening an event stream ensures the event loop
+        does not process stale data from a previous boot cycle.
+        """
+        ...
+

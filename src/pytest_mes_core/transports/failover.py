@@ -1,7 +1,8 @@
 import structlog
-import logging
 import threading
+from functools import partial
 from typing import Any
+import anyio
 from pytest_mes_core.transports.base import DutTransport, CommandResult, TransportConnectionError
 logger = structlog.get_logger('mes_core.transports.failover')
 
@@ -21,8 +22,11 @@ class FailoverTransport(DutTransport):
         self.is_failed_over = False
         self._recovery_thread = None
         self._stop_recovery = threading.Event()
+        self._connect_lock = threading.Lock()  # prevents double thread spawn on concurrent connect()
         if hasattr(self.fallback, 'watchdog') and getattr(self.fallback, 'watchdog', None):
-            self.fallback.watchdog.register_panic_callback(self._on_panic)
+            watchdog = self.fallback.watchdog
+            if hasattr(watchdog, 'register_panic_callback'):
+                watchdog.register_panic_callback(self._on_panic)
 
     def _probe_primary_recovery(self) -> None:
         """Background thread that periodically checks if the primary transport has recovered.
@@ -60,28 +64,29 @@ class FailoverTransport(DutTransport):
     def connect(self) -> None:
         """Connects both primary and fallback transports and arms the failover matrix.
 
-        This method establishes the initial connections and spawns a background
-        recovery thread that periodically checks if the primary transport has
-        recovered from a failed state.
+        Thread-safe: guarded by ``_connect_lock`` to prevent a race where two
+        concurrent callers each pass the ``is_connected`` check and both spawn
+        a recovery thread.
         """
-        if not self.is_connected:
-            logger.info('[Router] Arming dual-transport failover matrix...')
-            
-            # Connect the reliable fallback (UART) first so it is available immediately
-            self.fallback.connect()
-            
-            # Attempt to connect the high-speed primary (SSH), but gracefully accept failure
-            # If the board is in BOOTLOADER or POWER_OFF, this will naturally fail.
-            try:
-                self.primary.connect()
-            except TransportConnectionError:
-                logger.warning('[Router] Primary transport offline during setup. Matrix starting in FAILOVER mode.')
-                self.is_failed_over = True
-                
-            self._stop_recovery.clear()
-            self._recovery_thread = threading.Thread(target=self._probe_primary_recovery, daemon=True)
-            self._recovery_thread.start()
-            logger.debug('[Router] Dual-transport routing matrix armed.')
+        with self._connect_lock:
+            if not self.is_connected:
+                logger.info('[Router] Arming dual-transport failover matrix...')
+
+                # Connect the reliable fallback (UART) first so it is available immediately
+                self.fallback.connect()
+
+                # Attempt to connect the high-speed primary (SSH), but gracefully accept failure
+                # If the board is in BOOTLOADER or POWER_OFF, this will naturally fail.
+                try:
+                    self.primary.connect()
+                except TransportConnectionError:
+                    logger.warning('[Router] Primary transport offline during setup. Matrix starting in FAILOVER mode.')
+                    self.is_failed_over = True
+
+                self._stop_recovery.clear()
+                self._recovery_thread = threading.Thread(target=self._probe_primary_recovery, daemon=True)
+                self._recovery_thread.start()
+                logger.debug('[Router] Dual-transport routing matrix armed.')
 
     def disconnect(self) -> None:
         """Tears down the dual-transport matrix and stops the recovery thread.
@@ -97,20 +102,22 @@ class FailoverTransport(DutTransport):
         self.fallback.disconnect()
 
     async def async_connect(self) -> None:
-        """Async variant of connect."""
-        if not self.is_connected:
+        """Async variant of connect. Mirrors the same connect-lock semantics as the sync version."""
+        # Acquire lock synchronously (it's very brief — just checking and setting state).
+        with self._connect_lock:
+            already_connected = self.is_connected
+        if not already_connected:
             logger.info('[Router] Arming dual-transport failover matrix (Async)...')
-            import anyio
-            
+
             # Always ensure fallback is connected
             await self.fallback.async_connect()
-            
+
             try:
                 await self.primary.async_connect()
             except TransportConnectionError:
                 logger.warning('[Router] Primary transport offline during async setup. Matrix starting in FAILOVER mode.')
                 self.is_failed_over = True
-                
+
             self._stop_recovery.clear()
             self._recovery_thread = threading.Thread(target=self._probe_primary_recovery, daemon=True)
             self._recovery_thread.start()
@@ -119,9 +126,10 @@ class FailoverTransport(DutTransport):
     async def async_disconnect(self) -> None:
         """Async variant of disconnect."""
         self._stop_recovery.set()
-        import anyio
         if self._recovery_thread and self._recovery_thread.is_alive():
-            await anyio.to_thread.run_sync(self._recovery_thread.join, 1.0)
+            # partial() is required: anyio.to_thread.run_sync takes a zero-arg callable.
+            # Passing 1.0 directly would be interpreted as the `cancellable` kwarg (a bool).
+            await anyio.to_thread.run_sync(partial(self._recovery_thread.join, 1.0))
         logger.debug('[Router] ZERO-LEAKAGE: Tearing down dual-transport matrix.')
         async with anyio.create_task_group() as tg:
             tg.start_soon(self.primary.async_disconnect)
@@ -201,6 +209,7 @@ class FailoverTransport(DutTransport):
         """Pass-through to Fallback Transport's Pub/Sub unsubscribe."""
         if hasattr(self.fallback, 'unsubscribe'):
             return self.fallback.unsubscribe(q)
+        raise NotImplementedError("Fallback transport does not support unsubscribe().")
 
     def expect(self, pattern: str, timeout_s: float = 5.0, blast_char: str = '', active_redraw: bool = True) -> str:
         """Pass-through to Fallback Transport's expect()."""
@@ -227,13 +236,41 @@ class FailoverTransport(DutTransport):
         raise NotImplementedError("Fallback transport does not support raw_write().")
 
     def raw_read_chunk(self) -> bytes:
-        """Pass-through to Fallback Transport's raw_read_chunk()."""
+        """Pass-through to Fallback Transport's raw_read_chunk().
+
+        .. deprecated::
+            Use :meth:`subscribe` / :meth:`unsubscribe` instead.
+            ``raw_read_chunk()`` bypasses the pub/sub multiplexer so concurrent
+            consumers (watchdog, FSM) will silently miss any bytes consumed here.
+        """
+        import warnings
+        warnings.warn(
+            "FailoverTransport.raw_read_chunk() bypasses the pub/sub multiplexer. "
+            "Use subscribe()/unsubscribe() for multiplexed byte access.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         if hasattr(self.fallback, 'raw_read_chunk'):
             return self.fallback.raw_read_chunk()
         raise NotImplementedError("Fallback transport does not support raw_read_chunk().")
 
+
     def read_clean_stream(self):
-        """Pass-through to Fallback Transport's read_clean_stream()."""
+        """Pass-through to Fallback Transport's read_clean_stream().
+
+        .. deprecated::
+            Use :class:`UartEventStream` instead.
+            ``read_clean_stream()`` bypasses the pub/sub multiplexer — concurrent
+            consumers miss all bytes consumed here, and events are not dispatched
+            to the EventBus.
+        """
+        import warnings
+        warnings.warn(
+            "FailoverTransport.read_clean_stream() bypasses the pub/sub multiplexer. "
+            "Use UartEventStream.open() for event-driven, multiplexed UART access.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         if hasattr(self.fallback, 'read_clean_stream'):
             return self.fallback.read_clean_stream()
         raise NotImplementedError("Fallback transport does not support read_clean_stream().")

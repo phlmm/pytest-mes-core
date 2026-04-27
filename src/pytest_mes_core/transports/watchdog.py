@@ -1,21 +1,22 @@
 import structlog
-import re
 import anyio
-import anyio.from_thread
 import logging
-from typing import Any, Callable, Optional, Pattern
+from typing import Any, Callable, List, Optional
 
 from pytest_mes_core.events import bus, PanicDetected
+from pytest_mes_core.transports.constants import ANSI_ESCAPE_B, PANIC_PATTERN_B
 
 logger = structlog.get_logger('mes_core.transports.watchdog')
 
 class UartKernelWatchdog:
     """
     Background asyncio task that monitors the serial stream for kernel panics.
-    Runs only when the UART is not actively locked by an expect() call.
+    Runs concurrently with the state machine via the pub/sub subscriber queue—
+    both consumers receive every byte independently, with zero data loss.
     Uses AnyIO for async concurrency and Pluggy for decoupled event dispatch.
     """
-    PANIC_PATTERN: Pattern[bytes] = re.compile(b'(Kernel panic - not syncing|Unable to handle kernel paging request|Oops - undefined instruction|Out of memory: Killed process|BUG: soft lockup - CPU|rcu_preempt detected stalls|task blocked for more than 120 seconds|synchronous external abort|mmc\\d+: error -110|EXT4-fs error|UBIFS error|HAB Events|SEC_ERR|Signature Verification Failed)')
+    # Shared with UartEventStream via constants.py — single source of truth.
+    PANIC_PATTERN = PANIC_PATTERN_B
 
     def __init__(self, serial_client: Any):
         self.serial_client = serial_client
@@ -26,6 +27,7 @@ class UartKernelWatchdog:
         self._rolling_window = b''
         self._thread = None
         self._stop_event = None
+        self._panic_callbacks: List[Callable[[], None]] = []
 
     def start(self) -> None:
         """Spawns the background watchdog task to monitor the serial stream."""
@@ -52,6 +54,12 @@ class UartKernelWatchdog:
             self._thread.join(timeout=1.0)
         self._thread = None
         logger.debug('[Watchdog] Kernel panic background watchdog stopped.')
+
+    def register_panic_callback(self, callback: Callable[[], None]) -> None:
+        """Register a zero-arg callable that will be invoked synchronously when a kernel panic
+        is detected.  Used by :class:`FailoverTransport` to sever the primary connection.
+        """
+        self._panic_callbacks.append(callback)
 
     async def async_start(self) -> None:
         """Async variant of start."""
@@ -81,7 +89,9 @@ class UartKernelWatchdog:
                 while not self._stop_event.is_set() and self.serial_client.is_connected:
                     try:
                         chunk = await anyio.to_thread.run_sync(q.get, True, 0.1)
-                        clean_chunk = self.serial_client.ANSI_ESCAPE_B.sub(b'', chunk)
+                        # Use the shared ANSI_ESCAPE_B constant — do NOT reach into
+                        # self.serial_client for the pattern (breaks FailoverTransport).
+                        clean_chunk = ANSI_ESCAPE_B.sub(b'', chunk)
                         self._rolling_window += clean_chunk
                         if len(self._rolling_window) > 1024:
                             self._rolling_window = self._rolling_window[-1024:]
@@ -91,7 +101,14 @@ class UartKernelWatchdog:
                             logger.critical('=' * 60)
                             self._panic_msg = 'Async Kernel Panic detected during idle/background monitoring.'
                             self._panic_event_set = True
-                            
+
+                            # Invoke synchronous panic callbacks (e.g. FailoverTransport._on_panic)
+                            for cb in self._panic_callbacks:
+                                try:
+                                    cb()
+                                except Exception as cb_exc:
+                                    logger.error('[Watchdog] Panic callback raised: %s', cb_exc)
+
                             # Dispatch Pydantic Event via Pluggy EventBus
                             import time
                             bus.emit_uart_event(PanicDetected(elapsed_s=time.time(), raw_output=self._panic_msg))
