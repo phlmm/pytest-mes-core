@@ -1,5 +1,4 @@
 import structlog
-import logging
 from typing import Any
 from contextlib import contextmanager
 from pytest_mes_core.host_adapters import BaseHostAdapter, HostAdapterError

@@ -222,10 +222,13 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
         metadata = getattr(config, '_metadata')
         som_sn = ctx.dut_manifest.get('serial_number', ctx.dut_serial)
         board_sn = ctx.dut_manifest.get('evse_carrier_serial', 'UNKNOWN')
+        hw_sn = ctx.dut_manifest.get('HW_SN_CARRIER', '')
         metadata['Board Serial'] = board_sn
         metadata['SOM Serial'] = som_sn
+        if hw_sn:
+            metadata['HW SN'] = str(hw_sn)
         for k, v in ctx.dut_manifest.items():
-            if k not in ['serial_number', 'evse_carrier_serial', 'custom_flags'] and v:
+            if k not in ['serial_number', 'evse_carrier_serial', 'HW_SN_CARRIER', 'custom_flags'] and v:
                 pretty_key = k.replace('_', ' ').title()
                 metadata[pretty_key] = str(v)
 
@@ -250,10 +253,13 @@ def pytest_html_results_summary(prefix: list[str], summary: list[str], postfix: 
     html_block += "<tr style='background-color: #f2f2f2;'><th style='border: 1px solid #ddd; padding: 8px; text-align: left;'>Component</th><th style='border: 1px solid #ddd; padding: 8px; text-align: left;'>Identifier</th></tr>"
     som_sn = ctx.dut_manifest.get('serial_number', ctx.dut_serial)
     board_sn = ctx.dut_manifest.get('evse_carrier_serial', 'UNKNOWN')
+    hw_sn = ctx.dut_manifest.get('HW_SN_CARRIER', '')
     html_block += f"<tr><td style='border: 1px solid #ddd; padding: 8px;'>Board Serial</td><td style='border: 1px solid #ddd; padding: 8px;'><b>{html.escape(str(board_sn))}</b></td></tr>"
     html_block += f"<tr><td style='border: 1px solid #ddd; padding: 8px;'>SOM Serial</td><td style='border: 1px solid #ddd; padding: 8px;'><b>{html.escape(str(som_sn))}</b></td></tr>"
+    if hw_sn:
+        html_block += f"<tr><td style='border: 1px solid #ddd; padding: 8px;'>HW SN</td><td style='border: 1px solid #ddd; padding: 8px;'><b>{html.escape(str(hw_sn))}</b></td></tr>"
     for k, v in ctx.dut_manifest.items():
-        if k not in ['serial_number', 'evse_carrier_serial', 'custom_flags'] and v:
+        if k not in ['serial_number', 'evse_carrier_serial', 'HW_SN_CARRIER', 'custom_flags'] and v:
             pretty_key = k.replace('_', ' ').title()
             html_block += f"<tr><td style='border: 1px solid #ddd; padding: 8px;'>{html.escape(pretty_key)}</td><td style='border: 1px solid #ddd; padding: 8px;'><b>{html.escape(str(v))}</b></td></tr>"
     html_block += '</table>'
@@ -337,12 +343,16 @@ def pytest_terminal_summary(terminalreporter: Any, exitstatus: int, config: pyte
         ctx = telemetry_sink.context
         som_sn = ctx.dut_manifest.get('serial_number', ctx.dut_serial)
         board_sn = ctx.dut_manifest.get('evse_carrier_serial', 'UNKNOWN')
+        hw_sn = ctx.dut_manifest.get('HW_SN_CARRIER', '')
         terminalreporter.write_line(f'Board Serial : {board_sn}')
         terminalreporter.write_line(f'SOM Serial   : {som_sn}')
+        if hw_sn:
+            terminalreporter.write_line(f'HW SN        : {hw_sn}')
         for k, v in ctx.dut_manifest.items():
-            if k not in ['serial_number', 'evse_carrier_serial', 'custom_flags'] and v:
+            if k not in ['serial_number', 'evse_carrier_serial', 'HW_SN_CARRIER', 'custom_flags'] and v:
                 pretty_key = k.replace('_', ' ').title()
                 terminalreporter.write_line(f'{pretty_key:<12} : {v}')
+
     transports = []
     if bom.ssh_targets:
         transports.append('SSH')

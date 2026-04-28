@@ -71,17 +71,18 @@ class EphemeralSerialClient:
         while not self._stop_rx_event.is_set():
             if self.ser and self.ser.is_open:
                 try:
-                    if self.ser.in_waiting > 0:
-                        chunk = self.ser.read(max(1, self.ser.in_waiting))
-                        if chunk:
-                            self.parser.ingest(chunk)
-                            with self._sub_lock:
+                    chunk = b''
+                    with self._sub_lock:
+                        if self.ser.in_waiting > 0:
+                            chunk = self.ser.read(max(1, self.ser.in_waiting))
+                            if chunk:
+                                self.parser.ingest(chunk)
                                 for q in self._subscribers:
                                     try:
                                         q.put_nowait(chunk)
                                     except queue.Full:
                                         pass
-                    else:
+                    if not chunk:
                         time.sleep(0.01)
                 except Exception:
                     time.sleep(0.05)
@@ -290,12 +291,14 @@ class EphemeralSerialClient:
         )
 
     def flush_buffers(self) -> None:
-        if self.ser and self.ser.is_open:
-            self.ser.reset_output_buffer()
-            self.ser.reset_input_buffer()
-            time.sleep(0.05)
-        self.parser.clear_buffer()
         with self._sub_lock:
+            if self.ser and self.ser.is_open:
+                try:
+                    self.ser.reset_output_buffer()
+                    self.ser.reset_input_buffer()
+                except Exception:
+                    pass
+            self.parser.clear_buffer()
             for q in self._subscribers:
                 while not q.empty():
                     try:

@@ -93,10 +93,20 @@ class DeveloperMarkdownExporter:
         if self._context and self._context.dut_manifest:
             footer += '## Hardware Manifest (Station BOM)\n'
             footer += '| Component | Identifier |\n|---|---|\n'
+            # Pin the three identity rows first so the order is always deterministic
+            board_sn = self._context.dut_manifest.get('evse_carrier_serial', '')
+            som_sn = self._context.dut_manifest.get('serial_number', self._context.dut_serial)
+            hw_sn_val = self._context.dut_manifest.get('HW_SN_CARRIER', '')
+            if board_sn:
+                footer += f'| `Board Serial` | **{board_sn}** |\n'
+            footer += f'| `SOM Serial` | **{som_sn}** |\n'
+            if hw_sn_val:
+                footer += f'| `HW SN` | **{hw_sn_val}** |\n'
+            _pinned = {'evse_carrier_serial', 'serial_number', 'HW_SN_CARRIER', 'custom_flags', 'software_manifest'}
             for k, v in self._context.dut_manifest.items():
-                # Skip nested dicts (e.g. a software_manifest that slipped through)
-                # and blank values — only flat scalar hardware identifiers belong here.
-                if v and not isinstance(v, dict):
+                # Skip nested dicts (e.g. a software_manifest that slipped through),
+                # blank values, and the pinned rows already rendered above.
+                if v and not isinstance(v, dict) and k not in _pinned:
                     pretty_key = k.replace('_', ' ').title()
                     footer += f'| `{pretty_key}` | **{v}** |\n'
             footer += '\n'

@@ -28,6 +28,7 @@ class UartKernelWatchdog:
         self._thread = None
         self._stop_event = None
         self._panic_callbacks: List[Callable[[], None]] = []
+        self._muted = False  # suppresses panic detection during known-noisy windows
 
     def start(self) -> None:
         """Spawns the background watchdog task to monitor the serial stream."""
@@ -71,6 +72,18 @@ class UartKernelWatchdog:
         import anyio
         await anyio.to_thread.run_sync(self.stop)
 
+    def mute(self) -> None:
+        """Suppress panic detection. Use around known-noisy windows (e.g. USB recovery boot)."""
+        self._muted = True
+        self._rolling_window = b''  # discard stale bytes accumulated before mute
+        logger.debug('[Watchdog] Panic detection muted.')
+
+    def unmute(self) -> None:
+        """Re-enable panic detection and clear the rolling window."""
+        self._rolling_window = b''  # discard any noise accumulated during muted window
+        self._muted = False
+        logger.debug('[Watchdog] Panic detection unmuted.')
+
     def is_panicked(self) -> bool:
         return self._panic_event_set
 
@@ -96,6 +109,10 @@ class UartKernelWatchdog:
                         if len(self._rolling_window) > 1024:
                             self._rolling_window = self._rolling_window[-1024:]
                         if self.PANIC_PATTERN.search(self._rolling_window):
+                            if self._muted:
+                                # In a muted window — clear buffer and ignore.
+                                self._rolling_window = b''
+                                continue
                             logger.critical('=' * 60)
                             logger.critical('[Watchdog] FATAL: ASYNC KERNEL PANIC DETECTED ON UART!')
                             logger.critical('=' * 60)

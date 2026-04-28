@@ -927,9 +927,24 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
 
     @retry(stop=stop_after_attempt(50), wait=wait_fixed(0.1), reraise=True, before_sleep=before_sleep_log(logger, logging.DEBUG))
     def _rebind_serial_port(self) -> None:
-        """Attempts to reconnect the serial port after a hardware power cycle."""
+        """Attempts to reconnect the serial port after a hardware power cycle.
+
+        After connect() opens the port, the USB-UART adapter may still have
+        buffered TX bytes from the previous session (e.g. a failed heartbeat
+        command).  We flush both directions immediately after open so those
+        stale bytes never reach the board's freshly-started getty.
+        """
         self.serial.disconnect()
         self.serial.connect()
+        # Give the adapter's FIFO a brief window to drain into the RX queue
+        # (so flush_buffers discards them rather than open() ingesting them).
+        time.sleep(0.2)
+        try:
+            if self.serial.ser and self.serial.ser.is_open:
+                self.serial.ser.reset_output_buffer()  # drop any pending TX bytes
+                self.serial.flush_buffers()            # drain stale RX bytes
+        except Exception:
+            pass
 
     def _set_uboot_trap_and_reboot(self) -> None:
         logger.info("hot_patching_uboot_env")
@@ -1237,16 +1252,17 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
         # 1. Parse SWUpdate or Custom Validators
         self._verify_linux_context()
 
-        # 1.5. Harvest Kernel Boot Analytics
-        res_sysd = self.serial.safe_run("systemd-analyze time", timeout_s=5.0, check_exit_code=False)
-        if res_sysd.ok and "Startup finished in" in res_sysd.stdout:
-            try:
-                k_match = re.search(r'([\d\.]+)s\s*\(kernel\)', res_sysd.stdout)
-                u_match = re.search(r'([\d\.]+)s\s*\(userspace\)', res_sysd.stdout)
-                if k_match: self.boot_metrics["t_systemd_kernel_s"] = float(k_match.group(1))
-                if u_match: self.boot_metrics["t_systemd_userspace_s"] = float(u_match.group(1))
-            except Exception:
-                pass
+        # 1.5. Harvest Kernel Boot Analytics (UART only — skipped in SSH-only sessions)
+        if self.serial.is_connected:
+            res_sysd = self.serial.safe_run("systemd-analyze time", timeout_s=5.0, check_exit_code=False)
+            if res_sysd.ok and "Startup finished in" in res_sysd.stdout:
+                try:
+                    k_match = re.search(r'([\d\.]+)s\s*\(kernel\)', res_sysd.stdout)
+                    u_match = re.search(r'([\d\.]+)s\s*\(userspace\)', res_sysd.stdout)
+                    if k_match: self.boot_metrics["t_systemd_kernel_s"] = float(k_match.group(1))
+                    if u_match: self.boot_metrics["t_systemd_userspace_s"] = float(u_match.group(1))
+                except Exception:
+                    pass
 
         # 2. Establish the high-speed SSH pipeline.
         # BUG-4 fix: sshd may not be listening yet even though the shell prompt is up.
@@ -1275,17 +1291,18 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
             return
         await anyio.to_thread.run_sync(self._verify_linux_context)
 
-        res_sysd = await anyio.to_thread.run_sync(
-            functools.partial(self.serial.safe_run, "systemd-analyze time", timeout_s=5.0, check_exit_code=False)
-        )
-        if res_sysd.ok and "Startup finished in" in res_sysd.stdout:
-            try:
-                k_match = re.search(r'([\d\.]+)s\s*\(kernel\)', res_sysd.stdout)
-                u_match = re.search(r'([\d\.]+)s\s*\(userspace\)', res_sysd.stdout)
-                if k_match: self.boot_metrics["t_systemd_kernel_s"] = float(k_match.group(1))
-                if u_match: self.boot_metrics["t_systemd_userspace_s"] = float(u_match.group(1))
-            except Exception:
-                pass
+        if self.serial.is_connected:
+            res_sysd = await anyio.to_thread.run_sync(
+                functools.partial(self.serial.safe_run, "systemd-analyze time", timeout_s=5.0, check_exit_code=False)
+            )
+            if res_sysd.ok and "Startup finished in" in res_sysd.stdout:
+                try:
+                    k_match = re.search(r'([\d\.]+)s\s*\(kernel\)', res_sysd.stdout)
+                    u_match = re.search(r'([\d\.]+)s\s*\(userspace\)', res_sysd.stdout)
+                    if k_match: self.boot_metrics["t_systemd_kernel_s"] = float(k_match.group(1))
+                    if u_match: self.boot_metrics["t_systemd_userspace_s"] = float(u_match.group(1))
+                except Exception:
+                    pass
 
         # BUG-4 async fix: use the same retrying SSH connect as the sync path.
         logger.info("establishing_primary_ssh_transport")
@@ -1293,16 +1310,27 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
 
 
     def verify_heartbeat(self) -> bool:
-        """Ping the OS state via UART heartbeat to verify it's still alive.
+        """Ping the OS state via heartbeat to verify it's still alive.
 
         Returns:
             bool: True if the device successfully echoes the heartbeat payload, False otherwise.
         """
-        if not self.serial.is_connected:
+        if self.state == DutState.OS_USERLAND and self.ssh and not self.ssh.is_connected:
+            try:
+                logger.debug("attempting_ssh_reconnect_for_heartbeat")
+                self.ssh.connect()
+            except Exception:
+                pass
+
+        if not self.transport.is_connected:
             return False
-        logger.debug("verifying_uart_heartbeat")
-        res = self.serial.safe_run("echo MES_HEARTBEAT", timeout_s=2.0, check_exit_code=False)
-        return "MES_HEARTBEAT" in res.stdout
+        logger.debug("verifying_heartbeat", transport=self.transport.__class__.__name__)
+        try:
+            res = self.transport.safe_run("echo MES_HEARTBEAT", timeout_s=5.0, check_exit_code=False)
+            return "MES_HEARTBEAT" in res.stdout
+        except Exception as e:
+            logger.debug("heartbeat_failed", reason=str(e))
+            return False
 
     # =========================================================================
     # SOTA CONTEXT VALIDATION
@@ -1437,15 +1465,23 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
             self.machine.set_state(DutState.DIRTY)
 
         # --- TRAP 1: Resume existing OS (zombie detection) ---
+        # Two-step: first verify liveness, then finalize (connect SSH + context validation).
+        # Keeping these separate prevents a failing context validator from being
+        # misdiagnosed as a zombie board and triggering an unwanted power-cycle.
         if self.state == DutState.OS_USERLAND:
             if self._try_resume_existing_os():
+                # Board is alive — now run full finalization. Any error here is a
+                # legitimate test/environment problem, not a zombie, so let it propagate
+                # as an exception rather than silently triggering a power-cycle.
+                self._finalize_os_boot()
                 return
-            # Zombie: SSH/UART heartbeat lost. Reset without a second power cycle.
+            # Confirmed zombie: UART heartbeat lost and SSH unreachable.
             # BUG-2 fix: _do_hardware_reset already calls _do_energize internally
             # (via _do_power_off + _do_energize). Setting ENERGIZED here lets
             # TRAP 2 attempt a hot-login instead of triggering another cold boot.
             self._do_hardware_reset()
-            self.machine.set_state(DutState.ENERGIZED)
+            if self.psu:
+                self.machine.set_state(DutState.ENERGIZED)
 
         # --- TRAP 2: Hot-login from ENERGIZED ---
         if self.state == DutState.ENERGIZED:
@@ -1484,8 +1520,11 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
             await anyio.to_thread.run_sync(self.machine.set_state, DutState.DIRTY)
 
         # --- TRAP 1: Resume existing OS (zombie detection) ---
+        # Two-step: liveness first, then finalize. Keeps context validation failures
+        # from being misdiagnosed as zombie boards.
         if self.state == DutState.OS_USERLAND:
             if await self.async_try_resume_existing_os():
+                await self.async_finalize_os_boot()
                 await anyio.to_thread.run_sync(self.machine.set_state, DutState.OS_USERLAND)
                 return
             await anyio.to_thread.run_sync(self.machine.set_state, DutState.DIRTY)
@@ -1517,32 +1556,105 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
             await anyio.to_thread.run_sync(self.machine.set_state, DutState.OS_USERLAND)
             return
 
+    @property
+    def transport(self):
+        """Returns the primary active transport.
+
+        Prioritizes SSH for OS-level interactions, falling back to serial
+        if SSH is unavailable.
+        """
+        if self.ssh and self.ssh.is_connected:
+            return self.ssh
+        return self.serial
+
     def _try_resume_existing_os(self) -> bool:
-        """Attempt to reuse an existing OS_USERLAND session. Returns True on success."""
-        logger.debug("verifying_uart_heartbeat_existing_os")
-        res = self.serial.safe_run("echo MES_HEARTBEAT", timeout_s=2.0, check_exit_code=False)
-        if "MES_HEARTBEAT" in res.stdout:
-            try:
-                self._finalize_os_boot()
+        """Liveness check for an existing OS_USERLAND session. Returns True if board is alive.
+
+        This is a pure liveness probe — it does NOT run context validation or
+        establish SSH.  The caller (_hw_boot_to_os TRAP 1) is responsible for
+        calling _finalize_os_boot() after a True return.
+
+        Decision tree:
+          - SSH echo heartbeat (preferred for faster, non-intrusive state detection)
+          - Serial echo heartbeat fallback
+          - Both fail         → board is a zombie → return False → power-cycle
+        """
+        logger.debug("verifying_ssh_heartbeat_existing_os")
+        try:
+            self._connect_ssh_with_retry()
+            res = self.ssh.safe_run("echo MES_HEARTBEAT", timeout_s=2.0)
+            if "MES_HEARTBEAT" in res.stdout:
                 return True
+        except (TransportConnectionError, Exception) as e:
+            logger.debug("ssh_liveness_check_failed", reason=str(e))
+
+        logger.debug("verifying_uart_heartbeat_existing_os")
+
+        if self.serial.is_connected:
+            # Fast path: UART echo
+            try:
+                res = self.serial.safe_run("echo MES_HEARTBEAT", timeout_s=2.0, check_exit_code=False)
             except TransportConnectionError:
-                logger.warning("ssh_provision_failed_on_existing_os", action="marking_dirty")
-        else:
+                logger.warning("uart_heartbeat_failed", reason="serial_port_closed_mid_run", action="marking_dirty")
+                return False
+
+            if "MES_HEARTBEAT" in res.stdout:
+                return True
+
             logger.warning("uart_heartbeat_failed", reason="os_is_a_zombie", action="marking_dirty")
+            # Flush stale TX bytes so they don't poison the board after power-cycle
+            try:
+                if self.serial.ser and self.serial.ser.is_open:
+                    self.serial.ser.write(b'\x03\x03\r\n')
+                    self.serial.ser.flush()
+                    self.serial.ser.reset_output_buffer()
+                    self.serial.flush_buffers()
+                    logger.debug("uart_tx_fifo_flushed_before_power_cycle")
+            except Exception as flush_err:
+                logger.debug("uart_flush_skipped", reason=str(flush_err))
+            return False
+
         return False
 
     async def async_try_resume_existing_os(self) -> bool:
-        """Async attempt to reuse an existing OS_USERLAND session. Returns True on success."""
-        logger.debug("verifying_uart_heartbeat_existing_os")
-        res = await self.serial.async_safe_run("echo MES_HEARTBEAT", timeout_s=2.0, check_exit_code=False)
-        if "MES_HEARTBEAT" in res.stdout:
-            try:
-                await self.async_finalize_os_boot()
+        """Async liveness check for an existing OS_USERLAND session.
+
+        Mirrors the sync _try_resume_existing_os() — pure liveness only.
+        Caller is responsible for calling async_finalize_os_boot() after True return.
+        """
+        logger.debug("verifying_ssh_heartbeat_existing_os")
+        try:
+            await anyio.to_thread.run_sync(self._connect_ssh_with_retry)
+            res = await self.ssh.async_safe_run("echo MES_HEARTBEAT", timeout_s=2.0)
+            if "MES_HEARTBEAT" in res.stdout:
                 return True
+        except (TransportConnectionError, Exception) as e:
+            logger.debug("ssh_liveness_check_failed", reason=str(e))
+
+        logger.debug("verifying_uart_heartbeat_existing_os")
+
+        if self.serial.is_connected:
+            try:
+                res = await self.serial.async_safe_run("echo MES_HEARTBEAT", timeout_s=2.0, check_exit_code=False)
             except TransportConnectionError:
-                logger.warning("ssh_provision_failed_on_existing_os", action="marking_dirty")
-        else:
+                logger.warning("uart_heartbeat_failed", reason="serial_port_closed_mid_run", action="marking_dirty")
+                return False
+
+            if "MES_HEARTBEAT" in res.stdout:
+                return True
+
             logger.warning("uart_heartbeat_failed", reason="os_is_a_zombie", action="marking_dirty")
+            try:
+                if self.serial.ser and self.serial.ser.is_open:
+                    self.serial.ser.write(b'\x03\x03\r\n')
+                    self.serial.ser.flush()
+                    self.serial.ser.reset_output_buffer()
+                    self.serial.flush_buffers()
+                    logger.debug("uart_tx_fifo_flushed_before_power_cycle")
+            except Exception as flush_err:
+                logger.debug("uart_flush_skipped", reason=str(flush_err))
+            return False
+
         return False
 
     def _try_hot_login(self) -> bool:

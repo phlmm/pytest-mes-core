@@ -1,4 +1,5 @@
 from typing import Dict, List, Literal, Optional, Union
+from pydantic import field_validator
 from pydantic import Field, computed_field, model_validator
 from typing_extensions import Annotated
 from pytest_mes_core.config.base import BaseHardwareConfig
@@ -53,6 +54,18 @@ class UsbSdMuxConfig(BaseHardwareConfig):
     # Prefer by-id so the path survives reboots. Use resolved_block_device at runtime.
     host_block_device: str
     image_flash_timeout_s: int = Field(default=300, gt=0)
+    # Optional: when set, the HostUsbSdMuxAdapter will assert/release DUT recovery
+    # by driving this GPIO on the USB-SD-Mux Fast variant (sdFST HS-SD/MMC).
+    # Valid values: 0 or 1 (the two auxiliary open-drain outputs on the Fast variant).
+    # Leave unset (None) for the Classic variant which has no user GPIOs.
+    recovery_gpio: Optional[int] = Field(default=None)
+
+    @field_validator('recovery_gpio')
+    @classmethod
+    def _validate_recovery_gpio(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None and v not in (0, 1):
+            raise ValueError(f"recovery_gpio must be 0 or 1, got {v!r}")
+        return v
 
     @computed_field
     @property

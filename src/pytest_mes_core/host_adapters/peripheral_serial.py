@@ -52,7 +52,19 @@ class HostPeripheralSerialAdapter(BaseHostAdapter):
             return
         logger.info('binding_on_port_baudrate_bps', port=self.cfg.port, baudrate=self.cfg.baudrate)
         try:
-            self.ser = serial.Serial(self.cfg.port, self.cfg.baudrate, timeout=self.cfg.timeout_s, exclusive=True)
+            self.ser = serial.Serial()
+            self.ser.port = self.cfg.port
+            self.ser.baudrate = self.cfg.baudrate
+            self.ser.timeout = self.cfg.timeout_s
+            self.ser.exclusive = True
+            
+            # Prevent PySerial from asserting DTR/RTS upon opening the port.
+            # This prevents the USB-RS232 dongle from constantly pulling the MCU's 
+            # reset line low or triggering spurious SWRST (Software Resets).
+            self.ser.dtr = False
+            self.ser.rts = False
+            
+            self.ser.open()
             self.ser.reset_input_buffer()
             self.ser.reset_output_buffer()
         except serial.SerialException as e:
