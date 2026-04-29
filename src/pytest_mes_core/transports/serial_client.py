@@ -113,6 +113,8 @@ class EphemeralSerialClient:
                 logger.critical('=' * 60)
                 raise TransportConnectionError(error_msg)
             raise TransportConnectionError(f'Failed to bind Host UART {self.cfg.port}: {e}')
+        except Exception as e:
+            raise TransportConnectionError(f'Failed to bind Host UART {self.cfg.port}: {e}')
 
     def disconnect(self) -> None:
         self.stop_rx_daemon()
@@ -120,10 +122,16 @@ class EphemeralSerialClient:
         if self.ser and self.ser.is_open:
             try:
                 self.ser.reset_output_buffer()
+            except Exception:
+                pass
+            try:
                 self.ser.reset_input_buffer()
             except Exception:
                 pass
-            self.ser.close()
+            try:
+                self.ser.close()
+            except Exception:
+                pass
 
     async def async_connect(self) -> None:
         import anyio
@@ -148,10 +156,13 @@ class EphemeralSerialClient:
             with self._tx_lock:
                 if blast_char:
                     blast_bytes = blast_char.encode('utf-8')
-                    for _ in range(3):
-                        self.ser.write(blast_bytes)
-                        time.sleep(0.05)
-                    self.ser.flush()
+                    try:
+                        for _ in range(3):
+                            self.ser.write(blast_bytes)
+                            time.sleep(0.05)
+                        self.ser.flush()
+                    except Exception as e:
+                        raise TransportConnectionError(f'UART write failed: {e}')
 
             logger.debug('expecting_pattern_timeout_timeout_s_s_active_redraw_active_redraw', pattern=pattern, timeout_s=timeout_s, active_redraw=active_redraw)
             t_end = time.perf_counter() + timeout_s
@@ -173,8 +184,11 @@ class EphemeralSerialClient:
                 if active_redraw and time.perf_counter() - last_rx_time > 2.0:
                     with self._tx_lock:
                         logger.debug('[UART] Console silent. Injecting ping to redraw prompt...')
-                        self.ser.write(b'\n')
-                        self.ser.flush()
+                        try:
+                            self.ser.write(b'\n')
+                            self.ser.flush()
+                        except Exception as e:
+                            raise TransportConnectionError(f'UART write failed: {e}')
                     last_rx_time = time.perf_counter()
                     
         finally:
@@ -201,10 +215,13 @@ class EphemeralSerialClient:
                 log_cmd = cmd if len(cmd) < 256 else cmd[:253] + '...'
                 logger.debug('tx_log_cmd', log_cmd=log_cmd)
             payload = f'{cmd}\n'.encode('utf-8')
-            for i in range(0, len(payload), 16):
-                self.ser.write(payload[i:i + 16])
-                self.ser.flush()
-                time.sleep(0.002)
+            try:
+                for i in range(0, len(payload), 16):
+                    self.ser.write(payload[i:i + 16])
+                    self.ser.flush()
+                    time.sleep(0.002)
+            except Exception as e:
+                raise TransportConnectionError(f'UART write failed: {e}')
 
     def safe_run(self, cmd: str, timeout_s: float=30.0, check_exit_code: bool=False, auto_retry: bool=False, **kwargs: Any) -> CommandResult:
         expected_prompt = kwargs.get('expected_prompt', getattr(self.cfg, 'os_shell_prompt', '~#'))
@@ -230,8 +247,11 @@ class EphemeralSerialClient:
                 injected_cmd = f"printf '\\n{start_marker}\\n' ; sh -c '{safe_cmd}' ; printf '\\n{magic_marker}:%d\\n' $?"
             else:
                 injected_cmd = cmd
-            self.ser.write(b'\x03')
-            self.ser.flush()
+            try:
+                self.ser.write(b'\x03')
+                self.ser.flush()
+            except Exception as e:
+                raise TransportConnectionError(f'UART write failed: {e}')
             try:
                 self.expect(expected_prompt, timeout_s=0.5)
             except TransportTimeoutError:
@@ -295,6 +315,9 @@ class EphemeralSerialClient:
             if self.ser and self.ser.is_open:
                 try:
                     self.ser.reset_output_buffer()
+                except Exception:
+                    pass
+                try:
                     self.ser.reset_input_buffer()
                 except Exception:
                     pass
@@ -313,8 +336,11 @@ class EphemeralSerialClient:
     def raw_write(self, data: bytes) -> None:
         with self._tx_lock:
             if self.ser and self.ser.is_open:
-                self.ser.write(data)
-                self.ser.flush()
+                try:
+                    self.ser.write(data)
+                    self.ser.flush()
+                except Exception as e:
+                    raise TransportConnectionError(f'UART raw_write failed: {e}')
 
     def raw_read_chunk(self) -> bytes:
         try:

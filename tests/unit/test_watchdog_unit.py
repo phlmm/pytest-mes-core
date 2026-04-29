@@ -11,8 +11,10 @@ def _make_watchdog(is_connected: bool = True) -> tuple:
     """Returns (watchdog, mock_serial_client)."""
     mock_client = MagicMock()
     mock_client.is_connected = is_connected
-    mock_client.ANSI_ESCAPE_B = __import__('re').compile(rb'\x1b\[[0-9;]*[a-zA-Z]')
-    
+    # NOTE: UartKernelWatchdog imports ANSI_ESCAPE_B from constants.py at module
+    # level, so there is no need (and it has no effect) to set it on the mock
+    # client.  The attribute below has been intentionally removed.
+
     test_queue = queue.Queue()
     mock_client.subscribe.return_value = test_queue
     mock_client.unsubscribe = MagicMock()
@@ -156,7 +158,9 @@ PANIC_PAYLOADS = [
     b"rcu_preempt detected stalls on CPUs/tasks",
     b"task blocked for more than 120 seconds",
     b"synchronous external abort",
+    # MMC I/O errors — any controller index, any negative errno
     b"mmc0: error -110",
+    b"mmc1: error -5",
     b"EXT4-fs error (device mmcblk2p2): ext4_validate_block_bitmap:376",
     b"UBIFS error (ubi0:0 pid 123): ubifs_scan_a_node",
     b"HAB Events",

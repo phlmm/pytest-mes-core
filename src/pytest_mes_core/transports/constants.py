@@ -32,6 +32,7 @@ PANIC_PATTERN_B: re.Pattern[bytes] = re.compile(
     rb'|rcu_preempt detected stalls'
     rb'|task blocked for more than 120 seconds'
     rb'|synchronous external abort'
+    rb'|mmc[0-9]+: error'
     rb'|EXT4-fs error'
     rb'|UBIFS error'
     rb'|HAB Events'
