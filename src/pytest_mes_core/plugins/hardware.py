@@ -162,3 +162,74 @@ def dut_transport(request: pytest.FixtureRequest, mes_env: StationEnvironment, s
         yield transport
     finally:
         transport.disconnect()
+
+import sys
+import os
+import socket
+import subprocess
+import time
+
+def _is_port_open(ip: str, port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        return s.connect_ex((ip, port)) == 0
+
+@pytest.fixture(scope='session', autouse=True)
+def embedded_mqtt_broker(mes_env: StationEnvironment):
+    """
+    Spins up an embedded mosquitto broker if the target is localhost
+    and the port isn't already bound.
+    """
+    if not mes_env.host_mqtt or "primary" not in mes_env.host_mqtt:
+        yield None
+        return
+        
+    cfg = mes_env.host_mqtt["primary"]
+    if cfg.broker_ip not in ("127.0.0.1", "localhost", "169.254.5.50"):
+        yield None
+        return
+        
+    if _is_port_open(cfg.broker_ip, cfg.port):
+        yield None
+        return
+        
+    try:
+        # ── Preference: mosquitto (more robust) ──────────────────────────────
+        conf_path = "/tmp/mes_mosquitto.conf"
+        with open(conf_path, "w") as f:
+            f.write(f"listener {cfg.port} 0.0.0.0\nallow_anonymous true\n")
+        proc = subprocess.Popen(["mosquitto", "-v", "-c", conf_path])
+        logger.info("Started embedded mosquitto broker.")
+    except FileNotFoundError:
+        try:
+            # ── Fallback: amqtt ─────────────────────────────────────────────
+            amqtt_bin = os.path.join(sys.prefix, "bin", "amqtt")
+            if os.path.exists(amqtt_bin):
+                conf_path = "/tmp/mes_amqtt.yml"
+                with open(conf_path, "w") as f:
+                    # Added sys_interval: 0 to fix crash on Python 3.14+
+                    f.write("listeners:\n  default:\n    type: tcp\n    bind: 0.0.0.0:1883\n"
+                            "sys_interval: 0\n"
+                            "auth:\n  allow-anonymous: true\n  plugins:\n    - auth.anonymous\n")
+                proc = subprocess.Popen([amqtt_bin, "-c", conf_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                logger.info("Started embedded amqtt broker.")
+            else:
+                logger.warning("Neither 'mosquitto' nor 'amqtt' found. Skipping embedded broker.")
+                yield None
+                return
+        except Exception as e:
+            logger.warning(f"Failed to start embedded broker: {e}")
+            yield None
+            return
+    
+    for _ in range(20):
+        if _is_port_open(cfg.broker_ip, cfg.port):
+            break
+        time.sleep(0.1)
+        
+    yield proc
+    
+    proc.terminate()
+    try:
+        proc.wait(timeout=2.0)
+    except subprocess.TimeoutExpired:
+        proc.kill()
