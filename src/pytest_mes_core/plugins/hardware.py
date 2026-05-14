@@ -41,22 +41,38 @@ def psu_hardware(request: pytest.FixtureRequest, mes_env: StationEnvironment) ->
     if not mes_env.psu_hardware or not mes_env.psu_hardware.enabled:
         yield None
         return
-    psu = ScpiPowerSupply(mes_env.psu_hardware)
-    psu.connect()
+    if mes_env.psu_hardware.vendor == "fnirsi":
+        from pytest_mes_core.instruments.fnirsi_dps150 import FnirsiDPS150
+        psu = FnirsiDPS150(port=mes_env.psu_hardware.serial_port, baudrate=mes_env.psu_hardware.baudrate)
+        psu.connect()
+        if hasattr(mes_env.psu_hardware, 'ovp_limit') and mes_env.psu_hardware.ovp_limit is not None:
+            psu.set_ovp_limit(mes_env.psu_hardware.ovp_limit)
+        if hasattr(mes_env.psu_hardware, 'ocp_limit') and mes_env.psu_hardware.ocp_limit is not None:
+            psu.set_ocp_limit(mes_env.psu_hardware.ocp_limit)
+        if hasattr(mes_env.psu_hardware, 'default_voltage') and mes_env.psu_hardware.default_voltage is not None:
+            psu.set_voltage(mes_env.psu_hardware.default_voltage)
+        if hasattr(mes_env.psu_hardware, 'default_current') and mes_env.psu_hardware.default_current is not None:
+            psu.set_current(mes_env.psu_hardware.default_current)
+    else:
+        psu = ScpiPowerSupply(mes_env.psu_hardware)
+        psu.connect()
+
     if hasattr(mes_env.psu_hardware, 'enable_data_logging') and mes_env.psu_hardware.enable_data_logging:
-        psu.start_data_logger()
+        if hasattr(psu, 'start_data_logger'):
+            psu.start_data_logger()
     try:
         yield psu
     finally:
         if hasattr(mes_env.psu_hardware, 'enable_data_logging') and mes_env.psu_hardware.enable_data_logging:
-            spool_dir = getattr(request.config, '_mes_telemetry_spool_dir', None)
-            target_dir = getattr(request.config, '_mes_telemetry_target_dir', None)
-            if spool_dir:
-                psu.download_data_log(spool_dir / 'instrument_logs')
-            elif target_dir:
-                psu.download_data_log(target_dir / 'instrument_logs')
-            else:
-                psu.download_data_log(Path('artifacts/evse_telemetry/instrument_logs'))
+            if hasattr(psu, 'download_data_log'):
+                spool_dir = getattr(request.config, '_mes_telemetry_spool_dir', None)
+                target_dir = getattr(request.config, '_mes_telemetry_target_dir', None)
+                if spool_dir:
+                    psu.download_data_log(spool_dir / 'instrument_logs')
+                elif target_dir:
+                    psu.download_data_log(target_dir / 'instrument_logs')
+                else:
+                    psu.download_data_log(Path('artifacts/evse_telemetry/instrument_logs'))
         psu.close()
 
 @pytest.fixture(scope='session')

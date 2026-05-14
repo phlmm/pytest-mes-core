@@ -17,8 +17,19 @@ class KeysightPsuConfig(BaseHardwareConfig):
     enable_data_logging: bool = Field(default=False)
     log_interval_s: float = Field(default=0.1, gt=0.0)
 
+class FnirsiPsuConfig(BaseHardwareConfig):
+    vendor: Literal["fnirsi"]
+    serial_port: str
+    baudrate: int = Field(default=115200)
+    enable_data_logging: bool = Field(default=False)
+    log_interval_s: float = Field(default=0.1, gt=0.0)
+    default_voltage: Optional[float] = None
+    default_current: Optional[float] = None
+    ovp_limit: Optional[float] = None
+    ocp_limit: Optional[float] = None
+
 PsuVendorConfig = Annotated[
-    Union[RigolPsuConfig, KeysightPsuConfig],
+    Union[RigolPsuConfig, KeysightPsuConfig, FnirsiPsuConfig],
     Field(discriminator="vendor")
 ]
 
