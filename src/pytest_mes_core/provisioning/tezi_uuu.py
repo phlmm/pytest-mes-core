@@ -164,10 +164,22 @@ class UuuTeziProvisioner(BaseProvisioner):
                 "success_prompt": success_prompt.encode() if success_prompt else b"login:",
             }
             tail_sent = False
+            # Do NOT flush here.  The serial port was already flushed at connect()
+            # time, before uuu ran.  Every byte arriving since then is live TEZI
+            # boot output that we need to see.  Flushing at this point would erase
+            # the TEZI shell prompt that the board already printed in the window
+            # between release_recovery() and this subscribe call — which is exactly
+            # the stale-buffer bug that caused the 66-second timeout failure.
+            # Instead we send a single \n ping immediately so the shell re-draws its
+            # prompt in case we just missed it.
+            try:
+                serial_client.raw_write(b'\n')
+            except Exception:
+                pass
             for event in stream.open(
                 prompts=prompts,
                 timeout_s=self.flash_timeout_s,
-                flush=True,
+                flush=False,
                 active_ping_char=b'\n',
             ):
                 if isinstance(event, PanicDetected):

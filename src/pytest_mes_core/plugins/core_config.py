@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Optional
 from pytest_mes_core.config import StationEnvironment, load_toml_config
 from pytest_mes_core.host_adapters.safety import EStopWatchdog
+from pytest_mes_core.host_adapters.diagnostics import ResourceDiagnostics
 from pytest_mes_core.telemetry import StationContext, TelemetryExporter, JsonlTelemetryExporter, OperatorReceiptExporter, DeveloperMarkdownExporter, CompositeTelemetryExporter
 logger = structlog.get_logger('mes_core.config')
 
@@ -202,6 +203,65 @@ def pytest_configure(config: pytest.Config) -> None:
             logger.info('bootstrapping_mes_session_for_jig_jig_id', jig_id=bom.station_meta.jig_id)
         except Exception as e:
             logger.critical('fatal_failed_to_load_hardware_bom_e', e=e)
+
+def pytest_sessionstart(session: pytest.Session) -> None:
+    """
+    Pre-flight resource check — runs once after collection, before any test setup.
+
+    Iterates over every serial port declared in the TOML BOM (host_serial entries
+    and the PSU serial port when vendor-specific serial comms are used) and verifies
+    that no competing process holds a file-lock on the device node.
+
+    If a lock is detected the session is aborted immediately with a clear operator
+    message, avoiding the harder-to-diagnose 'device or resource busy' crash that
+    would otherwise surface mid-test during EphemeralSerialClient.connect().
+    """
+    config = session.config
+    if config.getoption('--mock-hardware', default=False):
+        return
+
+    bom: Optional[StationEnvironment] = getattr(config, '_mes_bom', None)
+    if bom is None:
+        return  # TOML not loaded (e.g. --generate-mes-config run), skip silently.
+
+    # Collect every serial port path that the framework intends to open.
+    ports_to_check: dict[str, str] = {}  # alias -> /dev/path
+
+    for alias, serial_cfg in bom.host_serial.items():
+        if serial_cfg.enabled:
+            ports_to_check[alias] = serial_cfg.port
+
+    # PSU hardware that uses a serial port (e.g. FNIRSI DPS150 on /dev/ttyUSBx)
+    if bom.psu_hardware and bom.psu_hardware.enabled:
+        psu_port = getattr(bom.psu_hardware, 'serial_port', None)
+        if psu_port:
+            ports_to_check['psu_hardware'] = psu_port
+
+    if not ports_to_check:
+        return
+
+    logger.info('pre_flight_resource_check_scanning_serial_ports', count=len(ports_to_check))
+    locked: list[str] = []
+    for alias, port in ports_to_check.items():
+        owner = ResourceDiagnostics.get_device_owner(port)
+        if owner:
+            locked.append(f"  [{alias}] {port}  →  locked by {owner}")
+            logger.critical(
+                'pre_flight_resource_locked',
+                alias=alias, port=port, owner=owner,
+            )
+
+    if locked:
+        lines = '\n'.join(locked)
+        pytest.exit(
+            f"\n{'=' * 64}\n"
+            f"[PRE-FLIGHT FAIL] Serial port(s) locked by another process:\n"
+            f"{lines}\n"
+            f"Close minicom / screen / picocom and retry.\n"
+            f"{'=' * 64}",
+            returncode=3,
+        )
+
 
 @pytest.hookimpl(tryfirst=True)
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
