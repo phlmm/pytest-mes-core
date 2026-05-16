@@ -7,10 +7,11 @@ from .protocols import (
     BlockStorageConfig, EfuseConfig, IioAdcConfig, IioDacConfig, GpioEdgeConfig,
     GpioLedConfig, GpioLoopbackConfig, SshTargetConfig, HostCanConfig,
     HostSerialConfig, SysfsTargetConfig, SysfsPollerConfig, ExecutableConfig,
-    MmioConfig, TimeSyncConfig, UsbStorageConfig
+    MmioConfig, TimeSyncConfig, UsbStorageConfig, HostMqttConfig
 )
 from .instruments import (
     RigolPsuConfig, KeysightPsuConfig, PsuVendorConfig, JtagTargetConfig,
+    PyOcdTargetConfig, ProbeRsTargetConfig,
     BootstrapConfig, UsbSdMuxConfig, TeziProvisioningConfig, MicrochipIcpConfig,
     BootProfilerConfig, HidScannerConfig, EStopConfig
 )
@@ -22,8 +23,9 @@ __all__ = [
     "MtdFlashConfig", "BlockStorageConfig", "EfuseConfig", "IioAdcConfig", "IioDacConfig",
     "GpioEdgeConfig", "GpioLedConfig", "GpioLoopbackConfig", "SshTargetConfig",
     "HostCanConfig", "HostSerialConfig", "SysfsTargetConfig", "SysfsPollerConfig",
-    "ExecutableConfig", "MmioConfig", "TimeSyncConfig", "UsbStorageConfig",
+    "ExecutableConfig", "MmioConfig", "TimeSyncConfig", "UsbStorageConfig", "HostMqttConfig",
     "RigolPsuConfig", "KeysightPsuConfig", "PsuVendorConfig", "JtagTargetConfig",
+    "PyOcdTargetConfig", "ProbeRsTargetConfig",
     "BootstrapConfig", "UsbSdMuxConfig", "TeziProvisioningConfig", "MicrochipIcpConfig",
     "BootProfilerConfig", "HidScannerConfig", "EStopConfig",
     "StationEnvironment", "load_toml_config"

@@ -302,7 +302,9 @@ class TestPyOcdTransport:
 
     def _make_pyocd(self):
         from pytest_mes_core.transports.pyocd_client import PyOcdTransport
-        return PyOcdTransport(target="stm32h753zitx", frequency=4_000_000)
+        from pytest_mes_core.config.instruments import PyOcdTargetConfig
+        cfg = PyOcdTargetConfig(target="stm32h753zitx", frequency=4_000_000)
+        return PyOcdTransport(cfg)
 
     # is_connected
     def test_is_connected_false_initially(self):

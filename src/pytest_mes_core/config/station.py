@@ -5,9 +5,9 @@ import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Type, TypeVar
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from pytest_mes_core.config.base import StationMetaConfig, TelemetryConfig, StateMachineConfig, GitAuthConfig
-from pytest_mes_core.config.instruments import PsuVendorConfig, EStopConfig, JtagTargetConfig, MicrochipIcpConfig, BootstrapConfig, UsbSdMuxConfig, TeziProvisioningConfig, BootProfilerConfig, HidScannerConfig
-from pytest_mes_core.config.protocols import EthernetConfig, CanConfig, UartConfig, I2cEepromConfig, MtdFlashConfig, BlockStorageConfig, EfuseConfig, IioAdcConfig, IioDacConfig, GpioEdgeConfig, GpioLedConfig, GpioLoopbackConfig, SshTargetConfig, HostCanConfig, HostSerialConfig, SysfsPollerConfig, ExecutableConfig, MmioConfig, TimeSyncConfig, UsbStorageConfig
+from pytest_mes_core.config.base import StationMetaConfig, TelemetryConfig, StateMachineConfig, GitAuthConfig, MqttBearerOverrideConfig
+from pytest_mes_core.config.instruments import PsuVendorConfig, EStopConfig, JtagTargetConfig, PyOcdTargetConfig, ProbeRsTargetConfig, MicrochipIcpConfig, BootstrapConfig, UsbSdMuxConfig, TeziProvisioningConfig, BootProfilerConfig, HidScannerConfig
+from pytest_mes_core.config.protocols import EthernetConfig, CanConfig, UartConfig, I2cEepromConfig, MtdFlashConfig, BlockStorageConfig, EfuseConfig, IioAdcConfig, IioDacConfig, GpioEdgeConfig, GpioLedConfig, GpioLoopbackConfig, SshTargetConfig, HostCanConfig, HostSerialConfig, SysfsPollerConfig, ExecutableConfig, MmioConfig, TimeSyncConfig, UsbStorageConfig, HostMqttConfig, UdpDiagnosticConfig
 logger = structlog.get_logger('mes_core.config')
 T = TypeVar('T', bound=BaseModel)
 
@@ -43,11 +43,16 @@ class StationEnvironment(BaseModel):
     sysfs_profilers: Dict[str, SysfsPollerConfig] = Field(default_factory=dict)
     mmio_registers: Dict[str, MmioConfig] = Field(default_factory=dict)
     usb_storage: Dict[str, UsbStorageConfig] = Field(default_factory=dict)
+    host_mqtt: Dict[str, HostMqttConfig] = Field(default_factory=dict)
+    udp_logs: Dict[str, UdpDiagnosticConfig] = Field(default_factory=dict)
     post_mortem_dumps: Dict[str, List[str]] = Field(default_factory=dict)
     jtag_targets: Dict[str, JtagTargetConfig] = Field(default_factory=dict)
+    pyocd_targets: Dict[str, PyOcdTargetConfig] = Field(default_factory=dict)
+    probe_rs_targets: Dict[str, ProbeRsTargetConfig] = Field(default_factory=dict)
     microchip_targets: Dict[str, MicrochipIcpConfig] = Field(default_factory=dict)
     bootstrap: Optional[BootstrapConfig] = None
     time_sync: Optional[TimeSyncConfig] = None
+    mqtt_bearer_override: Optional[MqttBearerOverrideConfig] = None
 
 def load_toml_config(filepath: Path, config_model: Type[T]) -> T:
     """Parses and strictly validates the TOML environment file."""

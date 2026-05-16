@@ -141,3 +141,20 @@ class UsbStorageConfig(BaseHardwareConfig):
     expected_speed: str = Field(default="high-speed")
     test_size_mb: int = Field(default=5, gt=0)
     min_write_mbps: float = Field(default=5.0, gt=0.0)
+
+class HostMqttConfig(BaseHardwareConfig):
+    broker_ip: str
+    port: int = Field(default=1883, gt=0, le=65535)
+    tls: bool = Field(default=False)
+    username: Optional[str] = None
+    password: Optional[SecretStr] = None
+    client_id: str = Field(default="pytest-mes-core")
+    publish_topic: str = Field(default="mes/c2/cmd")
+    subscribe_topic: str = Field(default="mes/c2/resp")
+    timeout_s: float = Field(default=10.0, gt=0)
+
+class UdpDiagnosticConfig(BaseHardwareConfig):
+    bind_port: int = Field(default=8888, gt=0, le=65535)
+    bind_address: str = Field(default="")
+    multicast_group: Optional[str] = Field(default=None)
+    buffer_size: int = Field(default=1024)

@@ -1,5 +1,5 @@
 from enum import Enum
-from typing import Optional
+from typing import Literal, Optional
 from pydantic import BaseModel, Field, SecretStr
 
 class TimeDaemonType(str, Enum):
@@ -56,3 +56,21 @@ class StateMachineConfig(BaseHardwareConfig):
 
     def get_os_password(self) -> Optional[str]:
         return self.os_password.get_secret_value() if self.os_password else None
+
+
+class MqttBearerOverrideConfig(BaseModel):
+    """
+    Station-level MQTT bearer override.
+
+    ``mode`` controls which network bearer the firmware will use when the
+    test session starts.  Individual tests may override this dynamically
+    via the ``mqtt_bearer_ctrl`` fixture.
+
+    Values:
+        "auto" — firmware selects the highest-priority ready bearer
+                 (ETH > WiFi > LTE).
+        "eth"  — force Ethernet bearer.
+        "wifi" — force WiFi bearer (not yet implemented).
+        "lte"  — force Quectel LTE modem bearer.
+    """
+    mode: Literal["auto", "eth", "wifi", "lte"] = Field(default="auto")

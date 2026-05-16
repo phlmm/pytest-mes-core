@@ -1,6 +1,7 @@
 import structlog
 from typing import Optional
 from pytest_mes_core.transports.mcu_base import McuTransport
+from pytest_mes_core.config.instruments import PyOcdTargetConfig
 
 logger = structlog.get_logger('mes_core.transports.pyocd')
 
@@ -9,9 +10,10 @@ class PyOcdTransport(McuTransport):
     SWD/JTAG Transport implemented using the standard PyOCD library.
     Allows direct memory and register manipulation of ARM Cortex-M MCUs (e.g., STM32).
     """
-    def __init__(self, target: str = "stm32h753zitx", frequency: int = 4000000):
-        self.target = target
-        self.frequency = frequency
+    def __init__(self, cfg: PyOcdTargetConfig):
+        self.cfg = cfg
+        self.target = cfg.target
+        self.frequency = cfg.frequency
         self._session = None
         self._board = None
         self._core = None
@@ -26,7 +28,15 @@ class PyOcdTransport(McuTransport):
         logger.info("Connecting to SWD Debug Probe...", target=self.target)
         try:
             from pyocd.core.helpers import ConnectHelper
-            self._session = ConnectHelper.session_with_chosen_probe(target_override=self.target, frequency=self.frequency)
+            options = {}
+            if self.cfg.pack:
+                options["pack"] = self.cfg.pack
+            
+            self._session = ConnectHelper.session_with_chosen_probe(
+                target_override=self.target, 
+                frequency=self.frequency,
+                options=options
+            )
             self._session.open()
             self._board = self._session.board
             self._core = self._board.target

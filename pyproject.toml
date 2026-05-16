@@ -31,6 +31,11 @@ dependencies = [
     "fabric>=3.2.2",
     "paramiko[all]>=3.4.0",
     "pyserial>=3.5",
+    "paho-mqtt>=2.1.0",
+
+    # --- Instruments (unconditionally imported by state_machine) ---
+    "pyvisa>=1.14.0",
+    "pyvisa-py>=0.7.1",
 ]
 
 [project.optional-dependencies]

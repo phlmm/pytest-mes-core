@@ -170,8 +170,23 @@ import subprocess
 import time
 
 def _is_port_open(ip: str, port: int) -> bool:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        return s.connect_ex((ip, port)) == 0
+    """Check whether *ip*:*port* is already bound by another process.
+
+    Uses a non-connecting bind-probe so mosquitto doesn't log a ghost
+    ``Client <unknown> closed its connection`` on every test session start.
+    Falls back to a TCP connect if the bind-probe is inconclusive.
+    """
+    # Fast path: try to bind the same address.  If EADDRINUSE, something is
+    # already listening -- no ghost connection in the broker logs.
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind((ip, port))
+            # Bind succeeded -> port is free.
+            return False
+    except OSError:
+        # EADDRINUSE (or similar) -> port is occupied.
+        return True
 
 @pytest.fixture(scope='session', autouse=True)
 def embedded_mqtt_broker(mes_env: StationEnvironment):

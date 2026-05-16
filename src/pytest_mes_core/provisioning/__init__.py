@@ -27,6 +27,7 @@ from .jtag import OpenOcdRpcProvisioner
 from .microchip import MicrochipIpeProvisioner
 from .tezi_uuu import UuuTeziProvisioner
 from .block_device import BmapBlockDeviceProvisioner
+from .mcu_flasher import McuProvisioner
 
 # Cryptography
 from .pki import PkiProvisioner, PkiPairingValidator
@@ -50,6 +51,7 @@ __all__ = [
     "MicrochipIpeProvisioner",
     "UuuTeziProvisioner",
     "BmapBlockDeviceProvisioner",
+    "McuProvisioner",
 
     # Cryptography
     "PkiProvisioner",

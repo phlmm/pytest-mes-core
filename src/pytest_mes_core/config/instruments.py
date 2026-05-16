@@ -50,6 +50,20 @@ class JtagTargetConfig(BaseHardwareConfig):
             raise ValueError(f"RPC port and GDB port cannot both be {self.rpc_port}. They must be unique.")
         return self
 
+class PyOcdTargetConfig(BaseHardwareConfig):
+    target: str = Field(default="stm32h753zitx")
+    frequency: int = Field(default=4000000)
+    firmware_path: Optional[str] = None
+    pack: Optional[str] = Field(default=None, description="Path to the local CMSIS-Pack file for unsupported MCUs")
+    timeout_s: int = Field(default=120)
+
+class ProbeRsTargetConfig(BaseHardwareConfig):
+    chip: str = Field(default="STM32H753ZITx")
+    speed: int = Field(default=4000)
+    protocol: Literal["swd", "jtag"] = Field(default="swd")
+    firmware_path: Optional[str] = None
+    timeout_s: int = Field(default=120)
+
 class BootstrapConfig(BaseHardwareConfig):
     gpiochip: int = Field(default=0)
     boot_pins: List[int] = Field(default_factory=list, max_length=4)

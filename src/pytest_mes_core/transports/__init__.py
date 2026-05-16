@@ -17,6 +17,9 @@ from .base import (
 # 2. The Physical Implementations
 from .ssh import EphemeralSSHClient
 from .serial_client import EphemeralSerialClient
+from .mqtt_client import MqttClient
+from .pyocd_client import PyOcdTransport
+from .probe_rs_client import ProbeRsTransport, ProbeRsError
 
 # 3. The Auto-Healing Matrix
 from .failover import FailoverTransport
@@ -42,6 +45,10 @@ __all__ = [
     # Clients
     "EphemeralSSHClient",
     "EphemeralSerialClient",
+    "MqttClient",
+    "PyOcdTransport",
+    "ProbeRsTransport",
+    "ProbeRsError",
     "FailoverTransport",
 
     # Utilities
