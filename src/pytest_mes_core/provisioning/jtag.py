@@ -1,3 +1,4 @@
+import anyio
 import structlog
 import time
 import socket
@@ -77,6 +78,9 @@ class OpenOcdRpcProvisioner(BaseProvisioner):
             logger.critical('fatal_err_msg', err_msg=err_msg)
             raise ProvisioningError(err_msg)
         return True
+
+    async def async_provision(self, image_path, *args, **kwargs):
+        return await anyio.to_thread.run_sync(self.provision, image_path, *args, **kwargs)
 
     def _evaluate_rpc_response(self, stdout: str) -> None:
         """Parses the daemon's text stream to map cryptic C-errors to Domain Exceptions.

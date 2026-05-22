@@ -1,3 +1,4 @@
+import anyio
 import structlog
 import logging
 from typing import List, Optional
@@ -27,6 +28,9 @@ class CompositeTelemetryExporter:
         for exporter in self.exporters:
             exporter.start_session(context)
 
+    async def async_start_session(self, context, *args, **kwargs):
+        return await anyio.to_thread.run_sync(self.start_session, context, *args, **kwargs)
+
     def emit_record(self, record: TestRecord) -> None:
         """Forwards the record to all registered exporters.
 
@@ -46,6 +50,9 @@ class CompositeTelemetryExporter:
         if errors:
             raise TelemetryDeliveryError(f'Composite router failed to deliver payload: {errors}')
 
+    async def async_emit_record(self, record, *args, **kwargs):
+        return await anyio.to_thread.run_sync(self.emit_record, record, *args, **kwargs)
+
     def end_session(self, session_passed: bool) -> None:
         """Finalizes the session on all registered exporters.
 
@@ -64,3 +71,5 @@ class CompositeTelemetryExporter:
                 errors.append(str(e))
         if errors:
             raise TelemetryDeliveryError(f'Composite router failed during teardown: {errors}')
+    async def async_end_session(self, session_passed, *args, **kwargs):
+        return await anyio.to_thread.run_sync(self.end_session, session_passed, *args, **kwargs)

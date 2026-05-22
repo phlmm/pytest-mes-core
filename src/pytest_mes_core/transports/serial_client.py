@@ -93,6 +93,25 @@ class EphemeralSerialClient:
         try:
             self.ser = serial.Serial(port=self.cfg.port, baudrate=self.cfg.baudrate, timeout=0.1, exclusive=True)
             self.ser.reset_output_buffer()
+            
+            # Interactive hardware flush: write a newline to force the USB-serial chip
+            # to send any buffered RX data to the host.
+            try:
+                self.ser.write(b'\r\n')
+                self.ser.flush()
+                # Drain the input buffer. WCH chips might delay Bulk IN delivery,
+                # so wait a short duration (e.g. 50ms) and read repeatedly until silent.
+                time.sleep(0.05)
+                drain_deadline = time.perf_counter() + 0.5
+                while time.perf_counter() < drain_deadline:
+                    if self.ser.in_waiting > 0:
+                        self.ser.read(self.ser.in_waiting)
+                        drain_deadline = time.perf_counter() + 0.05
+                    else:
+                        time.sleep(0.01)
+            except Exception as e:
+                logger.warning('failed_interactive_hardware_flush_on_connect', error=str(e))
+                
             self.flush_buffers()
             logger.debug('bound_to_port_and_flushed_stale_os_buffers_tx_rx', port=self.cfg.port)
             self.start_rx_daemon()
@@ -168,6 +187,7 @@ class EphemeralSerialClient:
             t_end = time.perf_counter() + timeout_s
             last_rx_time = time.perf_counter()
             raw_buffer = bytearray()
+            _silent_pings = 0
             
             while time.perf_counter() < t_end:
                 try:
@@ -177,13 +197,28 @@ class EphemeralSerialClient:
                     if pattern_bytes in clean_buffer:
                         return clean_buffer.decode('utf-8', errors='replace')
                     
+                    if _silent_pings > 0:
+                        _silent_pings = 0
                     last_rx_time = time.perf_counter()
                 except queue.Empty:
                     pass
                 
                 if active_redraw and time.perf_counter() - last_rx_time > 2.0:
+                    _silent_pings += 1
                     with self._tx_lock:
-                        logger.debug('[UART] Console silent. Injecting ping to redraw prompt...')
+                        if _silent_pings >= 15:
+                            logger.error(
+                                '[UART] TX health suspect: %d pings unanswered (%.0f s). '
+                                'Check host→DUT UART TX wiring.',
+                                _silent_pings, _silent_pings * 2.0,
+                            )
+                        elif _silent_pings >= 5:
+                            logger.warning(
+                                '[UART] %d consecutive pings unanswered — possible TX line fault.',
+                                _silent_pings,
+                            )
+                        else:
+                            logger.debug('[UART] Console silent. Injecting ping to redraw prompt...')
                         try:
                             self.ser.write(b'\n')
                             self.ser.flush()
@@ -392,3 +427,111 @@ class EphemeralSerialClient:
     @property
     def live_buffer(self) -> str:
         return self.parser.buffer
+
+    def _resolve_usb_device_path(self) -> str:
+        """Dynamically finds the raw USB device path for the serial port on Linux.
+        
+        Climbs sysfs directories starting from the tty class device parent.
+        
+        Returns:
+            str: The raw USB device node path, e.g., '/dev/bus/usb/003/069'.
+            
+        Raises:
+            FileNotFoundError: If the sysfs device directory cannot be found.
+            ValueError: If the USB bus or device number cannot be retrieved.
+        """
+        import os
+        port_path = self.cfg.port
+        if not port_path:
+            raise ValueError("Serial port config is empty.")
+            
+        real_port = os.path.realpath(port_path)
+        tty_name = os.path.basename(real_port)
+        
+        sys_class_path = f"/sys/class/tty/{tty_name}/device"
+        if not os.path.exists(sys_class_path):
+            raise FileNotFoundError(f"Sysfs directory not found for tty device: {sys_class_path}")
+            
+        real_device_dir = os.path.realpath(sys_class_path)
+        
+        curr = real_device_dir
+        busnum, devnum = None, None
+        while curr and curr != "/":
+            busnum_path = os.path.join(curr, "busnum")
+            devnum_path = os.path.join(curr, "devnum")
+            if os.path.exists(busnum_path) and os.path.exists(devnum_path):
+                try:
+                    with open(busnum_path, "r") as f:
+                        busnum = f.read().strip()
+                    with open(devnum_path, "r") as f:
+                        devnum = f.read().strip()
+                    break
+                except Exception as e:
+                    raise ValueError(f"Failed to read busnum/devnum from sysfs: {e}") from e
+            curr = os.path.dirname(curr)
+            
+        if not busnum or not devnum:
+            raise ValueError(f"Could not find busnum/devnum in sysfs hierarchy for: {real_device_dir}")
+            
+        try:
+            bus_int = int(busnum)
+            dev_int = int(devnum)
+        except ValueError as e:
+            raise ValueError(f"Invalid busnum ({busnum}) or devnum ({devnum}) found in sysfs.") from e
+            
+        return f"/dev/bus/usb/{bus_int:03d}/{dev_int:03d}"
+
+    def reset_hardware(self) -> None:
+        """Performs a programmatic driver-level reset on the underlying USB-to-serial device.
+        
+        Disconnects the port if active, executes a USBDEVFS_RESET ioctl, waits 1.0s
+        for the OS to re-detect the hardware, and reconnects if it was previously active.
+        
+        Raises:
+            OSError: If the platform is not Linux.
+            PermissionError: If the user lacks write permissions to the raw USB device node.
+            Exception: If any other error occurs during the reset or reconnection.
+        """
+        import sys
+        if not sys.platform.startswith("linux"):
+            raise OSError("USB driver-level reset is only supported on Linux.")
+            
+        was_connected = self.is_connected
+        if was_connected:
+            logger.info("disconnecting_before_usb_reset", port=self.cfg.port)
+            self.disconnect()
+            
+        usb_path = self._resolve_usb_device_path()
+        logger.info("performing_usb_driver_level_reset", usb_path=usb_path, port=self.cfg.port)
+        
+        import fcntl
+        # USBDEVFS_RESET is _IO('U', 20) -> 0x5514 -> 21780
+        USBDEVFS_RESET = 21780
+        
+        try:
+            with open(usb_path, "w+b") as f:
+                fcntl.ioctl(f.fileno(), USBDEVFS_RESET, 0)
+        except PermissionError as e:
+            msg = (
+                f"Permission denied resetting USB device '{usb_path}'. "
+                "Ensure your user has write access. To fix, configure a udev rule (e.g. "
+                "'/etc/udev/rules.d/99-usb-serial-reset.rules') with: "
+                "SUBSYSTEM==\"usb\", ATTR{idVendor}==\"1a86\", ATTR{idProduct}==\"55d5\", GROUP=\"dialout\", MODE=\"0660\""
+            )
+            logger.error("usb_reset_permission_denied", error=msg)
+            raise PermissionError(msg) from e
+        except Exception as e:
+            logger.error("usb_reset_failed", error=str(e))
+            raise
+            
+        logger.info("usb_reset_complete_waiting_for_re_enumeration", delay_s=1.0)
+        time.sleep(1.0)
+        
+        if was_connected:
+            logger.info("reconnecting_after_usb_reset", port=self.cfg.port)
+            self.connect()
+
+    async def async_reset_hardware(self) -> None:
+        """Asynchronously performs a driver-level reset on the underlying USB-to-serial device."""
+        import anyio
+        await anyio.to_thread.run_sync(self.reset_hardware)

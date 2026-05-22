@@ -364,3 +364,85 @@ class TestSafeRunEmptyCmdTimeoutBranch:
             client.disconnect()
             os.close(master_fd)
             os.close(slave_fd)
+
+
+
+# ---------------------------------------------------------------------------
+# HostPeripheralSerialAdapter disconnect/hardware cleanup tests
+# ---------------------------------------------------------------------------
+
+class TestHostPeripheralSerialAdapterDisconnect:
+    """Verifies that HostPeripheralSerialAdapter.disconnect() clears buffers,
+    de-asserts RTS/DTR lines, and handles hardware disconnect exception gracefully."""
+
+    def test_disconnect_flushes_and_deasserts_lines(self):
+        from pytest_mes_core.host_adapters.peripheral_serial import HostPeripheralSerialAdapter
+        from pytest_mes_core.config import HostSerialConfig
+        
+        cfg = HostSerialConfig(port="/dev/ttyUSB_mock", baudrate=115200)
+        adapter = HostPeripheralSerialAdapter(cfg)
+        
+        call_order = []
+
+        class MockSerial:
+            def __init__(self):
+                self.reset_output_buffer = MagicMock(side_effect=lambda: call_order.append("reset_output_buffer"))
+                self.reset_input_buffer = MagicMock(side_effect=lambda: call_order.append("reset_input_buffer"))
+                self.close = MagicMock(side_effect=lambda: call_order.append("close"))
+                self._rts = True
+                self._dtr = True
+                
+            @property
+            def rts(self):
+                return self._rts
+                
+            @rts.setter
+            def rts(self, val):
+                self._rts = val
+                call_order.append(f"rts_{val}")
+                
+            @property
+            def dtr(self):
+                return self._dtr
+                
+            @dtr.setter
+            def dtr(self, val):
+                self._dtr = val
+                call_order.append(f"dtr_{val}")
+
+        mock_ser = MockSerial()
+        adapter.ser = mock_ser
+        adapter.disconnect()
+        
+        assert "reset_output_buffer" in call_order
+        assert "reset_input_buffer" in call_order
+        assert "rts_False" in call_order
+        assert "dtr_False" in call_order
+        assert "close" in call_order
+        
+        # Ensure all flushes and line de-assertions happened before close()
+        close_idx = call_order.index("close")
+        assert call_order.index("reset_output_buffer") < close_idx
+        assert call_order.index("reset_input_buffer") < close_idx
+        assert call_order.index("rts_False") < close_idx
+        assert call_order.index("dtr_False") < close_idx
+
+    def test_disconnect_survives_exception(self):
+        from pytest_mes_core.host_adapters.peripheral_serial import HostPeripheralSerialAdapter
+        from pytest_mes_core.config import HostSerialConfig
+        
+        cfg = HostSerialConfig(port="/dev/ttyUSB_mock", baudrate=115200)
+        adapter = HostPeripheralSerialAdapter(cfg)
+        
+        mock_ser = MagicMock()
+        mock_ser.reset_output_buffer.side_effect = OSError("unplugged")
+        mock_ser.close = MagicMock()
+        
+        adapter.ser = mock_ser
+        # Should not raise any exception
+        adapter.disconnect()
+        
+        # It must still set ser to None and call close
+        assert adapter.ser is None
+        mock_ser.close.assert_called_once()
+

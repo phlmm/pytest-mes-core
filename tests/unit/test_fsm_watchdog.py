@@ -5,7 +5,8 @@ from pytest_mes_core.config import StateMachineConfig
 from pytest_mes_core.transports import EphemeralSerialClient, EphemeralSSHClient
 from unittest.mock import MagicMock
 
-def test_fsm_panic_watchdog_catches_hab_events():
+@pytest.mark.anyio
+async def test_fsm_panic_watchdog_catches_hab_events():
     """
     Simulates a Toradex/NXP i.MX BootROM throwing a Secure Boot violation.
     The FSM should catch 'HAB Events' and raise a KernelPanicError instantly
@@ -41,7 +42,7 @@ def test_fsm_panic_watchdog_catches_hab_events():
     )
 
     with pytest.raises(KernelPanicError, match="Device kernel panicked during OS boot sequence"):
-        fsm._do_wait_for_os()
+        await fsm.event_wait_for_os_shell()
 
     # Verify the subscriber was properly cleaned up (zero-leakage)
     mock_serial.unsubscribe.assert_called_once_with(rx_q)

@@ -43,6 +43,8 @@ import time
 import structlog
 from collections.abc import Callable
 from typing import Optional
+from functools import partial
+import anyio
 
 
 logger = structlog.get_logger("mes_core.instruments.sntp_server")
@@ -192,3 +194,18 @@ class SntpServer:
                     break
 
         return found
+
+    # ------------------------------------------------------------------
+    # Async API (anyio-compatible)
+    # ------------------------------------------------------------------
+
+    async def async_run(
+        self,
+        timeout_s: float = 20.0,
+        modify_response_fn: Optional[ModifyFn] = None,
+        wait_for_pattern: Optional[str] = None,
+    ) -> bool:
+        """Async variant of :meth:`run`. Runs the blocking socket loop in a thread."""
+        return await anyio.to_thread.run_sync(
+            partial(self.run, timeout_s, modify_response_fn, wait_for_pattern)
+        )

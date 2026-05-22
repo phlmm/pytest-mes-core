@@ -91,6 +91,22 @@ class HostPeripheralSerialAdapter(BaseHostAdapter):
         """Safely closes the serial port and releases the OS lock."""
         if self.ser:
             try:
+                try:
+                    self.ser.reset_output_buffer()
+                except Exception:
+                    pass
+                try:
+                    self.ser.reset_input_buffer()
+                except Exception:
+                    pass
+                try:
+                    self.ser.rts = False
+                except Exception:
+                    pass
+                try:
+                    self.ser.dtr = False
+                except Exception:
+                    pass
                 self.ser.close()
             except Exception as e:
                 logger.warning('teardown_exception_during_port_closure_e', e=e)
@@ -137,3 +153,13 @@ class HostPeripheralSerialAdapter(BaseHostAdapter):
                     return True
             time.sleep(0.01)
         return False
+
+    async def async_send(self, payload: bytes) -> None:
+        """Async wrapper for send()."""
+        import anyio
+        await anyio.to_thread.run_sync(self.send, payload)
+
+    async def async_expect(self, payload: bytes, timeout_s: float=2.0) -> bool:
+        """Async wrapper for expect()."""
+        import anyio
+        return await anyio.to_thread.run_sync(self.expect, payload, timeout_s)

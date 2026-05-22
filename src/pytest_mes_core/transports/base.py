@@ -135,11 +135,43 @@ class DutTransport(Protocol):
         """Transmit raw bytes without framing or newline injection."""
         ...
 
+    async def async_raw_write(self, data: bytes) -> None:
+        """Async variant of raw_write."""
+        ...
+
+    def raw_read_chunk(self) -> bytes:
+        """Reads a chunk of raw bytes."""
+        ...
+
+    async def async_raw_read_chunk(self) -> bytes:
+        """Async variant of raw_read_chunk."""
+        ...
+
+    def raw_read(self, size: int) -> bytes:
+        """Reads exactly 'size' raw bytes."""
+        ...
+
+    async def async_raw_read(self, size: int) -> bytes:
+        """Async variant of raw_read."""
+        ...
+
     def flush_buffers(self) -> None:
         """Flush hardware RX/TX buffers and drain all subscriber queues.
 
         Calling this before opening an event stream ensures the event loop
         does not process stale data from a previous boot cycle.
         """
+        ...
+
+    async def async_flush_buffers(self) -> None:
+        """Async variant of flush_buffers."""
+        ...
+
+    def expect(self, pattern: str, timeout_s: float = 5.0, blast_char: str = '', active_redraw: bool = True) -> str:
+        """Wait for a regex pattern to appear on the stream."""
+        ...
+
+    async def async_expect(self, pattern: str, timeout_s: float = 5.0, blast_char: str = '', active_redraw: bool = True) -> str:
+        """Async variant of expect."""
         ...
 

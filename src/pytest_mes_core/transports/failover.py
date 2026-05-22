@@ -254,6 +254,48 @@ class FailoverTransport(DutTransport):
             return self.fallback.raw_read_chunk()
         raise NotImplementedError("Fallback transport does not support raw_read_chunk().")
 
+    def raw_read(self, size: int) -> bytes:
+        """Pass-through to Fallback Transport's raw_read()."""
+        if hasattr(self.fallback, 'raw_read'):
+            return self.fallback.raw_read(size)
+        raise NotImplementedError("Fallback transport does not support raw_read().")
+
+    def flush_buffers(self) -> None:
+        """Pass-through to Fallback Transport's flush_buffers()."""
+        if hasattr(self.fallback, 'flush_buffers'):
+            return self.fallback.flush_buffers()
+        raise NotImplementedError("Fallback transport does not support flush_buffers().")
+
+    async def async_write_line(self, cmd: str, sensitive: bool = False) -> None:
+        """Pass-through to Fallback Transport's async_write_line()."""
+        if hasattr(self.fallback, 'async_write_line'):
+            return await self.fallback.async_write_line(cmd, sensitive=sensitive)
+        raise NotImplementedError("Fallback transport does not support async_write_line().")
+
+    async def async_raw_write(self, data: bytes) -> None:
+        """Pass-through to Fallback Transport's async_raw_write()."""
+        if hasattr(self.fallback, 'async_raw_write'):
+            return await self.fallback.async_raw_write(data)
+        raise NotImplementedError("Fallback transport does not support async_raw_write().")
+
+    async def async_raw_read_chunk(self) -> bytes:
+        """Pass-through to Fallback Transport's async_raw_read_chunk()."""
+        if hasattr(self.fallback, 'async_raw_read_chunk'):
+            return await self.fallback.async_raw_read_chunk()
+        raise NotImplementedError("Fallback transport does not support async_raw_read_chunk().")
+
+    async def async_raw_read(self, size: int) -> bytes:
+        """Pass-through to Fallback Transport's async_raw_read()."""
+        if hasattr(self.fallback, 'async_raw_read'):
+            return await self.fallback.async_raw_read(size)
+        raise NotImplementedError("Fallback transport does not support async_raw_read().")
+
+    async def async_flush_buffers(self) -> None:
+        """Pass-through to Fallback Transport's async_flush_buffers()."""
+        if hasattr(self.fallback, 'async_flush_buffers'):
+            return await self.fallback.async_flush_buffers()
+        raise NotImplementedError("Fallback transport does not support async_flush_buffers().")
+
 
     def read_clean_stream(self):
         """Pass-through to Fallback Transport's read_clean_stream().

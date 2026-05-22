@@ -1,7 +1,8 @@
 import enum
 import structlog
 from typing import Optional, Any
-from transitions import Machine
+import time
+from transitions.extensions.asyncio import AsyncMachine
 
 logger = structlog.get_logger('mes_core.mcu_fsm')
 
@@ -36,11 +37,12 @@ class BareMetalStateMachine:
         self.psu = psu
         self.swd = swd_transport
 
-        self.machine = Machine(
+        self.machine = AsyncMachine(
             model=self,
             states=[state.value for state in McuState],
             initial=McuState.POWER_OFF.value,
             send_event=True,
+            after_state_change='_record_timestamp',
         )
 
         # --- Power ---
@@ -48,13 +50,13 @@ class BareMetalStateMachine:
             trigger='energize',
             source=McuState.POWER_OFF.value,
             dest=McuState.ENERGIZED.value,
-            after='_hw_energize',
+            before='_hw_energize',
         )
         self.machine.add_transition(
             trigger='power_off',
             source='*',
             dest=McuState.POWER_OFF.value,
-            after='_hw_power_off',
+            before='_hw_power_off',
         )
 
         # --- Auto-run: MCUs run firmware immediately after power-on (no SWD needed) ---
@@ -69,13 +71,13 @@ class BareMetalStateMachine:
             trigger='halt_core',
             source=[McuState.ENERGIZED.value, McuState.RUNNING.value],
             dest=McuState.HALTED.value,
-            after='_hw_halt_core',
+            before='_hw_halt_core',
         )
         self.machine.add_transition(
             trigger='resume_core',
             source=McuState.HALTED.value,
             dest=McuState.RUNNING.value,
-            after='_hw_resume_core',
+            before='_hw_resume_core',
         )
 
         # --- OTA ---
@@ -83,7 +85,7 @@ class BareMetalStateMachine:
             trigger='trigger_ota',
             source=[McuState.RUNNING.value, McuState.ENERGIZED.value],
             dest=McuState.OTA_UPDATE.value,
-            after='_hw_trigger_ota',
+            before='_hw_trigger_ota',
         )
         self.machine.add_transition(
             trigger='ota_corrupt',
@@ -101,72 +103,59 @@ class BareMetalStateMachine:
             trigger='recover_ota',
             source=McuState.FAILED_OTA.value,
             dest=McuState.POWER_OFF.value,
-            after='_hw_power_off',
+            before='_hw_power_off',
         )
+
+    def _record_timestamp(self, event: Any) -> None:
+        from pytest_mes_core.events import bus, StateChanged
+        ev = StateChanged(
+            fsm_name=self.__class__.__name__,
+            old_state=event.transition.source,
+            new_state=self.state,
+            trigger=event.event.name,
+            timestamp=time.time()
+        )
+        bus.emit_state_event(event=ev)
 
     # --- Hardware Execution Callbacks ---
 
-    def _hw_energize(self, event: Any) -> None:
+    async def _hw_energize(self, event: Any) -> None:
         """Applies physical voltage to the MCU."""
+        import anyio
         logger.info("[MCU] Energizing VCC...")
         if self.psu:
-            self.psu.enable_output()
+            await anyio.to_thread.run_sync(self.psu.enable_output)
 
-    def _hw_power_off(self, event: Any) -> None:
+    async def _hw_power_off(self, event: Any) -> None:
         """Severs power to the MCU."""
+        import anyio
         logger.info("[MCU] Severing VCC...")
         if self.psu:
-            self.psu.disable_output()
+            await anyio.to_thread.run_sync(self.psu.disable_output)
 
-    def _hw_halt_core(self, event: Any) -> None:
+    async def _hw_halt_core(self, event: Any) -> None:
         """Issues SWD HALT command to pause the program counter."""
+        import anyio
         logger.info("[MCU] Halting CPU Core via Debug Probe...")
         if self.swd:
-            self.swd.halt()
+            await anyio.to_thread.run_sync(self.swd.halt)
 
-    def _hw_resume_core(self, event: Any) -> None:
+    async def _hw_resume_core(self, event: Any) -> None:
         """Issues SWD RESUME command to continue execution."""
+        import anyio
         logger.info("[MCU] Resuming CPU Core execution...")
         if self.swd:
-            self.swd.resume()
+            await anyio.to_thread.run_sync(self.swd.resume)
 
-    def _hw_trigger_ota(self, event: Any) -> None:
+    async def _hw_trigger_ota(self, event: Any) -> None:
         """Sets an OTA flag in RAM/RTC register and resets into the Bootloader.
 
         The magic address and value must be configured in the application
         firmware (e.g., a known SRAM address or RTC Backup Register that the
         MCU Bootloader checks on reset).
         """
+        import anyio
         logger.info("[MCU] Rebooting into OTA Bootloader mode...")
         if self.swd:
-            self.swd.reset()
-
-    # --- Async Variants for Parallel Jigs ---
-    # BUG-8 fix: call the hardware *primitive* (_hw_halt_core/_hw_resume_core)
-    # directly, not the FSM trigger.  Calling the trigger from a thread offload
-    # fires state change + after-callbacks and raises MachineError from
-    # states where the transition is not valid.
-
-    async def async_halt_core(self) -> None:
-        """Async-safe halt: fires the FSM transition from the calling coroutine."""
-        import anyio
-        await anyio.to_thread.run_sync(self.halt_core)
-
-    async def async_resume_core(self) -> None:
-        """Async-safe resume: fires the FSM transition from the calling coroutine."""
-        import anyio
-        await anyio.to_thread.run_sync(self.resume_core)
-
-    async def async_hw_halt_core(self) -> None:
-        """Hardware-only halt bypass (no FSM state change).
-        Use when you need to pause the core without a valid halt_core transition
-        (e.g., mid-OTA inspection).
-        """
-        import anyio
-        await anyio.to_thread.run_sync(self._hw_halt_core, None)
-
-    async def async_hw_resume_core(self) -> None:
-        """Hardware-only resume bypass (no FSM state change)."""
-        import anyio
-        await anyio.to_thread.run_sync(self._hw_resume_core, None)
+            await anyio.to_thread.run_sync(self.swd.reset)
 

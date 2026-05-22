@@ -1,3 +1,4 @@
+import anyio
 import structlog
 import hashlib
 import base64
@@ -85,6 +86,10 @@ class PkiProvisioner:
             raise ProvisioningError('Cryptographic transit failure. Corrupted payload destroyed on target.')
         logger.info('injection_successful_and_cryptographically_verified_remote_dest', remote_dest=remote_dest)
 
+    @staticmethod
+    async def async_provision_credential(transport, local_filepath, remote_dest, permissions, *args, **kwargs):
+        return await anyio.to_thread.run_sync(PkiProvisioner.provision_credential, transport, local_filepath, remote_dest, permissions, *args, **kwargs)
+
 class PkiPairingValidator:
     """
     Validation Protocol to mathematically prove the public cert matches the private key.
@@ -128,3 +133,6 @@ class PkiPairingValidator:
             return ValidatorResult(passed=False, error_msg='x509 Certificate and Private Key mismatch. Files destroyed.')
         logger.info('[PKI] Cryptographic pairing mathematically proven.')
         return ValidatorResult(passed=True)
+    @staticmethod
+    async def async_verify_x509_pairing(transport, remote_cert_path, remote_key_path, *args, **kwargs):
+        return await anyio.to_thread.run_sync(PkiPairingValidator.verify_x509_pairing, transport, remote_cert_path, remote_key_path, *args, **kwargs)

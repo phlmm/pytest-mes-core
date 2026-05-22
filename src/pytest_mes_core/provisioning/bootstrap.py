@@ -1,3 +1,4 @@
+import anyio
 import structlog
 import time
 import logging
@@ -8,11 +9,20 @@ class _DummyLine:
     def request(self, *args: Any, **kwargs: Any) -> None:
         pass
 
+    async def async_request(self, *args, **kwargs):
+        return await anyio.to_thread.run_sync(self.request, *args, **kwargs)
+
     def set_value(self, value: int) -> None:
         pass
 
+    async def async_set_value(self, value, *args, **kwargs):
+        return await anyio.to_thread.run_sync(self.set_value, value, *args, **kwargs)
+
     def release(self) -> None:
         pass
+
+    async def async_release(self, *args, **kwargs):
+        return await anyio.to_thread.run_sync(self.release, *args, **kwargs)
 
 class _DummyChip:
 
@@ -22,8 +32,14 @@ class _DummyChip:
     def get_line(self, offset: int) -> _DummyLine:
         return _DummyLine()
 
+    async def async_get_line(self, offset, *args, **kwargs):
+        return await anyio.to_thread.run_sync(self.get_line, offset, *args, **kwargs)
+
     def close(self) -> None:
         pass
+
+    async def async_close(self, *args, **kwargs):
+        return await anyio.to_thread.run_sync(self.close, *args, **kwargs)
 
 class _DummyGpiod:
     LINE_REQ_DIR_OUT: int = 2
@@ -67,6 +83,9 @@ class HardwareBootstrapper:
             raise ProvisioningError(err_msg)
         logger.info('forcing_silicon_into_val_mode_states_target_states', val=mode_name.upper(), target_states=target_states)
         self._strobe_hardware(target_states)
+
+    async def async_set_boot_mode(self, mode_name, *args, **kwargs):
+        return await anyio.to_thread.run_sync(self.set_boot_mode, mode_name, *args, **kwargs)
 
     def _strobe_hardware(self, target_states: List[int]) -> None:
         """Internal helper to assert multiplexed boot pins and strobe the reset line.
@@ -135,7 +154,12 @@ class HardwareBootstrapper:
         """Convenience wrapper to force the silicon into 'recovery' mode."""
         self.set_boot_mode('recovery')
 
+    async def async_force_recovery_mode(self, *args, **kwargs):
+        return await anyio.to_thread.run_sync(self.force_recovery_mode, *args, **kwargs)
+
     def force_normal_boot(self) -> None:
         """Convenience wrapper to force the silicon into 'normal' or 'emmc' mode."""
         mode = 'emmc' if 'emmc' in self.cfg.boot_modes else 'normal'
         self.set_boot_mode(mode)
+    async def async_force_normal_boot(self, *args, **kwargs):
+        return await anyio.to_thread.run_sync(self.force_normal_boot, *args, **kwargs)

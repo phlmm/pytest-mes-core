@@ -52,10 +52,12 @@ from __future__ import annotations
 
 import enum
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
+import threading
 
 import structlog
-from transitions import Machine, MachineError
+from transitions import MachineError
+from transitions.extensions.asyncio import AsyncMachine
 
 logger = structlog.get_logger("mes_core.mcu_app_state")
 
@@ -82,12 +84,13 @@ class McuAppStateMachine:
     def __init__(self, initial_state: str = McuAppState.OFFLINE.value) -> None:
         self.logger = logger.bind(fsm="app")
         self._state_timestamps: Dict[str, float] = {}
+        self._async_waiters: Dict[str, Set[Any]] = {}
 
         # Collect base + extension states
         base_states = [s.value for s in McuAppState]
         all_states = base_states + self.extra_states()
 
-        self.machine = Machine(
+        self.machine = AsyncMachine(
             model=self,
             states=all_states,
             initial=initial_state,
@@ -95,6 +98,7 @@ class McuAppStateMachine:
             auto_transitions=False,
             after_state_change="_record_timestamp",
         )
+        self.machine.on_enter('*', '_notify_waiters')
 
         # Base transitions (linear boot chain)
         base_transitions = [
@@ -152,52 +156,34 @@ class McuAppStateMachine:
             return False
 
     # ------------------------------------------------------------------
-    # Waiting for states (sync + async)
+    # Waiting for states (async only)
     # ------------------------------------------------------------------
-
-    def wait_for(self, target_state: str, timeout_s: float = 30.0) -> bool:
-        """Block until the FSM reaches *target_state* or timeout.
-
-        Intended for use with ``anyio.to_thread.run_sync``.
-        """
-        import threading
-
-        if self.state == target_state:
-            return True
-
-        deadline = time.monotonic() + timeout_s
-        event = threading.Event()
-
-        # Patch a temporary callback to wake the waiter
-        cb_name = f"_wait_cb_{id(event)}"
-
-        def _on_enter(event_data: Any) -> None:
-            if self.state == target_state:
-                event.set()
-
-        setattr(self, cb_name, _on_enter)
-        self.machine.on_enter(target_state, cb_name)
-
-        try:
-            remaining = max(0.0, deadline - time.monotonic())
-            return event.wait(timeout=remaining)
-        finally:
-            # Clean up the temporary callback
-            try:
-                self.machine.get_state(target_state).on_enter.callbacks.discard(cb_name)
-            except Exception:
-                pass
-            try:
-                delattr(self, cb_name)
-            except Exception:
-                pass
 
     async def async_wait_for(self, target_state: str, timeout_s: float = 30.0) -> bool:
         """Async variant of ``wait_for``."""
         import anyio
-        return await anyio.to_thread.run_sync(
-            lambda: self.wait_for(target_state, timeout_s)
-        )
+        if self.state == target_state:
+            return True
+
+        event = anyio.Event()
+        self._async_waiters.setdefault(target_state, set()).add(event)
+
+        try:
+            with anyio.fail_after(timeout_s):
+                await event.wait()
+            return True
+        except TimeoutError:
+            if target_state in self._async_waiters and event in self._async_waiters[target_state]:
+                self._async_waiters[target_state].remove(event)
+            return False
+
+    async def _notify_waiters(self, event_data: Any) -> None:
+        state = self.state
+            
+        if state in self._async_waiters:
+            for ev in self._async_waiters[state]:
+                ev.set()
+            self._async_waiters[state].clear()
 
     # ------------------------------------------------------------------
     # Introspection
@@ -211,10 +197,19 @@ class McuAppStateMachine:
     def _record_timestamp(self, event: Any) -> None:
         """After-state-change callback: log the transition and record timing."""
         self._state_timestamps[self.state] = time.monotonic()
+        trigger_name = getattr(event, "event", None) if hasattr(event, "event") else str(event)
         self.logger.info(
             "state_transition",
             new_state=self.state,
-            trigger=getattr(event, "event", None)
-            if hasattr(event, "event")
-            else str(event),
+            trigger=trigger_name,
         )
+        
+        from pytest_mes_core.events import bus, StateChanged
+        ev = StateChanged(
+            fsm_name=self.__class__.__name__,
+            old_state=event.transition.source,
+            new_state=self.state,
+            trigger=trigger_name or "unknown",
+            timestamp=time.time()
+        )
+        bus.emit_state_event(event=ev)

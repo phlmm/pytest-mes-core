@@ -11,6 +11,11 @@ from pytest_mes_core.config import SshTargetConfig
 from pytest_mes_core.transports.base import CommandResult, TransportConnectionError, TransportTimeoutError
 logger = structlog.get_logger('mes_core.transports.ssh')
 
+# Silence noisy external libraries
+logging.getLogger("invoke").setLevel(logging.WARNING)
+logging.getLogger("fabric").setLevel(logging.WARNING)
+logging.getLogger("paramiko").setLevel(logging.WARNING)
+
 class EphemeralSSHClient:
     """
     The Configurable SSH Lobotomizer.

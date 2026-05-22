@@ -1,3 +1,4 @@
+import anyio
 import structlog
 from typing import Union, List
 from pytest_mes_core.transports.base import DutTransport

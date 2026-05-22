@@ -53,8 +53,17 @@ class UuuTeziProvisioner(BaseProvisioner):
             logger.critical('err_msg', err_msg=err_msg)
             raise ProvisioningError(err_msg)
 
-    def provision(self, image_path: Path, serial_client: Optional[EphemeralSerialClient] = None,
-                  success_prompt: str = 'login:', fsm: Optional[Any] = None) -> bool:
+    async def async_provision(self, image_path: Path, serial_client: Optional['EphemeralSerialClient'] = None, success_prompt: str = "login:", fsm: Optional[Any] = None) -> bool:
+        import anyio
+        return await anyio.to_thread.run_sync(self.provision, image_path, serial_client, success_prompt, fsm)
+
+    def provision(
+        self,
+        image_path: Path,
+        serial_client: Optional['EphemeralSerialClient'] = None,
+        success_prompt: str = "login:",
+        fsm: Optional[Any] = None,
+    ) -> bool:
         """
         Pushes TEZI images into SoC RAM via USB Serial Downloader mode.
 
@@ -94,6 +103,7 @@ class UuuTeziProvisioner(BaseProvisioner):
         logger.info('waiting_up_to_wait_for_recovery_s_s_for_dut_to_enter_recovery_mode_target_str', wait_for_recovery_s=self.wait_for_recovery_s, target_str=target_str)
         t_wait_start = time.perf_counter()
         device_found = False
+        import anyio
         while time.perf_counter() - t_wait_start < self.wait_for_recovery_s:
             logger.debug('[TEZI] Polling USB bus for NXP BootROM...')
             if self._is_device_in_recovery():
@@ -114,13 +124,15 @@ class UuuTeziProvisioner(BaseProvisioner):
         cmd.append(str(tezi_dir.absolute()))
         try:
             process = LiveProcess(cmd, self.flash_timeout_s, logger).execute()
+            # Strip ANSI escape sequences from stdout to handle colored terminal text
+            clean_stdout = re.sub(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])', '', process.stdout)
             if process.returncode != 0:
                 log_path = process.export_log(Path('/tmp/mes_artifacts'))
                 logger.critical('tezi_fatal_uuu_rejected_the_payload_code_returncode_trace_saved_to_log_path', returncode=process.returncode, log_path=log_path)
-                if self._UUU_PERMISSION_RE.search(process.stdout):
+                if self._UUU_PERMISSION_RE.search(clean_stdout):
                     raise ProvisioningError("OS Permission Denied! You must either run pytest with 'sudo' or install the NXP udev rules so your user can access the USB device.")
                 raise ProvisioningError(f'uuu lost USB sync (Code {process.returncode}).')
-            if self._UUU_FAIL_RE.search(process.stdout) or not self._UUU_SUCCESS_RE.search(process.stdout):
+            if self._UUU_FAIL_RE.search(clean_stdout) or not self._UUU_SUCCESS_RE.search(clean_stdout):
                 log_path = process.export_log(Path('/tmp/mes_artifacts'))
                 logger.critical('tezi_fatal_uuu_falsely_exited_0_payload_never_executed_trace_saved_to_log_path', log_path=log_path)
                 raise ProvisioningError("uuu script failed to execute fully. Missing 'Done' confirmation.")
@@ -140,79 +152,187 @@ class UuuTeziProvisioner(BaseProvisioner):
             if not serial_client.is_connected:
                 serial_client.connect()
 
-            # Subscribe via the pub/sub multiplexer so UartKernelWatchdog continues
-            # to receive every byte concurrently (zero data loss, no race window).
-            from pytest_mes_core.state_machine import UartEventStream
-            from pytest_mes_core.events import PromptDetected, PanicDetected
-            from pytest_mes_core.transports.constants import ANSI_ESCAPE_B, PANIC_PATTERN_B
-            import re
-
-            stream = UartEventStream(
-                serial=serial_client,
-                ansi_pattern=ANSI_ESCAPE_B,
-                panic_pattern=PANIC_PATTERN_B,
-            )
-            prompts = {
-                # TEZI shell acquired — inject the live log tail command
-                "tezi_shell_hash": b"~ #",
-                "tezi_shell_root": b"root@",
-                "tezi_shell_slash": b"/ #",
-                # Success signatures (written by TEZI itself)
-                "success_installed": b"Successfully installed",
-                "success_rebooting": b"Rebooting",
-                # Optional custom prompt (e.g. "login:")
-                "success_prompt": success_prompt.encode() if success_prompt else b"login:",
-            }
-            tail_sent = False
-            # Do NOT flush here.  The serial port was already flushed at connect()
-            # time, before uuu ran.  Every byte arriving since then is live TEZI
-            # boot output that we need to see.  Flushing at this point would erase
-            # the TEZI shell prompt that the board already printed in the window
-            # between release_recovery() and this subscribe call — which is exactly
-            # the stale-buffer bug that caused the 66-second timeout failure.
-            # Instead we send a single \n ping immediately so the shell re-draws its
-            # prompt in case we just missed it.
             try:
-                serial_client.raw_write(b'\n')
-            except Exception:
-                pass
-            for event in stream.open(
-                prompts=prompts,
-                timeout_s=self.flash_timeout_s,
-                flush=False,
-                active_ping_char=b'\n',
-            ):
-                if isinstance(event, PanicDetected):
-                    logger.critical('[TEZI] Kernel panic detected during TEZI install! Aborting.')
-                    return False
+                # Subscribe via the pub/sub multiplexer so UartKernelWatchdog continues
+                # to receive every byte concurrently (zero data loss, no race window).
+                from pytest_mes_core.state_machine import UartEventStream
+                from pytest_mes_core.events import PromptDetected, PanicDetected, BootDataReceived
+                from pytest_mes_core.transports.constants import ANSI_ESCAPE_B, PANIC_PATTERN_B
 
-                if isinstance(event, PromptDetected):
-                    if event.prompt_type in ("tezi_shell_hash", "tezi_shell_root", "tezi_shell_slash"):
-                        if not tail_sent:
-                            logger.info('[TEZI] TEZI Shell acquired! Injecting live log tracker...')
-                            try:
-                                serial_client.raw_write(b'tail -n +1 -f /var/volatile/tezi.log\n')
-                                serial_client.parser.clear_buffer()
-                                tail_sent = True
-                            except Exception as e:
-                                logger.warning('uart_write_blocked_e', e=e)
-                    elif event.prompt_type in ("success_installed", "success_rebooting", "success_prompt"):
-                        logger.info('[TEZI] Installation Success Signature detected! TEZI flash complete.')
-                        if fsm is not None:
-                            # The TEZI installer has finished and the board is rebooting
-                            # into the newly-flashed eMMC.  The framework has no further
-                            # control over the autonomous TEZI process — this is the
-                            # correct point to exit RECOVERY state.
-                            from pytest_mes_core.state_machine import DutState
-                            fsm.state = DutState.ENERGIZED
-                            logger.info('fsm_state_advanced_recovery_to_energized')
-                        return True
 
-            logger.critical(
-                'tezi_fatal_failed_to_complete_installation_within_flash_timeout_s_s',
-                flash_timeout_s=self.flash_timeout_s,
-            )
-            return False
+                stream = UartEventStream(
+                    serial=serial_client,
+                    ansi_pattern=ANSI_ESCAPE_B,
+                    panic_pattern=PANIC_PATTERN_B,
+                )
+                _TX_PROBE_TOKEN = '__MES_TX_OK__'
+                _MEDIA_CHECK_TOKEN_OK = '__MES_MEDIA_OK__'
+                _MEDIA_CHECK_TOKEN_MISSING = '__MES_MEDIA_MISSING__'
+
+                # Split the tokens to prevent the shell script from echo'ing them contiguously on UART
+                split_ok = len(_MEDIA_CHECK_TOKEN_OK) // 2
+                ok_part1 = _MEDIA_CHECK_TOKEN_OK[:split_ok]
+                ok_part2 = _MEDIA_CHECK_TOKEN_OK[split_ok:]
+                shell_ok = f'"{ok_part1}""{ok_part2}"'.encode()
+
+                split_missing = len(_MEDIA_CHECK_TOKEN_MISSING) // 2
+                missing_part1 = _MEDIA_CHECK_TOKEN_MISSING[:split_missing]
+                missing_part2 = _MEDIA_CHECK_TOKEN_MISSING[split_missing:]
+                shell_missing = f'"{missing_part1}""{missing_part2}"'.encode()
+                prompts = {
+                    # TEZI shell acquired — inject the TX health probe
+                    "tezi_shell_hash": b"~ #",
+                    "tezi_shell_root": b"root@",
+                    "tezi_shell_slash": b"/ #",
+                    # Success signatures (written by TEZI itself / tezi.log)
+                    "success_installed": b"Successfully installed",
+                    "success_rebooting": b"Restarting system",
+                    # Optional custom prompt from tezi.log (e.g. "Flushing buffers...")
+                    "success_prompt": success_prompt.encode() if success_prompt else b"login:",
+                    # Fallback: if the board reboots from TEZI and reaches the
+                    # eMMC OS login prompt, that is conclusive proof the flash
+                    # succeeded — even when tezi.log was never tailed.
+                    "post_install_login": b"login:",
+                }
+                tail_sent = False
+                _tx_probe_sent = False
+                _tx_verified = False
+                _tx_probe_deadline = 0.0
+                _media_check_sent = False
+                _media_check_verified = False
+                _media_check_deadline = 0.0
+                _shell_fallback_deadline = time.perf_counter() + 15.0
+                # To clear any stale data (including data buffered in the USB-to-serial chip/OS
+                # which doesn't show up until we send \r\n), we perform an interactive hardware flush.
+                try:
+                    serial_client.raw_write(b'\r\n')
+                    time.sleep(0.1)
+                except Exception:
+                    pass
+                for event in stream.open(
+                    prompts=prompts,
+                    timeout_s=self.flash_timeout_s,
+                    flush=True,
+                    active_ping_char=b'\n',
+                ):
+                    if isinstance(event, PanicDetected):
+                        logger.critical('[TEZI] Kernel panic detected during TEZI install! Aborting.')
+                        return False
+
+                    # Check deadlines on every event loop iteration
+                    if _tx_probe_sent and not _tx_verified and time.perf_counter() > _tx_probe_deadline:
+                        logger.error(
+                            '[TEZI] TX health check FAILED: echo probe not returned after 10 s. '
+                            'Host→DUT UART TX line may be broken or disconnected. '
+                            'Continuing in RX-only mode — relying on login: prompt fallback.'
+                        )
+                        _tx_verified = True  # stop checking
+                        tail_sent = True     # skip tail, rely on post_install_login
+
+                    if _media_check_sent and not _media_check_verified and time.perf_counter() > _media_check_deadline:
+                        logger.critical('[TEZI] Removable media check timed out: no response from DUT shell!')
+                        raise ProvisioningError("Timeout waiting for removable media check response from DUT!")
+
+                    if not tail_sent and not _tx_probe_sent and time.perf_counter() > _shell_fallback_deadline:
+                        logger.warning(
+                            '[TEZI] TEZI shell not detected within 15 s. '
+                            'Proceeding to RX-only mode — relying on login: prompt fallback.'
+                        )
+                        tail_sent = True
+
+                    if isinstance(event, PromptDetected):
+                        if event.prompt_type in ("tezi_shell_hash", "tezi_shell_root", "tezi_shell_slash"):
+                            if not tail_sent and not _tx_probe_sent:
+                                # Step 1: Verify TX link before sending commands.
+                                # A broken host→DUT wire silently swallows everything.
+                                logger.info('[TEZI] TEZI Shell detected. Probing TX health...')
+                                try:
+                                    serial_client.raw_write(f'echo {_TX_PROBE_TOKEN}\n'.encode())
+                                    _tx_probe_sent = True
+                                    _tx_probe_deadline = time.perf_counter() + 10.0
+                                except Exception as e:
+                                    logger.error('[TEZI] TX probe write failed', error=str(e))
+                                    tail_sent = True  # skip tail, rely on RX-only fallback
+                        elif event.prompt_type in ("success_installed", "success_rebooting", "success_prompt", "post_install_login"):
+                            if not tail_sent:
+                                continue
+                            logger.info('[TEZI] Installation Success Signature detected! TEZI flash complete.')
+                            if fsm is not None:
+                                from pytest_mes_core.state_machine import DutState
+                                fsm.state = DutState.ENERGIZED
+                                logger.info('fsm_state_advanced_recovery_to_energized')
+                            return True
+
+                    # Step 2: Watch for the TX probe echo and media check in data events.
+                    if isinstance(event, BootDataReceived):
+                        if _tx_probe_sent and not _tx_verified:
+                            if _TX_PROBE_TOKEN in event.line:
+                                _tx_verified = True
+                                logger.info('[TEZI] TX health verified! Probing removable media presence...')
+                                try:
+                                    # Chunking write to prevent UART FIFO overflow on target
+                                    script_chunks = [
+                                        b'attempt=1; media_found=0; ',
+                                        b'while [ $attempt -le 10 ]; do ',
+                                        b'emmc_base=""; ',
+                                        b'for b in /sys/block/*boot0; do ',
+                                        b'if [ -e "$b" ]; then ',
+                                        b'b_name="${b##*/}"; emmc_base="${b_name%boot0}"; break; ',
+                                        b'fi; done; ',
+                                        b'for d in /sys/block/sd* /sys/block/mmcblk*; do ',
+                                        b'if [ -d "$d" ]; then ',
+                                        b'd_name="${d##*/}"; ',
+                                        b'if [ -n "$emmc_base" ]; then ',
+                                        b'case "$d_name" in "$emmc_base"*) continue;; esac; ',
+                                        b'fi; ',
+                                        b'if [ -f "$d/removable" ] && [ "$(cat $d/removable)" = "1" ]; then ',
+                                        b'media_found=1; break; fi; ',
+                                        b'case "$d_name" in mmcblk*) ',
+                                        b'if [ -f "$d/size" ] && [ "$(cat $d/size)" -gt 0 ]; then ',
+                                        b'media_found=1; break; fi;; esac; ',
+                                        b'fi; done; ',
+                                        b'if [ "$media_found" = "1" ]; then break; fi; ',
+                                        b'attempt=$((attempt+1)); sleep 1; done; ',
+                                        b'if [ "$media_found" = "1" ]; then echo ' + shell_ok + b'; ',
+                                        b'else echo ' + shell_missing + b'; fi\n'
+                                    ]
+                                    for chunk in script_chunks:
+                                        serial_client.raw_write(chunk)
+                                        time.sleep(0.01)
+                                    _media_check_sent = True
+                                    _media_check_deadline = time.perf_counter() + 15.0
+                                except Exception as e:
+                                    logger.error('[TEZI] Removable media probe write failed', error=str(e))
+                                    tail_sent = True  # skip tail, rely on RX-only fallback
+
+                        elif _media_check_sent and not _media_check_verified:
+                            clean_line = event.line.strip()
+                            if clean_line == _MEDIA_CHECK_TOKEN_OK:
+                                _media_check_verified = True
+                                logger.info('[TEZI] Removable media detected! Injecting live log tracker...')
+                                try:
+                                    serial_client.raw_write(
+                                        b'( i=0; while [ ! -f /var/volatile/tezi.log ] && [ $i -lt 30 ]; do sleep 1; i=$((i+1)); done; '
+                                        b'[ -f /var/volatile/tezi.log ] && tail -n +1 -f /var/volatile/tezi.log ) &\n'
+                                    )
+                                    tail_sent = True
+                                except Exception as e:
+                                    logger.warning('uart_write_blocked_e', e=e)
+                            elif clean_line == _MEDIA_CHECK_TOKEN_MISSING:
+                                logger.critical('[TEZI] Removable media check failed: USB-SD-Mux is missing or not fully plugged!')
+                                raise ProvisioningError("No removable media detected (e.g. USB-SD-Mux is missing or not fully plugged in)!")
+
+                logger.critical(
+                    'tezi_fatal_failed_to_complete_installation_within_flash_timeout_s_s',
+                    flash_timeout_s=self.flash_timeout_s,
+                )
+                return False
+            finally:
+                logger.info('[TEZI] Cleaning up and disconnecting serial client...')
+                try:
+                    serial_client.disconnect()
+                except Exception as e:
+                    logger.warning('failed_to_disconnect_serial_client_in_tezi_provision', error=str(e))
 
         # No serial_client supplied — uuu exit code 0 is sufficient proof of success.
         return True

@@ -46,3 +46,13 @@ class BaseHostAdapter(ABC):
         regardless of whether the test passed, failed, or crashed.
         """
         pass
+
+    async def __aenter__(self) -> 'BaseHostAdapter':
+        """Async context manager wrapper. Delegates to __enter__ via thread."""
+        import anyio
+        return await anyio.to_thread.run_sync(self.__enter__)
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        """Async context manager wrapper. Delegates to __exit__ via thread."""
+        import anyio
+        await anyio.to_thread.run_sync(self.__exit__, exc_type, exc_val, exc_tb)

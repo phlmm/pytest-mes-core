@@ -4,27 +4,17 @@ from transitions.core import MachineError
 from pytest_mes_core.state_machine import EmbeddedLinuxStateMachine, BootStrategy, KernelPanicError, DutState
 
 class MockBootStrategy(BootStrategy):
-    def cold_boot_to_bootloader(self, fsm: EmbeddedLinuxStateMachine) -> None:
+    async def cold_boot_to_bootloader(self, fsm: EmbeddedLinuxStateMachine) -> None:
         fsm.machine.set_state(DutState.BOOTLOADER)
         
-    def cold_boot_to_os(self, fsm: EmbeddedLinuxStateMachine) -> None:
+    async def cold_boot_to_os(self, fsm: EmbeddedLinuxStateMachine) -> None:
         fsm.machine.set_state(DutState.OS_USERLAND)
         
-    def resume_bootloader_to_os(self, fsm: EmbeddedLinuxStateMachine) -> None:
+    async def resume_bootloader_to_os(self, fsm: EmbeddedLinuxStateMachine) -> None:
         fsm.machine.set_state(DutState.OS_USERLAND)
 
-    async def async_cold_boot_to_bootloader(self, fsm: EmbeddedLinuxStateMachine) -> None:
-        fsm.machine.set_state(DutState.BOOTLOADER)
-        
-    async def async_cold_boot_to_os(self, fsm: EmbeddedLinuxStateMachine) -> None:
-        fsm.machine.set_state(DutState.OS_USERLAND)
-        
-    async def async_resume_bootloader_to_os(self, fsm: EmbeddedLinuxStateMachine) -> None:
-        fsm.machine.set_state(DutState.OS_USERLAND)
-
-
-
-def test_fsm_power_cycle_error_handling(monkeypatch):
+@pytest.mark.anyio
+async def test_fsm_power_cycle_error_handling(monkeypatch):
     """Edge Case: What happens if the PSU fails to turn on?"""
     monkeypatch.setattr('builtins.input', lambda _: None)
     serial_mock = MagicMock()
@@ -47,9 +37,10 @@ def test_fsm_power_cycle_error_handling(monkeypatch):
     
     # Try to energize (which will call _hw_energize -> _do_energize -> psu.power_on)
     with pytest.raises(Exception, match="PSU Exploded"):
-        fsm.energize()
+        await fsm.energize()
         
-def test_fsm_panic_event_during_boot(monkeypatch):
+@pytest.mark.anyio
+async def test_fsm_panic_event_during_boot(monkeypatch):
     """Edge Case: UartEventStream yields a KernelPanic."""
     monkeypatch.setattr('builtins.input', lambda _: None)
     from pytest_mes_core.state_machine import UartEventStream, PanicDetected
@@ -60,34 +51,22 @@ def test_fsm_panic_event_during_boot(monkeypatch):
     
     # Simulate the stream yielding normal lines, then a panic
     import time
-    def mock_open(*args, **kwargs):
+    async def mock_open_async(*args, **kwargs):
         yield PanicDetected(elapsed_s=time.time(), raw_output="Kernel panic - not syncing: VFS: Unable to mount root fs")
         
-    stream_mock.open.side_effect = mock_open
+    stream_mock.open_async = mock_open_async
     
     class PanicBootStrategy(BootStrategy):
-        def cold_boot_to_bootloader(self, fsm: EmbeddedLinuxStateMachine) -> None:
-            pass
-            
-        def cold_boot_to_os(self, fsm: EmbeddedLinuxStateMachine) -> None:
-            # We must use the stream. If it yields PanicDetected, we should raise.
-            for event in stream_mock.open():
-                if isinstance(event, PanicDetected):
-                    raise KernelPanicError(event.raw_output)
-                    
-        def resume_bootloader_to_os(self, fsm: EmbeddedLinuxStateMachine) -> None:
-            pass
-                    
-        async def async_cold_boot_to_bootloader(self, fsm: EmbeddedLinuxStateMachine) -> None:
+        async def cold_boot_to_bootloader(self, fsm: EmbeddedLinuxStateMachine) -> None:
             pass
 
-        async def async_cold_boot_to_os(self, fsm: EmbeddedLinuxStateMachine) -> None:
+        async def cold_boot_to_os(self, fsm: EmbeddedLinuxStateMachine) -> None:
             # We must use the stream. If it yields PanicDetected, we should raise.
             async for event in stream_mock.open_async():
                 if isinstance(event, PanicDetected):
                     raise KernelPanicError(event.raw_output)
 
-        async def async_resume_bootloader_to_os(self, fsm: EmbeddedLinuxStateMachine) -> None:
+        async def resume_bootloader_to_os(self, fsm: EmbeddedLinuxStateMachine) -> None:
             pass
                     
     mock_cfg = MagicMock()
@@ -102,12 +81,13 @@ def test_fsm_panic_event_during_boot(monkeypatch):
     fsm.boot_strategy = PanicBootStrategy()
     
     # Energize the board first
-    fsm.energize()
+    await fsm.energize()
     
     with pytest.raises(KernelPanicError, match="Device kernel panicked during OS boot sequence."):
-        fsm.boot_to_os()
+        await fsm.boot_to_os()
 
-def test_fsm_timeout_during_wait_for_shell(monkeypatch):
+@pytest.mark.anyio
+async def test_fsm_timeout_during_wait_for_shell(monkeypatch):
     """Edge Case: The board hangs completely during boot, event stream times out."""
     monkeypatch.setattr('builtins.input', lambda _: None)
     from pytest_mes_core.transports import TransportTimeoutError
@@ -116,11 +96,11 @@ def test_fsm_timeout_during_wait_for_shell(monkeypatch):
     stream_mock = MagicMock()
     
     # Mock open to yield nothing and just exit (simulating a timeout where the while loop ends)
-    def mock_open(*args, **kwargs):
+    async def mock_open_async(*args, **kwargs):
         return
         yield
         
-    stream_mock.open.side_effect = mock_open
+    stream_mock.open_async = mock_open_async
     
     mock_cfg = MagicMock()
     mock_cfg.cold_boot_timeout_s = 1.0
@@ -136,9 +116,10 @@ def test_fsm_timeout_during_wait_for_shell(monkeypatch):
     
     with pytest.raises(TransportTimeoutError, match="Timed out waiting for Linux Shell prompt."):
         # We invoke the private method to specifically test the shell wait timeout
-        fsm._event_wait_for_os_shell()
+        await fsm.event_wait_for_os_shell()
 
-def test_fsm_hot_login_fallback_to_cold_boot(monkeypatch):
+@pytest.mark.anyio
+async def test_fsm_hot_login_fallback_to_cold_boot(monkeypatch):
     """Edge Case: Hot login fails because the target doesn't show a shell prompt,
     so the FSM must fall back to a full cold boot power cycle."""
     monkeypatch.setattr('builtins.input', lambda _: None)
@@ -149,16 +130,16 @@ def test_fsm_hot_login_fallback_to_cold_boot(monkeypatch):
     
     # The first time we wait for shell (during hot login), it times out.
     # The second time (during cold boot), it succeeds.
-    def mock_open_fail(*args, **kwargs):
+    async def mock_open_fail(*args, **kwargs):
         return
         yield
         
-    def mock_open_success(*args, **kwargs):
+    async def mock_open_success(*args, **kwargs):
         from pytest_mes_core.state_machine import PromptDetected
         import time
         yield PromptDetected(elapsed_s=time.time(), prompt_type="shell")
         
-    stream_mock.open.side_effect = [mock_open_fail(), mock_open_success()]
+    stream_mock.open_async.side_effect = [mock_open_fail(), mock_open_success()]
     
     mock_cfg = MagicMock()
     mock_cfg.cold_boot_timeout_s = 1.0
@@ -195,10 +176,56 @@ def test_fsm_hot_login_fallback_to_cold_boot(monkeypatch):
     fsm._do_power_off = MagicMock()
     fsm._do_energize = MagicMock()
     
-    fsm.energize()
+    await fsm.energize()
     
     # Act: call _hw_boot_to_os directly since it handles the fallback logic
-    fsm._hw_boot_to_os(mock_event)
+    await fsm._hw_boot_to_os(mock_event)
     
     # Assert that power cycle occurred because hot login failed
     fsm._do_power_off.assert_called()
+
+@pytest.mark.anyio
+async def test_fsm_verbose_logging_prints_at_info(monkeypatch):
+    """Verify that when verbose=True, boot logs are emitted at INFO level, otherwise DEBUG."""
+    import pytest_mes_core.state_machine
+    from pytest_mes_core.events import BootDataReceived, PromptDetected
+    
+    mock_logger = MagicMock()
+    monkeypatch.setattr(pytest_mes_core.state_machine, "logger", mock_logger)
+    
+    serial_mock = MagicMock()
+    mock_res = MagicMock()
+    mock_res.stdout = "MES_SYNC"
+    serial_mock.safe_run.return_value = mock_res
+    
+    stream_mock = MagicMock()
+    async def mock_open_async(*args, **kwargs):
+        yield BootDataReceived(elapsed_s=1.0, line="Loading Linux kernel...")
+        yield PromptDetected(elapsed_s=2.0, prompt_type="bootloader")
+        
+    stream_mock.open_async = mock_open_async
+    
+    mock_cfg = MagicMock()
+    mock_cfg.cold_boot_timeout_s = 60.0
+    
+    # 1. Test verbose=False (Default)
+    fsm_quiet = EmbeddedLinuxStateMachine(
+        psu=MagicMock(), serial=serial_mock, ssh=MagicMock(), cfg=mock_cfg, verbose=False
+    )
+    fsm_quiet.event_stream = stream_mock
+    
+    await fsm_quiet.event_wait_for_bootloader(intercept_autoboot=True)
+        
+    mock_logger.debug.assert_any_call("uart_rx", data="Loading Linux kernel...")
+    mock_logger.reset_mock()
+    
+    # 2. Test verbose=True
+    stream_mock.open_async = mock_open_async
+    fsm_verbose = EmbeddedLinuxStateMachine(
+        psu=MagicMock(), serial=serial_mock, ssh=MagicMock(), cfg=mock_cfg, verbose=True
+    )
+    fsm_verbose.event_stream = stream_mock
+    
+    await fsm_verbose.event_wait_for_bootloader(intercept_autoboot=True)
+        
+    mock_logger.info.assert_any_call("uart_rx", data="Loading Linux kernel...")

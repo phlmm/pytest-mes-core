@@ -1,3 +1,4 @@
+import anyio
 import structlog
 import time
 import logging
@@ -33,6 +34,9 @@ class OperatorReceiptExporter:
         self._context = context
         self.start_time = time.perf_counter()
 
+    async def async_start_session(self, context, *args, **kwargs):
+        return await anyio.to_thread.run_sync(self.start_session, context, *args, **kwargs)
+
     def emit_record(self, record: TestRecord) -> None:
         """Updates internal statistics based on the emitted test record.
 
@@ -42,6 +46,9 @@ class OperatorReceiptExporter:
         self.total_tests += 1
         if not record.passed:
             self.failed_tests += 1
+
+    async def async_emit_record(self, record, *args, **kwargs):
+        return await anyio.to_thread.run_sync(self.emit_record, record, *args, **kwargs)
 
     def end_session(self, session_passed: bool) -> None:
         """Finalizes the run and writes the receipt file.
@@ -69,3 +76,5 @@ class OperatorReceiptExporter:
         with open(filepath, 'w', encoding='utf-8') as f:
             f.write(receipt_body)
         logger.warning('generated_operator_receipt_name', name=filepath.name)
+    async def async_end_session(self, session_passed, *args, **kwargs):
+        return await anyio.to_thread.run_sync(self.end_session, session_passed, *args, **kwargs)

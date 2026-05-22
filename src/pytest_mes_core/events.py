@@ -32,6 +32,15 @@ class BootDataReceived(UartEvent):
     """A complete line of boot output was received (for debug logging)."""
     line: str
 
+class StateChanged(BaseModel):
+    """Fired when an FSM transitions from one state to another."""
+    model_config = ConfigDict(frozen=True)
+    fsm_name: str
+    old_state: str
+    new_state: str
+    trigger: str
+    timestamp: float
+
 
 hookspec = pluggy.HookspecMarker("mes_core")
 hookimpl = pluggy.HookimplMarker("mes_core")
@@ -71,6 +80,10 @@ class EventBusSpecs:
         detected.  Suitable for session management hooks that need to react
         to console state changes without embedding logic inside the FSM."""
 
+    @hookspec
+    def on_state_changed(self, event: StateChanged) -> None:
+        """Fired when an FSM transitions from one state to another."""
+
 
 class EventBus:
     """
@@ -106,6 +119,10 @@ class EventBus:
             self.pm.hook.on_boot_milestone(event=event)
         elif isinstance(event, PromptDetected):
             self.pm.hook.on_prompt_detected(event=event)
+
+    def emit_state_event(self, event: StateChanged) -> None:
+        """Dispatch an FSM state change event to registered listeners."""
+        self.pm.hook.on_state_changed(event=event)
 
 # Global Event Bus singleton
 bus = EventBus()

@@ -1,3 +1,4 @@
+import anyio
 import structlog
 import logging
 from typing import Optional, Dict, Any
@@ -74,3 +75,5 @@ class ManifestScraper:
         logger.debug('harvest_complete_sn_serial_number', serial_number=manifest.serial_number)
         manifest.check_completeness()
         return manifest
+    async def async_harvest(self, *args, **kwargs):
+        return await anyio.to_thread.run_sync(self.harvest, *args, **kwargs)

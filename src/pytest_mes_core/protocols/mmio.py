@@ -1,3 +1,4 @@
+import anyio
 import structlog
 import logging
 from typing import Dict, Any
@@ -73,6 +74,10 @@ class MmioValidator:
             return ValidatorResult(passed=False, error_msg=f'Kernel Panic/Data Abort accessing MMIO: {e}', context=context_data)
 
     @staticmethod
+    async def async_read_register(dut, cfg, *args, **kwargs):
+        return await anyio.to_thread.run_sync(MmioValidator.read_register, dut, cfg, *args, **kwargs)
+
+    @staticmethod
     def write_register(dut: DutTransport, cfg: MmioConfig, write_val_hex: str) -> ValidatorResult:
         """Writes raw bits directly to physical silicon bypassing the Linux kernel.
 
@@ -110,3 +115,6 @@ class MmioValidator:
         except TransportConnectionError as e:
             logger.critical('fatal_kernel_panic_data_abort_triggered_by_mmio_write_to_address_hex_e', address_hex=cfg.address_hex, e=e)
             return ValidatorResult(passed=False, error_msg=f'Kernel Panic/Data Abort during MMIO write: {e}', context=context_data)
+    @staticmethod
+    async def async_write_register(dut, cfg, write_val_hex, *args, **kwargs):
+        return await anyio.to_thread.run_sync(MmioValidator.write_register, dut, cfg, write_val_hex, *args, **kwargs)

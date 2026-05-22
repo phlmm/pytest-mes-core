@@ -3,6 +3,8 @@ import structlog
 import time
 import serial
 from typing import Optional, Tuple, Dict, Any
+from functools import partial
+import anyio
 
 logger = structlog.get_logger('mes_core.instruments.fnirsi_dps150')
 
@@ -268,6 +270,34 @@ class FnirsiDPS150:
             'protection_status': data[109]
         }
         return res
+
+    # ------------------------------------------------------------------
+    # Async API (anyio-compatible)
+    # ------------------------------------------------------------------
+
+    async def async_connect(self) -> None:
+        await anyio.to_thread.run_sync(self.connect)
+
+    async def async_set_voltage(self, volts: float) -> None:
+        await anyio.to_thread.run_sync(partial(self.set_voltage, volts))
+
+    async def async_set_current_limit(self, amps: float) -> None:
+        await anyio.to_thread.run_sync(partial(self.set_current_limit, amps))
+
+    async def async_enable_output(self) -> None:
+        await anyio.to_thread.run_sync(self.enable_output)
+
+    async def async_disable_output(self) -> None:
+        await anyio.to_thread.run_sync(self.disable_output)
+
+    async def async_measure_current(self) -> float:
+        return await anyio.to_thread.run_sync(self.measure_current)
+
+    async def async_measure_voltage(self) -> float:
+        return await anyio.to_thread.run_sync(self.measure_voltage)
+
+    async def async_close(self) -> None:
+        await anyio.to_thread.run_sync(self.close)
 
 class InstrumentConnectionError(FnirsiProtocolError):
     pass

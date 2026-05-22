@@ -45,7 +45,7 @@ def pytest_html_results_table_row(report: Any, cells: list[Any]) -> None:
     if cells:
         cells.pop()
 
-@pytest.hookimpl(tryfirst=True, hookwrapper=True)
+@pytest.hookimpl(tryfirst=True, wrapper=True)
 def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]) -> Generator[None, Any, None]:
     """
     Intercepts the test execution phases (setup, call, teardown) to attach
@@ -58,8 +58,7 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]) ->
     Yields:
         None
     """
-    outcome: Any = (yield)
-    rep = outcome.get_result()
+    rep: Any = (yield)
     setattr(item, 'rep_' + rep.when, rep)
     if rep.when == 'call':
         record: Optional[TestRecord] = getattr(item, 'mes_telemetry_record', None)
@@ -99,6 +98,7 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]) ->
 
             if html_parts:
                 rep.custom_metrics_html = '<br>'.join(html_parts)
+    return rep
 
 @pytest.fixture(scope='function', autouse=True)
 def mes_record(request: pytest.FixtureRequest, mes_env: StationEnvironment, telemetry_sink: TelemetryExporter, dut_transport: Any, dut_state_machine: Optional[EmbeddedLinuxStateMachine], enforce_physical_state: Any) -> Generator[TestRecord, None, None]:

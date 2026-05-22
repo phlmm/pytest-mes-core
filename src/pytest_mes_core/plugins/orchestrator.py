@@ -7,6 +7,7 @@ It provides the master session-level state machine and an automatic wrapper fixt
 that enforces physical hardware states before a test is allowed to execute.
 """
 import pytest
+import anyio
 import logging
 from datetime import datetime, timezone
 from typing import Generator, Optional
@@ -43,7 +44,7 @@ def dut_state_machine(request: pytest.FixtureRequest, mes_env: StationEnvironmen
         yield None
         return
     boot_profiler_cfg = mes_env.boot_profilers.get('linux_boot') if mes_env.boot_profilers else None
-    sm = EmbeddedLinuxStateMachine(psu=psu_hardware, serial=serial_client, ssh=ssh_client, cfg=mes_env.state_machine, boot_profiler_cfg=boot_profiler_cfg)
+    sm = EmbeddedLinuxStateMachine(psu=psu_hardware, serial=serial_client, ssh=ssh_client, cfg=mes_env.state_machine, boot_profiler_cfg=boot_profiler_cfg, verbose=request.config.getoption('verbose') >= 1)
     try:
         yield sm
     finally:
@@ -55,7 +56,7 @@ def dut_state_machine(request: pytest.FixtureRequest, mes_env: StationEnvironmen
                 record = TestRecord(test_name='mes_fsm_boot_profiler', passed=True, duration_s=sm.boot_metrics.get('t_boot_total_to_shell_s', 0.0), metrics=sm.boot_metrics, context={})
                 sink.emit_record(record)
         try:
-            sm.power_off()
+            anyio.run(sm.power_off)
         except KeyboardInterrupt:
             logger.warning("power_off_interrupted_by_ctrl_c", action="teardown_continuing")
         except Exception as e:
@@ -98,20 +99,20 @@ def enforce_physical_state(request: pytest.FixtureRequest, dut_state_machine: Op
             if target_state_name == 'OS_USERLAND' and hasattr(dut_state_machine, 'verify_heartbeat'):
                 if not dut_state_machine.verify_heartbeat():
                     logger.warning('[Router] Target is OS_USERLAND but heartbeat failed! Marking DIRTY and rebooting.')
-                    dut_state_machine.mark_dirty()
-                    dut_state_machine.boot_to_os()
+                    anyio.run(dut_state_machine.mark_dirty)
+                    anyio.run(dut_state_machine.boot_to_os)
                 else:
                     logger.debug('board_is_already_in_current_state_name_and_heartbeat_ok_bypassing_boot_sequence', current_state_name=current_state_name)
             else:
                 logger.debug('board_is_already_in_current_state_name_bypassing_boot_sequence', current_state_name=current_state_name)
         elif target_state_name == 'POWER_OFF':
-            dut_state_machine.power_off()
+            anyio.run(dut_state_machine.power_off)
         elif target_state_name == 'ENERGIZED':
-            dut_state_machine.energize()
+            anyio.run(dut_state_machine.energize)
         elif target_state_name == 'BOOTLOADER':
-            dut_state_machine.boot_to_bootloader()
+            anyio.run(dut_state_machine.boot_to_bootloader)
         elif target_state_name == 'OS_USERLAND':
-            dut_state_machine.boot_to_os()
+            anyio.run(dut_state_machine.boot_to_os)
             
     yield
     rep_call = getattr(request.node, 'rep_call', None)
@@ -126,7 +127,7 @@ def enforce_physical_state(request: pytest.FixtureRequest, dut_state_machine: Op
                 logger.critical('crash_graph_generated_graph_path', graph_path=graph_path)
             except Exception as e:
                 logger.debug('failed_to_generate_graphviz_image_e', e=e)
-        dut_state_machine.mark_dirty()
+        anyio.run(dut_state_machine.mark_dirty)
         logger.warning('test_name_failed_state_marked_dirty', name=request.node.name)
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:

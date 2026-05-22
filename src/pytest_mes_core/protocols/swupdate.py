@@ -26,6 +26,10 @@ class SWUpdateValidator:
         logger.info('pre_flight_ok_current_active_partition_original_rootfs', original_rootfs=original_rootfs)
         return original_rootfs
 
+    async def async_pre_flight_checks(self) -> str:
+        import anyio
+        return await anyio.to_thread.run_sync(self.pre_flight_checks)
+
     def install_from_url(self, swu_url: str, timeout_s: float=300.0) -> None:
         """Streams the update directly into flash via HTTP.
 
@@ -43,6 +47,10 @@ class SWUpdateValidator:
         else:
             logger.warning("[SWUpdate] Command exited 0, but 'Installation successful' not found in stdout. Proceeding with caution.")
 
+    async def async_install_from_url(self, swu_url: str, timeout_s: float=300.0) -> None:
+        import anyio
+        return await anyio.to_thread.run_sync(self.install_from_url, swu_url, timeout_s)
+
     def install_from_local_media(self, file_path: str, timeout_s: float=300.0) -> None:
         """Installs an update from a locally mounted USB drive or SD Card.
 
@@ -55,6 +63,10 @@ class SWUpdateValidator:
         cmd = f'swupdate -i {file_path} -v'
         self.dut.safe_run(cmd, timeout_s=timeout_s, check_exit_code=True)
         logger.info('[SWUpdate] Local payload written successfully.')
+
+    async def async_install_from_local_media(self, file_path: str, timeout_s: float=300.0) -> None:
+        import anyio
+        return await anyio.to_thread.run_sync(self.install_from_local_media, file_path, timeout_s)
 
     def verify_partition_flip(self, original_rootfs: str) -> None:
         """Reboots the board and verifies U-Boot successfully transitioned to the new partition.
@@ -78,6 +90,10 @@ class SWUpdateValidator:
             self.dut.safe_run('fw_setenv upgrade_available 0', timeout_s=3.0, check_exit_code=False)
             self.dut.safe_run('fw_setenv bootcount 0', timeout_s=3.0, check_exit_code=False)
 
+    async def async_verify_partition_flip(self, original_rootfs: str) -> None:
+        import anyio
+        return await anyio.to_thread.run_sync(self.verify_partition_flip, original_rootfs)
+
     def execute_full_ota(self, swu_url: str, timeout_s: float=300.0) -> None:
         """Executes the complete over-the-air update sequence.
 
@@ -94,3 +110,7 @@ class SWUpdateValidator:
         logger.info('=' * 60)
         logger.info('[SWUpdate] OVER-THE-AIR UPDATE COMPLETE')
         logger.info('=' * 60)
+
+    async def async_execute_full_ota(self, swu_url: str, timeout_s: float=300.0) -> None:
+        import anyio
+        return await anyio.to_thread.run_sync(self.execute_full_ota, swu_url, timeout_s)

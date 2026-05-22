@@ -1,4 +1,5 @@
 import time
+import os
 import queue
 import socket
 import re
@@ -20,11 +21,15 @@ from pytest_mes_core.transports import TransportTimeoutError, TransportConnectio
 from pytest_mes_core.manifest import HardwareManifest
 
 try:
-    from transitions.extensions import GraphMachine as Machine
+    from transitions.extensions.asyncio import AsyncGraphMachine as Machine
     HAS_GRAPHVIZ = True
 except ImportError:
-    from transitions import Machine
+    from transitions.extensions.asyncio import AsyncMachine as Machine
     HAS_GRAPHVIZ = False
+
+def _is_headless() -> bool:
+    """Check if we are running in a CI/CD headless environment."""
+    return os.environ.get("CI", "").lower() in ("true", "1") or os.environ.get("MES_HEADLESS", "").lower() in ("true", "1")
 
 import structlog
 
@@ -129,6 +134,7 @@ class UartEventStream:
         rx_queue = self.serial.subscribe(maxsize=0)
         last_rx_time = time.perf_counter()
         _local_buf = ""  # private — never shared with self.serial.parser
+        _silent_pings = 0  # consecutive pings with no RX — TX health indicator
 
         try:
             while time.perf_counter() - t_start < timeout_s:
@@ -140,7 +146,22 @@ class UartEventStream:
                     # injects \n into the kernel console, echoing back noise that
                     # interleaves with kernel messages.
                     if active_ping_char and (time.perf_counter() - last_rx_time > 5.0):
-                        logger.debug("[UART] Console silent. Injecting ping to redraw prompt...")
+                        _silent_pings += 1
+                        if _silent_pings >= 6:
+                            logger.error(
+                                "[UART] TX health suspect: %d pings unanswered "
+                                "(%.0f s silence). Check host→DUT UART TX wiring, "
+                                "serial adapter, and connector pin assignment.",
+                                _silent_pings, _silent_pings * 5.0,
+                            )
+                        elif _silent_pings >= 3:
+                            logger.warning(
+                                "[UART] %d consecutive pings unanswered (%.0f s) "
+                                "— possible TX line fault.",
+                                _silent_pings, _silent_pings * 5.0,
+                            )
+                        else:
+                            logger.debug("[UART] Console silent. Injecting ping to redraw prompt...")
                         self.serial.raw_write(active_ping_char)
                         last_rx_time = time.perf_counter()
                     continue
@@ -148,6 +169,9 @@ class UartEventStream:
                 if not chunk:
                     continue
 
+                if _silent_pings > 0:
+                    logger.debug("[UART] RX resumed after %d silent pings.", _silent_pings)
+                    _silent_pings = 0
                 last_rx_time = time.perf_counter()
 
                 # Decode into the private local buffer; strip ANSI escape codes.
@@ -236,6 +260,7 @@ class UartEventStream:
         rx_queue = self.serial.subscribe(maxsize=0)
         last_rx_time = time.perf_counter()
         _local_buf = ""  # private — never shared with self.serial.parser
+        _silent_pings = 0  # consecutive pings with no RX — TX health indicator
 
         try:
             while time.perf_counter() - t_start < timeout_s:
@@ -246,7 +271,22 @@ class UartEventStream:
                     )
                 except queue.Empty:
                     if active_ping_char and (time.perf_counter() - last_rx_time > 5.0):
-                        logger.debug("[UART] Console silent. Injecting ping to redraw prompt...")
+                        _silent_pings += 1
+                        if _silent_pings >= 6:
+                            logger.error(
+                                "[UART] TX health suspect: %d pings unanswered "
+                                "(%.0f s silence). Check host→DUT UART TX wiring, "
+                                "serial adapter, and connector pin assignment.",
+                                _silent_pings, _silent_pings * 5.0,
+                            )
+                        elif _silent_pings >= 3:
+                            logger.warning(
+                                "[UART] %d consecutive pings unanswered (%.0f s) "
+                                "— possible TX line fault.",
+                                _silent_pings, _silent_pings * 5.0,
+                            )
+                        else:
+                            logger.debug("[UART] Console silent. Injecting ping to redraw prompt...")
                         self.serial.raw_write(active_ping_char)
                         last_rx_time = time.perf_counter()
                     continue
@@ -254,6 +294,9 @@ class UartEventStream:
                 if not chunk:
                     continue
 
+                if _silent_pings > 0:
+                    logger.debug("[UART] RX resumed after %d silent pings.", _silent_pings)
+                    _silent_pings = 0
                 last_rx_time = time.perf_counter()
 
                 # Decode into the private local buffer; strip ANSI escape codes.
@@ -333,30 +376,18 @@ class BootStrategy(ABC):
     """
 
     @abstractmethod
-    def cold_boot_to_bootloader(self, fsm: 'EmbeddedLinuxStateMachine') -> None:
+    async def cold_boot_to_bootloader(self, fsm: 'EmbeddedLinuxStateMachine') -> None:
         """From POWER_OFF → BOOTLOADER. Board must be freshly energized."""
         ...
 
     @abstractmethod
-    def cold_boot_to_os(self, fsm: 'EmbeddedLinuxStateMachine') -> None:
+    async def cold_boot_to_os(self, fsm: 'EmbeddedLinuxStateMachine') -> None:
         """From POWER_OFF → OS_USERLAND. Full boot sequence."""
         ...
 
     @abstractmethod
-    def resume_bootloader_to_os(self, fsm: 'EmbeddedLinuxStateMachine') -> None:
+    async def resume_bootloader_to_os(self, fsm: 'EmbeddedLinuxStateMachine') -> None:
         """From BOOTLOADER → OS_USERLAND. Board is already at U-Boot."""
-        ...
-
-    @abstractmethod
-    async def async_cold_boot_to_bootloader(self, fsm: 'EmbeddedLinuxStateMachine') -> None:
-        ...
-
-    @abstractmethod
-    async def async_cold_boot_to_os(self, fsm: 'EmbeddedLinuxStateMachine') -> None:
-        ...
-
-    @abstractmethod
-    async def async_resume_bootloader_to_os(self, fsm: 'EmbeddedLinuxStateMachine') -> None:
         ...
 
 
@@ -368,29 +399,19 @@ class AutobootStrategy(BootStrategy):
     giving the FSM deterministic control over the boot process.
     """
 
-    def cold_boot_to_bootloader(self, fsm: 'EmbeddedLinuxStateMachine') -> None:
-        fsm._do_energize()
-        fsm._event_wait_for_bootloader(intercept_autoboot=True)
-
-    def cold_boot_to_os(self, fsm: 'EmbeddedLinuxStateMachine') -> None:
-        fsm._do_energize()
-        fsm._event_wait_for_bootloader(intercept_autoboot=True)
-        fsm._event_boot_from_bootloader_to_os()
-
-    def resume_bootloader_to_os(self, fsm: 'EmbeddedLinuxStateMachine') -> None:
-        fsm._event_boot_from_bootloader_to_os()
-
-    async def async_cold_boot_to_bootloader(self, fsm: 'EmbeddedLinuxStateMachine') -> None:
+    async def cold_boot_to_bootloader(self, fsm: 'EmbeddedLinuxStateMachine') -> None:
+        import anyio
         await anyio.to_thread.run_sync(fsm._do_energize)
-        await fsm.async_event_wait_for_bootloader(intercept_autoboot=True)
+        await fsm.event_wait_for_bootloader(intercept_autoboot=True)
 
-    async def async_cold_boot_to_os(self, fsm: 'EmbeddedLinuxStateMachine') -> None:
+    async def cold_boot_to_os(self, fsm: 'EmbeddedLinuxStateMachine') -> None:
+        import anyio
         await anyio.to_thread.run_sync(fsm._do_energize)
-        await fsm.async_event_wait_for_bootloader(intercept_autoboot=True)
-        await fsm.async_event_boot_from_bootloader_to_os()
+        await fsm.event_wait_for_bootloader(intercept_autoboot=True)
+        await fsm.event_boot_from_bootloader_to_os()
 
-    async def async_resume_bootloader_to_os(self, fsm: 'EmbeddedLinuxStateMachine') -> None:
-        await fsm.async_event_boot_from_bootloader_to_os()
+    async def resume_bootloader_to_os(self, fsm: 'EmbeddedLinuxStateMachine') -> None:
+        await fsm.event_boot_from_bootloader_to_os()
 
 
 class TrapRebootStrategy(BootStrategy):
@@ -402,35 +423,23 @@ class TrapRebootStrategy(BootStrategy):
     way back down.
     """
 
-    def cold_boot_to_bootloader(self, fsm: 'EmbeddedLinuxStateMachine') -> None:
-        fsm._do_energize()
-        fsm._event_wait_for_os_shell()
-        fsm._finalize_os_boot()
-        fsm._set_uboot_trap_and_reboot()
-        fsm._event_wait_for_bootloader(intercept_autoboot=False)
-
-    def cold_boot_to_os(self, fsm: 'EmbeddedLinuxStateMachine') -> None:
-        fsm._do_energize()
-        fsm._event_wait_for_os_shell()
-
-    def resume_bootloader_to_os(self, fsm: 'EmbeddedLinuxStateMachine') -> None:
-        fsm._restore_uboot_trap()
-        fsm._event_boot_from_bootloader_to_os()
-
-    async def async_cold_boot_to_bootloader(self, fsm: 'EmbeddedLinuxStateMachine') -> None:
+    async def cold_boot_to_bootloader(self, fsm: 'EmbeddedLinuxStateMachine') -> None:
+        import anyio
         await anyio.to_thread.run_sync(fsm._do_energize)
-        await fsm.async_event_wait_for_os_shell()
-        await anyio.to_thread.run_sync(fsm._finalize_os_boot)
+        await fsm.event_wait_for_os_shell()
+        await fsm.finalize_os_boot()
         await anyio.to_thread.run_sync(fsm._set_uboot_trap_and_reboot)
-        await fsm.async_event_wait_for_bootloader(intercept_autoboot=False)
+        await fsm.event_wait_for_bootloader(intercept_autoboot=False)
 
-    async def async_cold_boot_to_os(self, fsm: 'EmbeddedLinuxStateMachine') -> None:
+    async def cold_boot_to_os(self, fsm: 'EmbeddedLinuxStateMachine') -> None:
+        import anyio
         await anyio.to_thread.run_sync(fsm._do_energize)
-        await fsm.async_event_wait_for_os_shell()
+        await fsm.event_wait_for_os_shell()
 
-    async def async_resume_bootloader_to_os(self, fsm: 'EmbeddedLinuxStateMachine') -> None:
+    async def resume_bootloader_to_os(self, fsm: 'EmbeddedLinuxStateMachine') -> None:
+        import anyio
         await anyio.to_thread.run_sync(fsm._restore_uboot_trap)
-        await fsm.async_event_boot_from_bootloader_to_os()
+        await fsm.event_boot_from_bootloader_to_os()
 
 
 class RecoveryStrategy(ABC):
@@ -447,11 +456,11 @@ class RecoveryStrategy(ABC):
     during trigger).  For manual-jumper stations it shows an operator prompt.
     """
     @abstractmethod
-    def trigger_recovery(self, fsm: 'EmbeddedLinuxStateMachine') -> None:
+    async def trigger_recovery(self, fsm: 'EmbeddedLinuxStateMachine') -> None:
         ...
 
     @abstractmethod
-    def release_recovery(self, fsm: 'EmbeddedLinuxStateMachine') -> None:
+    async def release_recovery(self, fsm: 'EmbeddedLinuxStateMachine') -> None:
         ...
 
 
@@ -460,22 +469,27 @@ class GpioRecoveryStrategy(RecoveryStrategy):
     Forces recovery mode by asserting a physical GPIO pin (e.g., pulling BOOT_MODE high)
     while power cycling the board.
     """
-    def trigger_recovery(self, fsm: 'EmbeddedLinuxStateMachine') -> None:
+    async def trigger_recovery(self, fsm: 'EmbeddedLinuxStateMachine') -> None:
+        import anyio
         recovery_pin = getattr(fsm.cfg, "gpio_recovery_pin", "RECOVERY_BTN")
         if fsm.gpio and recovery_pin:
-            fsm.gpio.set_pin(recovery_pin, True)
-            fsm._do_energize()
-            time.sleep(getattr(fsm.cfg, "recovery_latch_time_s", 1.5))
-            fsm.gpio.set_pin(recovery_pin, False)
+            await anyio.to_thread.run_sync(fsm.gpio.set_pin, recovery_pin, True)
+            await anyio.to_thread.run_sync(fsm._do_energize)
+            await anyio.sleep(getattr(fsm.cfg, "recovery_latch_time_s", 1.5))
+            await anyio.to_thread.run_sync(fsm.gpio.set_pin, recovery_pin, False)
         else:
+            if _is_headless():
+                raise StateMachineError("Manual intervention required ('PRESS AND HOLD THE RECOVERY BUTTON') but running in headless/CI environment.")
             logger.warning("manual_action_required", instructions="PRESS AND HOLD THE RECOVERY BUTTON / SET JUMPER NOW.")
-            try: input(">>> Press [ENTER] while holding the button... ")
+            try:
+                await anyio.to_thread.run_sync(input, ">>> Press [ENTER] while holding the button... ")
             except (EOFError, KeyboardInterrupt): pass
 
-            fsm._do_energize()
+            await anyio.to_thread.run_sync(fsm._do_energize)
             logger.warning("manual_action_required", instructions="POWER IS ON. YOU CAN NOW RELEASE THE RECOVERY BUTTON.")
 
-    def release_recovery(self, fsm: 'EmbeddedLinuxStateMachine') -> None:
+    async def release_recovery(self, fsm: 'EmbeddedLinuxStateMachine') -> None:
+        import anyio
         recovery_pin = getattr(fsm.cfg, "gpio_recovery_pin", "RECOVERY_BTN")
         if fsm.gpio and recovery_pin:
             # Automated stations: pin was already de-asserted inside trigger_recovery()
@@ -486,13 +500,16 @@ class GpioRecoveryStrategy(RecoveryStrategy):
             # button.  It must stay installed while the board enumerates on USB and while
             # uuu pushes the payload.  Only NOW — after the SoC RAM is live — can the
             # operator safely remove it so the board boots the delivered payload.
+            if _is_headless():
+                raise StateMachineError("Manual intervention required ('REMOVE THE RECOVERY JUMPER / STRAP NOW') but running in headless/CI environment.")
+            
             logger.warning("=" * 60)
             logger.warning("[RECOVERY] *** MANUAL ACTION REQUIRED ***")
             logger.warning("[RECOVERY] REMOVE THE RECOVERY JUMPER / STRAP NOW.")
             logger.warning("[RECOVERY] The board will boot from the payload once removed.")
             logger.warning("=" * 60)
             try:
-                input(">>> Press [ENTER] once recovery jumper is removed... ")
+                await anyio.to_thread.run_sync(input, ">>> Press [ENTER] once recovery jumper is removed... ")
             except (EOFError, KeyboardInterrupt):
                 logger.warning("manual_prompt_interrupted", action="assuming_jumper_removed_continuing")
 
@@ -504,7 +521,7 @@ class ContextValidationStrategy(ABC):
     Encapsulates OS-level validation (e.g., SWUpdate A/B partition checks, EVSE calibration).
     """
     @abstractmethod
-    def verify_linux_context(self, fsm: 'EmbeddedLinuxStateMachine') -> None:
+    async def verify_linux_context(self, fsm: 'EmbeddedLinuxStateMachine') -> None:
         ...
 
 
@@ -513,9 +530,9 @@ class DefaultSWUpdateStrategy(ContextValidationStrategy):
     Default OS validation strategy that parses the SWUpdate IPC socket to determine
     the active RootFS partition.
     """
-    def verify_linux_context(self, fsm: 'EmbeddedLinuxStateMachine') -> None:
+    async def verify_linux_context(self, fsm: 'EmbeddedLinuxStateMachine') -> None:
         logger.info("validating_ab_partitions_via_swupdate")
-        res_sw = fsm.serial.safe_run("swupdate -g", timeout_s=3.0, check_exit_code=False)
+        res_sw = await fsm.serial.async_safe_run("swupdate -g", timeout_s=3.0, check_exit_code=False)
 
         if res_sw.ok:
             output = res_sw.stdout.strip()
@@ -528,7 +545,7 @@ class DefaultSWUpdateStrategy(ContextValidationStrategy):
 
         crypto_part = getattr(fsm.cfg, 'storage_data_encrypted', '/dev/mapper/data_crypt')
         if crypto_part:
-            mount_res = fsm.serial.safe_run("mount | grep /data", timeout_s=3.0, check_exit_code=False)
+            mount_res = await fsm.serial.async_safe_run("mount | grep /data", timeout_s=3.0, check_exit_code=False)
             fsm.context.crypto_data_mounted = crypto_part in mount_res.stdout
 
 
@@ -548,7 +565,8 @@ class BaseDutStateMachine(ABC):
         ssh: EphemeralSSHClient,
         cfg: StateMachineConfig,
         boot_profiler_cfg: Optional[BootProfilerConfig] = None,
-        gpio: Optional[Any] = None
+        gpio: Optional[Any] = None,
+        verbose: bool = False
     ):
         """Initializes the core Hardware State Machine context.
 
@@ -559,6 +577,7 @@ class BaseDutStateMachine(ABC):
             cfg: Top-level TOML configuration parameters.
             boot_profiler_cfg: Analytics configuration for tracking boot phase duration.
             gpio: Optional hardware fixture controller for physical interaction.
+            verbose: Enable printing of UART console output lines during boot checks.
         """
         self.psu = psu
         self.serial = serial
@@ -566,6 +585,7 @@ class BaseDutStateMachine(ABC):
         self.cfg = cfg
         self.boot_profiler_cfg = boot_profiler_cfg
         self.gpio = gpio
+        self.verbose = verbose
 
         self.boot_metrics: Dict[str, float] = {}
         self.context = DeviceContext()
@@ -589,21 +609,29 @@ class BaseDutStateMachine(ABC):
 
         logger.debug("initializing_fsm", psu_present=self.psu is not None, gpio_present=self.gpio is not None)
 
-        self.machine = Machine(
-            model=self,
-            states=self.STATES,
-            initial=DutState.DIRTY,
-            send_event=True,
-            title="MES Hardware State Graph",
-            show_conditions=True
-        )
+        machine_kwargs = {
+            "model": self,
+            "states": self.STATES,
+            "initial": DutState.DIRTY,
+            "send_event": True,
+            "after_state_change": '_record_timestamp'
+        }
+        if HAS_GRAPHVIZ:
+            machine_kwargs["title"] = "MES Hardware State Graph"
+            machine_kwargs["show_conditions"] = True
+
+        self.machine = Machine(**machine_kwargs)
 
         self.machine.add_transition('power_off', '*', DutState.POWER_OFF, before='_hw_power_off')
         self.machine.add_transition('energize', '*', DutState.ENERGIZED, before='_hw_energize')
         self.machine.add_transition('boot_to_bootloader', '*', DutState.BOOTLOADER, before='_hw_boot_to_bootloader')
         self.machine.add_transition('boot_to_os', '*', DutState.OS_USERLAND, before='_hw_boot_to_os')
         self.machine.add_transition('boot_to_recovery', '*', DutState.RECOVERY, before='_hw_to_recovery')
-        self.machine.add_transition('mark_dirty', '*', DutState.DIRTY, before=lambda e: logger.warning("state_marked_dirty"))
+        
+        async def _log_dirty(e):
+            logger.warning("state_marked_dirty")
+            
+        self.machine.add_transition('mark_dirty', '*', DutState.DIRTY, before=_log_dirty)
 
         self._register_custom_states()
 
@@ -631,16 +659,27 @@ class BaseDutStateMachine(ABC):
         if validator_func not in self.context_validators:
             self.context_validators.append(validator_func)
 
+    def _record_timestamp(self, event: EventData) -> None:
+        from pytest_mes_core.events import bus, StateChanged
+        ev = StateChanged(
+            fsm_name=self.__class__.__name__,
+            old_state=event.transition.source,
+            new_state=self.state,
+            trigger=event.event.name,
+            timestamp=time.time()
+        )
+        bus.emit_state_event(event=ev)
+
     @abstractmethod
-    def _hw_power_off(self, event: EventData) -> None: pass
+    async def _hw_power_off(self, event: EventData) -> None: pass
     @abstractmethod
-    def _hw_energize(self, event: EventData) -> None: pass
+    async def _hw_energize(self, event: EventData) -> None: pass
     @abstractmethod
-    def _hw_boot_to_bootloader(self, event: EventData) -> None: pass
+    async def _hw_boot_to_bootloader(self, event: EventData) -> None: pass
     @abstractmethod
-    def _hw_boot_to_os(self, event: EventData) -> None: pass
+    async def _hw_boot_to_os(self, event: EventData) -> None: pass
     @abstractmethod
-    def _hw_to_recovery(self, event: EventData) -> None: pass
+    async def _hw_to_recovery(self, event: EventData) -> None: pass
 
 
 class EmbeddedLinuxStateMachine(BaseDutStateMachine):
@@ -834,6 +873,9 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
             return
 
         # No GPIO controller — prompt the operator
+        if _is_headless():
+            raise StateMachineError(f"Manual hardware intervention required (SET BOOT STRAPS TO {medium.upper()}) but running in headless/CI environment.")
+        
         logger.warning("=" * 60)
         if medium == "default":
             logger.warning("[MANUAL ACTION] RESTORE HARDWARE BOOT STRAP PINS / DIP SWITCHES TO DEFAULT.")
@@ -886,6 +928,9 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
             self.psu.disable_output()
             time.sleep(2.0)
         else:
+            if _is_headless():
+                raise StateMachineError("Manual hardware intervention required (UNPLUG 12V POWER) but running in headless/CI environment.")
+                
             logger.warning("manual_action_required", instructions="UNPLUG THE 12V POWER FROM THE BOARD NOW.")
             try: input(">>> Press [ENTER] once powered off... ")
             except (EOFError, KeyboardInterrupt):
@@ -915,6 +960,9 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
             else:
                 time.sleep(1.0)
         else:
+            if _is_headless():
+                raise StateMachineError("Manual hardware intervention required (PLUG IN 12V POWER) but running in headless/CI environment.")
+                
             logger.warning("manual_action_required", instructions="PLUG IN THE 12V POWER NOW.")
             try: input(">>> Press [ENTER] once power is applied... ")
             except (EOFError, KeyboardInterrupt):
@@ -964,15 +1012,9 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
     # EVENT-DRIVEN BOOT METHODS
     # =========================================================================
 
-    def _event_wait_for_bootloader(self, intercept_autoboot: bool) -> None:
-        """Event-driven bootloader interception.
-
-        Consumes events from the UartEventStream until a bootloader prompt
-        is detected, then synchronizes with an echo command.
-
-        Args:
-            intercept_autoboot: If True, fires interrupt characters to stop autoboot.
-        """
+    async def event_wait_for_bootloader(self, intercept_autoboot: bool) -> None:
+        """Asynchronous event-driven bootloader interception."""
+        import anyio
         logger.info("hunting_for_bootloader_prompt")
 
         blast_bytes = self.cfg.bootloader_interrupt_char.encode('utf-8')
@@ -987,57 +1029,61 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
 
         ping_char = b"\r\n" if intercept_autoboot else None
 
-        for event in self.event_stream.open(
+        stream = self.event_stream.open_async(
             prompts=prompts,
             timeout_s=self.cfg.cold_boot_timeout_s,
             autoboot_trigger=autoboot_trigger,
             active_ping_char=ping_char,
-        ):
-            if isinstance(event, PanicDetected):
-                raise KernelPanicError(
-                    f"Kernel panic during Bootloader routing:\n{event.raw_output}"
-                )
-
-            elif isinstance(event, AutobootWindowDetected):
-                logger.info("autoboot_window_detected_sniping")
-                for _ in range(3):
-                    self.serial.raw_write(blast_bytes)
-                    time.sleep(0.05)
-
-            elif isinstance(event, PromptDetected) and event.prompt_type in ("bootloader", "trap"):
-                # Synchronize with the prompt via echo
-                self.serial.raw_write(b"\n")
-                time.sleep(0.1)
-                self.serial.flush_buffers()
-
-                res = self.serial.safe_run(
-                    "echo MES_SYNC",
-                    expected_prompt=self.cfg.bootloader_prompt,
-                    timeout_s=3.0,
-                )
-                if "MES_SYNC" not in res.stdout:
-                    raise BootloaderSyncError(
-                        "Failed to synchronize with Bootloader prompt after detection."
+        )
+        try:
+            async for event in stream:
+                if isinstance(event, PanicDetected):
+                    raise KernelPanicError(
+                        f"Kernel panic during Bootloader routing:\n{event.raw_output}"
                     )
-                logger.info("bootloader_intercepted_successfully")
-                return
 
-            elif isinstance(event, BootDataReceived):
-                logger.debug("uart_rx", data=event.line)
+                elif isinstance(event, AutobootWindowDetected):
+                    logger.info("autoboot_window_detected_sniping")
+                    # Blast the interrupt character 3x to suppress the countdown.
+                    # Use run_sync so raw_write doesn't block the event loop.
+                    for _ in range(3):
+                        await anyio.to_thread.run_sync(
+                            functools.partial(self.serial.raw_write, blast_bytes)
+                        )
+                        await anyio.sleep(0.05)
+
+                elif isinstance(event, PromptDetected) and event.prompt_type in ("bootloader", "trap"):
+                    # Stabilise the prompt: send \n, wait, drain stale bytes.
+                    await anyio.to_thread.run_sync(
+                        functools.partial(self.serial.raw_write, b"\n")
+                    )
+                    await anyio.sleep(0.1)
+                    await anyio.to_thread.run_sync(self.serial.flush_buffers)
+
+                    res = await anyio.to_thread.run_sync(
+                        functools.partial(self.serial.safe_run, "echo MES_SYNC", expected_prompt=self.cfg.bootloader_prompt, timeout_s=3.0)
+                    )
+
+                    if "MES_SYNC" not in res.stdout:
+                        raise BootloaderSyncError("Failed to synchronize with Bootloader prompt after detection.")
+                    logger.info("bootloader_intercepted_successfully")
+                    return
+
+                elif isinstance(event, BootDataReceived):
+                    if self.verbose:
+                        logger.info("uart_rx", data=event.line)
+                    else:
+                        logger.debug("uart_rx", data=event.line)
+        finally:
+            await stream.aclose()
 
         raise BootloaderTimeoutError(
             f"Failed to intercept Bootloader within {self.cfg.cold_boot_timeout_s}s timeout."
         )
 
-    def _event_boot_from_bootloader_to_os(self) -> None:
-        """Send the boot command from U-Boot and wait for OS shell via event stream."""
-        logger.info("commanding_os_boot", boot_cmd=self.cfg.bootloader_boot_cmd)
-        self.serial.flush_buffers()
-        self.serial.raw_write(f"{self.cfg.bootloader_boot_cmd}\n".encode())
-        self._event_wait_for_os_shell(flush=False)
-
-    async def async_event_boot_from_bootloader_to_os(self) -> None:
+    async def event_boot_from_bootloader_to_os(self) -> None:
         """Send the boot command from U-Boot and wait for OS shell via async event stream."""
+        import anyio
         logger.info("commanding_os_boot", boot_cmd=self.cfg.bootloader_boot_cmd)
         # flush_buffers and raw_write are sync primitives — offload to a thread
         # so the event loop is never blocked.  This also ensures compatibility
@@ -1047,132 +1093,18 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
         await anyio.to_thread.run_sync(
             functools.partial(self.serial.raw_write, boot_cmd_bytes)
         )
-        await self.async_event_wait_for_os_shell(flush=False)
+        await self.event_wait_for_os_shell(flush=False)
 
-    def _event_wait_for_os_shell(self, flush: bool = True) -> None:
-        """Event-driven OS boot monitor.
-
-        Waits for the Linux shell prompt, handling login/password prompts
-        and recording boot profiler milestones along the way.
-
-        Args:
-            flush: Whether to flush the UART buffer before reading.
-        """
-        logger.info("waiting_for_linux_userland")
-        self.boot_metrics.clear()
-
-        prompts: Dict[str, bytes] = {
-            "shell": self.cfg.os_shell_prompt.encode('utf-8'),
-            "login": self.cfg.os_login_prompt.encode('utf-8'),
-        }
-        if self.cfg.os_password:
-            prompts["password"] = self.cfg.os_password_prompt.encode('utf-8')
-
-        milestones = (
-            self.boot_profiler_cfg.milestones.copy()
-            if self.boot_profiler_cfg else {}
-        )
-
-        for event in self.event_stream.open(
-            prompts=prompts,
-            timeout_s=self.cfg.cold_boot_timeout_s,
-            milestones=milestones,
-            flush=flush,
-            active_ping_char=b"\n",
-        ):
-            if isinstance(event, PanicDetected):
-                raise KernelPanicError("Device kernel panicked during OS boot sequence.")
-
-            elif isinstance(event, MilestoneReached):
-                self.boot_metrics[f"t_boot_{event.name}_s"] = event.elapsed_s
-
-            elif isinstance(event, PromptDetected):
-                if event.prompt_type == "shell":
-                    self.boot_metrics["t_boot_total_to_shell_s"] = event.elapsed_s
-                    logger.info("auto_login_shell_reached", elapsed_s=event.elapsed_s)
-                    return
-
-                elif event.prompt_type == "login":
-                    self.boot_metrics["t_boot_total_to_login_s"] = event.elapsed_s
-                    time.sleep(0.1)
-                    self.serial.write_line(self.cfg.os_user or "root")
-                    self.serial.parser.clear_buffer()
-
-                elif event.prompt_type == "password":
-                    time.sleep(0.1)
-                    self.serial.write_line(self.cfg.get_os_password() or "", sensitive=True)
-
-        raise TransportTimeoutError("Timed out waiting for Linux Shell prompt.")
-
-    async def async_event_wait_for_bootloader(self, intercept_autoboot: bool) -> None:
-        """Asynchronous event-driven bootloader interception."""
-        logger.info("hunting_for_bootloader_prompt")
-
-        blast_bytes = self.cfg.bootloader_interrupt_char.encode('utf-8')
-        prompts = {
-            "bootloader": self.cfg.bootloader_prompt.encode('utf-8'),
-            "trap": b"MES Framework Trap",
-        }
-        autoboot_trigger = (
-            self.cfg.bootloader_interrupt_pattern.encode('utf-8')
-            if intercept_autoboot else None
-        )
-
-        ping_char = b"\r\n" if intercept_autoboot else None
-
-        async for event in self.event_stream.open_async(
-            prompts=prompts,
-            timeout_s=self.cfg.cold_boot_timeout_s,
-            autoboot_trigger=autoboot_trigger,
-            active_ping_char=ping_char,
-        ):
-            if isinstance(event, PanicDetected):
-                raise KernelPanicError(
-                    f"Kernel panic during Bootloader routing:\n{event.raw_output}"
-                )
-
-            elif isinstance(event, AutobootWindowDetected):
-                logger.info("autoboot_window_detected_sniping")
-                # Blast the interrupt character 3x to suppress the countdown.
-                # Use run_sync so raw_write doesn't block the event loop.
-                for _ in range(3):
-                    await anyio.to_thread.run_sync(
-                        functools.partial(self.serial.raw_write, blast_bytes)
-                    )
-                    await anyio.sleep(0.05)
-
-            elif isinstance(event, PromptDetected) and event.prompt_type in ("bootloader", "trap"):
-                # Stabilise the prompt: send \n, wait, drain stale bytes.
-                await anyio.to_thread.run_sync(
-                    functools.partial(self.serial.raw_write, b"\n")
-                )
-                await anyio.sleep(0.1)
-                await anyio.to_thread.run_sync(self.serial.flush_buffers)
-
-                res = await anyio.to_thread.run_sync(
-                    partial(self.serial.safe_run, "echo MES_SYNC", expected_prompt=self.cfg.bootloader_prompt, timeout_s=3.0)
-                )
-
-                if "MES_SYNC" not in res.stdout:
-                    raise BootloaderSyncError("Failed to synchronize with Bootloader prompt after detection.")
-                logger.info("bootloader_intercepted_successfully")
-                return
-
-            elif isinstance(event, BootDataReceived):
-                logger.debug("uart_rx", data=event.line)
-
-        raise BootloaderTimeoutError(
-            f"Failed to intercept Bootloader within {self.cfg.cold_boot_timeout_s}s timeout."
-        )
-
-    async def async_event_wait_for_os_shell(self, flush: bool = True) -> None:
+    async def event_wait_for_os_shell(self, flush: bool = True) -> None:
         """Asynchronous event-driven OS boot monitor."""
+        import anyio
         logger.info("waiting_for_linux_userland")
         self.boot_metrics.clear()
 
         prompts: Dict[str, bytes] = {
             "shell": self.cfg.os_shell_prompt.encode('utf-8'),
             "login": self.cfg.os_login_prompt.encode('utf-8'),
+            "bootloader": self.cfg.bootloader_prompt.encode('utf-8'),
         }
         if self.cfg.os_password:
             prompts["password"] = self.cfg.os_password_prompt.encode('utf-8')
@@ -1182,61 +1114,66 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
             if self.boot_profiler_cfg else {}
         )
 
-        async for event in self.event_stream.open_async(
+        stream = self.event_stream.open_async(
             prompts=prompts,
             timeout_s=self.cfg.cold_boot_timeout_s,
             milestones=milestones,
             flush=flush,
             active_ping_char=b"\n",
-        ):
-            if isinstance(event, PanicDetected):
-                raise KernelPanicError("Device kernel panicked during OS boot sequence.")
+        )
+        try:
+            async for event in stream:
+                if isinstance(event, PanicDetected):
+                    raise KernelPanicError("Device kernel panicked during OS boot sequence.")
 
-            elif isinstance(event, MilestoneReached):
-                self.boot_metrics[f"t_boot_{event.name}_s"] = event.elapsed_s
+                elif isinstance(event, MilestoneReached):
+                    self.boot_metrics[f"t_boot_{event.name}_s"] = event.elapsed_s
 
-            elif isinstance(event, PromptDetected):
-                if event.prompt_type == "shell":
-                    self.boot_metrics["t_boot_total_to_shell_s"] = event.elapsed_s
-                    logger.info("auto_login_shell_reached", elapsed_s=event.elapsed_s)
-                    return
+                elif isinstance(event, PromptDetected):
+                    if event.prompt_type == "shell":
+                        self.boot_metrics["t_boot_total_to_shell_s"] = event.elapsed_s
+                        logger.info("auto_login_shell_reached", elapsed_s=event.elapsed_s)
+                        return
 
-                elif event.prompt_type == "login":
-                    self.boot_metrics["t_boot_total_to_login_s"] = event.elapsed_s
-                    await anyio.sleep(0.1)
-                    # Use functools.partial so keyword args are forwarded correctly
-                    await anyio.to_thread.run_sync(
-                        functools.partial(self.serial.write_line, self.cfg.os_user or "root")
-                    )
-                    self.serial.parser.clear_buffer()
+                    elif event.prompt_type == "login":
+                        self.boot_metrics["t_boot_total_to_login_s"] = event.elapsed_s
+                        await anyio.sleep(0.1)
+                        await anyio.to_thread.run_sync(self.serial.write_line, self.cfg.os_user or "root")
+                        self.serial.parser.clear_buffer()
 
-                elif event.prompt_type == "password":
-                    await anyio.sleep(0.1)
-                    # BUG-6 fix: passing True as positional arg to run_sync was binding
-                    # to cancellable=True, not sensitive=True — password was logged.
-                    await anyio.to_thread.run_sync(
-                        functools.partial(
-                            self.serial.write_line,
-                            self.cfg.get_os_password() or "",
-                            sensitive=True,
+                    elif event.prompt_type == "password":
+                        await anyio.sleep(0.1)
+                        await anyio.to_thread.run_sync(
+                            functools.partial(self.serial.write_line, self.cfg.get_os_password() or "", sensitive=True)
                         )
-                    )
-                    self.serial.parser.clear_buffer()
+                        self.serial.parser.clear_buffer()
 
-            elif isinstance(event, BootDataReceived):
-                logger.debug("uart_rx", data=event.line)
+                    elif event.prompt_type == "bootloader":
+                        logger.warning("interrupted_autoboot_injecting_boot_command")
+                        await anyio.to_thread.run_sync(self.serial.write_line, "boot")
+
+                elif isinstance(event, BootDataReceived):
+                    if self.verbose:
+                        logger.info("uart_rx", data=event.line)
+                    else:
+                        logger.debug("uart_rx", data=event.line)
+        finally:
+            await stream.aclose()
 
         raise TransportTimeoutError("Timed out waiting for Linux Shell prompt.")
 
     # Backward-compatible aliases for any external code referencing old methods
     def _do_wait_for_bootloader(self, spam_interrupt: bool) -> None:
-        self._event_wait_for_bootloader(intercept_autoboot=spam_interrupt)
+        import anyio
+        anyio.from_thread.run(self.event_wait_for_bootloader, intercept_autoboot=spam_interrupt)
 
     def _do_boot_from_bootloader_to_os(self) -> None:
-        self._event_boot_from_bootloader_to_os()
+        import anyio
+        anyio.from_thread.run(self.event_boot_from_bootloader_to_os)
 
     def _do_wait_for_os(self) -> None:
-        self._event_wait_for_os_shell()
+        import anyio
+        anyio.from_thread.run(self.event_wait_for_os_shell)
 
 
     def _finalize_os_boot(self) -> None:
@@ -1250,7 +1187,8 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
             return
 
         # 1. Parse SWUpdate or Custom Validators
-        self._verify_linux_context()
+        import anyio
+        anyio.from_thread.run(self._verify_linux_context)
 
         # 1.5. Harvest Kernel Boot Analytics (UART only — skipped in SSH-only sessions)
         if self.serial.is_connected:
@@ -1280,7 +1218,7 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
         """Retrying SSH connect — sshd may not be ready the instant the shell prompt appears."""
         self.ssh.connect()
 
-    async def async_finalize_os_boot(self) -> None:
+    async def finalize_os_boot(self) -> None:
         """Async variant of finalize_os_boot.
 
         Applies the same SSH retry logic as the sync path: sshd may not be
@@ -1289,7 +1227,7 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
         """
         if self.ssh.is_connected:
             return
-        await anyio.to_thread.run_sync(self._verify_linux_context)
+        await self._verify_linux_context()
 
         if self.serial.is_connected:
             res_sysd = await anyio.to_thread.run_sync(
@@ -1332,108 +1270,79 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
             logger.debug("heartbeat_failed", reason=str(e))
             return False
 
+    async def async_verify_heartbeat(self, *args, **kwargs):
+        return await anyio.to_thread.run_sync(self.verify_heartbeat, *args, **kwargs)
+
     # =========================================================================
     # SOTA CONTEXT VALIDATION
     # =========================================================================
 
-    def _verify_linux_context(self) -> None:
+    async def _verify_linux_context(self) -> None:
         """Executes dynamically injected Validators, or defaults to the selected Context Strategy.
 
         Parses the current A/B partition configuration and populates
         the DeviceContext. If custom validators are registered, it executes them
         sequentially instead.
         """
+        import inspect
         if self.context_validators:
             logger.info("executing_dynamic_context_validators", count=len(self.context_validators))
             for validator in self.context_validators:
                 try:
-                    validator(self)
+                    if inspect.iscoroutinefunction(validator):
+                        await validator(self)
+                    else:
+                        validator(self)
                 except Exception as e:
                     logger.error("custom_context_validator_failed", error=str(e))
             return
 
-        self.context_strategy.verify_linux_context(self)
+        await self.context_strategy.verify_linux_context(self)
 
     # =========================================================================
     # FSM 'BEFORE' TRANSITION HOOKS
     # =========================================================================
 
-    def _hw_power_off(self, event: EventData) -> None:
-        self._align_to_physical_state()
-        if self.state == DutState.POWER_OFF: return
-        self._do_power_off()
-
-    def _hw_energize(self, event: EventData) -> None:
-        self._align_to_physical_state()
-        target_medium = event.kwargs.get("medium", self.context.active_boot_medium)
-        needs_strap_change = target_medium != self.context.active_boot_medium
-
-        if needs_strap_change or self.state == DutState.RECOVERY:
-            self._do_power_off()
-            self._do_apply_bootstrap(target_medium)
-            self.context.active_boot_medium = target_medium
-            self._do_energize()
-            return
-
-        if self.state in [DutState.ENERGIZED, DutState.BOOTLOADER, DutState.OS_USERLAND]: return
-        self._do_apply_bootstrap(target_medium)
-        self.context.active_boot_medium = target_medium
-        self._do_energize()
-
-    def _hw_boot_to_bootloader(self, event: EventData) -> None:
-        self._align_to_physical_state()
-        target_medium = event.kwargs.get("medium", self.context.active_boot_medium)
-        needs_strap_change = target_medium != self.context.active_boot_medium
-
-        # Path A: Medium change or recovery — always cold boot via strategy
-        if needs_strap_change or self.state == DutState.RECOVERY:
-            self._do_power_off()
-            self._do_apply_bootstrap(target_medium)
-            self.context.active_boot_medium = target_medium
-            self.boot_strategy.cold_boot_to_bootloader(self)
-            return
-
-        # Short-circuit: already at bootloader
-        if self.state == DutState.BOOTLOADER:
-            return
-
-        # Path B: Need to get to bootloader from current state
-        if self.state == DutState.OS_USERLAND:
-            self.serial.safe_run("reboot", timeout_s=2.0, check_exit_code=False)
-        elif self.state == DutState.ENERGIZED:
-            if not self.psu:
-                self._do_soft_reboot()
-            else:
-                self._do_power_off()
-                self.boot_strategy.cold_boot_to_bootloader(self)
-                return
-        else:
-            self.boot_strategy.cold_boot_to_bootloader(self)
-            return
-
-        # Board is rebooting — catch bootloader on the way back
-        self._event_wait_for_bootloader(intercept_autoboot=self.cfg.autoboot_enabled)
-
-    async def async_hw_boot_to_bootloader(self, medium: str = None) -> None:
-        """Asynchronous, manual bypass for boot_to_bootloader."""
+    async def _hw_power_off(self, event: EventData) -> None:
+        import anyio
         await anyio.to_thread.run_sync(self._align_to_physical_state)
-        target_medium = medium or self.context.active_boot_medium
+        if self.state == DutState.POWER_OFF: return
+        await anyio.to_thread.run_sync(self._do_power_off)
+
+    async def _hw_energize(self, event: EventData) -> None:
+        import anyio
+        await anyio.to_thread.run_sync(self._align_to_physical_state)
+        target_medium = event.kwargs.get("medium", self.context.active_boot_medium)
         needs_strap_change = target_medium != self.context.active_boot_medium
 
-        # Path A: Medium change or recovery — always cold boot via strategy
         if needs_strap_change or self.state == DutState.RECOVERY:
             await anyio.to_thread.run_sync(self._do_power_off)
             await anyio.to_thread.run_sync(self._do_apply_bootstrap, target_medium)
             self.context.active_boot_medium = target_medium
-            await self.boot_strategy.async_cold_boot_to_bootloader(self)
-            await anyio.to_thread.run_sync(self.machine.set_state, DutState.BOOTLOADER)
+            await anyio.to_thread.run_sync(self._do_energize)
             return
 
-        # Short-circuit: already at bootloader
+        if self.state in [DutState.ENERGIZED, DutState.BOOTLOADER, DutState.OS_USERLAND]: return
+        await anyio.to_thread.run_sync(self._do_apply_bootstrap, target_medium)
+        self.context.active_boot_medium = target_medium
+        await anyio.to_thread.run_sync(self._do_energize)
+
+    async def _hw_boot_to_bootloader(self, event: EventData) -> None:
+        import anyio
+        await anyio.to_thread.run_sync(self._align_to_physical_state)
+        target_medium = event.kwargs.get("medium", self.context.active_boot_medium)
+        needs_strap_change = target_medium != self.context.active_boot_medium
+
+        if needs_strap_change or self.state == DutState.RECOVERY:
+            await anyio.to_thread.run_sync(self._do_power_off)
+            await anyio.to_thread.run_sync(self._do_apply_bootstrap, target_medium)
+            self.context.active_boot_medium = target_medium
+            await self.boot_strategy.cold_boot_to_bootloader(self)
+            return
+
         if self.state == DutState.BOOTLOADER:
             return
 
-        # Path B: Need to get to bootloader from current state
         if self.state == DutState.OS_USERLAND:
             await self.serial.async_safe_run("reboot", timeout_s=2.0, check_exit_code=False)
         elif self.state == DutState.ENERGIZED:
@@ -1441,119 +1350,48 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
                 await anyio.to_thread.run_sync(self._do_soft_reboot)
             else:
                 await anyio.to_thread.run_sync(self._do_power_off)
-                await self.boot_strategy.async_cold_boot_to_bootloader(self)
-                await anyio.to_thread.run_sync(self.machine.set_state, DutState.BOOTLOADER)
+                await self.boot_strategy.cold_boot_to_bootloader(self)
                 return
         else:
-            await self.boot_strategy.async_cold_boot_to_bootloader(self)
-            await anyio.to_thread.run_sync(self.machine.set_state, DutState.BOOTLOADER)
+            await self.boot_strategy.cold_boot_to_bootloader(self)
             return
 
-        # Board is rebooting — catch bootloader on the way back
-        await self.async_event_wait_for_bootloader(intercept_autoboot=self.cfg.autoboot_enabled)
-        await anyio.to_thread.run_sync(self.machine.set_state, DutState.BOOTLOADER)
+        await self.event_wait_for_bootloader(intercept_autoboot=self.cfg.autoboot_enabled)
 
-    def _hw_boot_to_os(self, event: EventData) -> None:
+    async def _hw_boot_to_os(self, event: EventData) -> None:
+        import anyio
         self.boot_metrics.clear()
-        self._align_to_physical_state()
+        await anyio.to_thread.run_sync(self._align_to_physical_state)
 
         target_medium = event.kwargs.get("medium", self.context.active_boot_medium)
         needs_strap_change = target_medium != self.context.active_boot_medium
 
         if needs_strap_change:
             logger.info("boot_medium_change_requested", target_medium=target_medium, action="forcing_hard_reboot")
-            self.machine.set_state(DutState.DIRTY)
 
-        # --- TRAP 1: Resume existing OS (zombie detection) ---
-        # Two-step: first verify liveness, then finalize (connect SSH + context validation).
-        # Keeping these separate prevents a failing context validator from being
-        # misdiagnosed as a zombie board and triggering an unwanted power-cycle.
         if self.state == DutState.OS_USERLAND:
-            if self._try_resume_existing_os():
-                # Board is alive — now run full finalization. Any error here is a
-                # legitimate test/environment problem, not a zombie, so let it propagate
-                # as an exception rather than silently triggering a power-cycle.
-                self._finalize_os_boot()
+            if await self._try_resume_existing_os():
+                await self.finalize_os_boot()
                 return
-            # Confirmed zombie: UART heartbeat lost and SSH unreachable.
-            # BUG-2 fix: _do_hardware_reset already calls _do_energize internally
-            # (via _do_power_off + _do_energize). Setting ENERGIZED here lets
-            # TRAP 2 attempt a hot-login instead of triggering another cold boot.
-            self._do_hardware_reset()
-            if self.psu:
-                self.machine.set_state(DutState.ENERGIZED)
-
-        # --- TRAP 2: Hot-login from ENERGIZED ---
-        if self.state == DutState.ENERGIZED:
-            if self._try_hot_login():
-                return
-            # Board failed to produce a shell — cold boot from scratch.
-            self.machine.set_state(DutState.DIRTY)
-            self._do_power_off()
-
-        # --- TRAP 3: Cold boot via strategy ---
-        if self.state in [DutState.RECOVERY, DutState.DIRTY, DutState.POWER_OFF]:
-            if self.state != DutState.POWER_OFF:
-                self._do_power_off()
-            self._do_apply_bootstrap(target_medium)
-            self.context.active_boot_medium = target_medium
-            self.boot_strategy.cold_boot_to_os(self)
-            self._finalize_os_boot()
-            return
-
-        # --- TRAP 4: Resume from bootloader via strategy ---
-        if self.state == DutState.BOOTLOADER:
-            self.boot_strategy.resume_bootloader_to_os(self)
-            self._finalize_os_boot()
-            return
-
-    async def async_hw_boot_to_os(self, medium: str = None) -> None:
-        """Asynchronous, manual bypass for boot_to_os. Allows event loop integration."""
-        self.boot_metrics.clear()
-        await anyio.to_thread.run_sync(self._align_to_physical_state)
-
-        target_medium = medium or self.context.active_boot_medium
-        needs_strap_change = target_medium != self.context.active_boot_medium
-
-        if needs_strap_change:
-            logger.info("boot_medium_change_requested", target_medium=target_medium, action="forcing_hard_reboot")
-            await anyio.to_thread.run_sync(self.machine.set_state, DutState.DIRTY)
-
-        # --- TRAP 1: Resume existing OS (zombie detection) ---
-        # Two-step: liveness first, then finalize. Keeps context validation failures
-        # from being misdiagnosed as zombie boards.
-        if self.state == DutState.OS_USERLAND:
-            if await self.async_try_resume_existing_os():
-                await self.async_finalize_os_boot()
-                await anyio.to_thread.run_sync(self.machine.set_state, DutState.OS_USERLAND)
-                return
-            await anyio.to_thread.run_sync(self.machine.set_state, DutState.DIRTY)
             await anyio.to_thread.run_sync(self._do_hardware_reset)
 
-        # --- TRAP 2: Hot-login from ENERGIZED ---
         if self.state == DutState.ENERGIZED:
-            if await self.async_try_hot_login():
-                await anyio.to_thread.run_sync(self.machine.set_state, DutState.OS_USERLAND)
+            if await self._try_hot_login():
                 return
-            await anyio.to_thread.run_sync(self.machine.set_state, DutState.DIRTY)
             await anyio.to_thread.run_sync(self._do_hardware_reset)
 
-        # --- TRAP 3: Cold boot via strategy ---
         if self.state in [DutState.RECOVERY, DutState.DIRTY, DutState.POWER_OFF]:
             if self.state != DutState.POWER_OFF:
                 await anyio.to_thread.run_sync(self._do_power_off)
             await anyio.to_thread.run_sync(self._do_apply_bootstrap, target_medium)
             self.context.active_boot_medium = target_medium
-            await self.boot_strategy.async_cold_boot_to_os(self)
-            await self.async_finalize_os_boot()
-            await anyio.to_thread.run_sync(self.machine.set_state, DutState.OS_USERLAND)
+            await self.boot_strategy.cold_boot_to_os(self)
+            await self.finalize_os_boot()
             return
 
-        # --- TRAP 4: Resume from bootloader via strategy ---
         if self.state == DutState.BOOTLOADER:
-            await self.boot_strategy.async_resume_bootloader_to_os(self)
-            await self.async_finalize_os_boot()
-            await anyio.to_thread.run_sync(self.machine.set_state, DutState.OS_USERLAND)
+            await self.boot_strategy.resume_bootloader_to_os(self)
+            await self.finalize_os_boot()
             return
 
     @property
@@ -1567,61 +1405,10 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
             return self.ssh
         return self.serial
 
-    def _try_resume_existing_os(self) -> bool:
+    async def _try_resume_existing_os(self) -> bool:
         """Liveness check for an existing OS_USERLAND session. Returns True if board is alive.
-
-        This is a pure liveness probe — it does NOT run context validation or
-        establish SSH.  The caller (_hw_boot_to_os TRAP 1) is responsible for
-        calling _finalize_os_boot() after a True return.
-
-        Decision tree:
-          - SSH echo heartbeat (preferred for faster, non-intrusive state detection)
-          - Serial echo heartbeat fallback
-          - Both fail         → board is a zombie → return False → power-cycle
         """
-        logger.debug("verifying_ssh_heartbeat_existing_os")
-        try:
-            self._connect_ssh_with_retry()
-            res = self.ssh.safe_run("echo MES_HEARTBEAT", timeout_s=2.0)
-            if "MES_HEARTBEAT" in res.stdout:
-                return True
-        except (TransportConnectionError, Exception) as e:
-            logger.debug("ssh_liveness_check_failed", reason=str(e))
-
-        logger.debug("verifying_uart_heartbeat_existing_os")
-
-        if self.serial.is_connected:
-            # Fast path: UART echo
-            try:
-                res = self.serial.safe_run("echo MES_HEARTBEAT", timeout_s=2.0, check_exit_code=False)
-            except TransportConnectionError:
-                logger.warning("uart_heartbeat_failed", reason="serial_port_closed_mid_run", action="marking_dirty")
-                return False
-
-            if "MES_HEARTBEAT" in res.stdout:
-                return True
-
-            logger.warning("uart_heartbeat_failed", reason="os_is_a_zombie", action="marking_dirty")
-            # Flush stale TX bytes so they don't poison the board after power-cycle
-            try:
-                if self.serial.ser and self.serial.ser.is_open:
-                    self.serial.ser.write(b'\x03\x03\r\n')
-                    self.serial.ser.flush()
-                    self.serial.ser.reset_output_buffer()
-                    self.serial.flush_buffers()
-                    logger.debug("uart_tx_fifo_flushed_before_power_cycle")
-            except Exception as flush_err:
-                logger.debug("uart_flush_skipped", reason=str(flush_err))
-            return False
-
-        return False
-
-    async def async_try_resume_existing_os(self) -> bool:
-        """Async liveness check for an existing OS_USERLAND session.
-
-        Mirrors the sync _try_resume_existing_os() — pure liveness only.
-        Caller is responsible for calling async_finalize_os_boot() after True return.
-        """
+        import anyio
         logger.debug("verifying_ssh_heartbeat_existing_os")
         try:
             await anyio.to_thread.run_sync(self._connect_ssh_with_retry)
@@ -1646,10 +1433,10 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
             logger.warning("uart_heartbeat_failed", reason="os_is_a_zombie", action="marking_dirty")
             try:
                 if self.serial.ser and self.serial.ser.is_open:
-                    self.serial.ser.write(b'\x03\x03\r\n')
-                    self.serial.ser.flush()
-                    self.serial.ser.reset_output_buffer()
-                    self.serial.flush_buffers()
+                    await anyio.to_thread.run_sync(self.serial.ser.write, b'\x03\x03\r\n')
+                    await anyio.to_thread.run_sync(self.serial.ser.flush)
+                    await anyio.to_thread.run_sync(self.serial.ser.reset_output_buffer)
+                    await anyio.to_thread.run_sync(self.serial.flush_buffers)
                     logger.debug("uart_tx_fifo_flushed_before_power_cycle")
             except Exception as flush_err:
                 logger.debug("uart_flush_skipped", reason=str(flush_err))
@@ -1657,58 +1444,30 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
 
         return False
 
-    def _try_hot_login(self) -> bool:
-        """
-        Attempt hot-login from ENERGIZED (Actively Booting or at Login) state.
-
-        Delegates to _event_wait_for_os_shell to robustly handle both active 
-        streaming and idle login prompts.
-        """
+    async def _try_hot_login(self) -> bool:
+        """Attempt hot-login from ENERGIZED (Actively Booting or at Login) state."""
         logger.info("hot_login_from_energized")
-
         try:
-            # Robustness: We no longer blindly write the username because ENERGIZED 
-            # now includes active log streaming. _event_wait_for_os_shell has a built-in
-            # ping to redraw the prompt if idle, and reliably catches the login prompt.
-            self._event_wait_for_os_shell(flush=False)
-            self._finalize_os_boot()
+            await self.event_wait_for_os_shell(flush=False)
+            await self.finalize_os_boot()
             return True
         except TransportTimeoutError:
             logger.warning("hot_login_failed", reason="shell_prompt_not_reached", action="marking_dirty")
             return False
 
-    async def async_try_hot_login(self) -> bool:
-        """Async variant of try_hot_login."""
-        logger.info("hot_login_from_energized")
-        try:
-            await self.async_event_wait_for_os_shell(flush=False)
-            await self.async_finalize_os_boot()
-            return True
-        except TransportTimeoutError:
-            logger.warning("hot_login_failed", reason="shell_prompt_not_reached", action="marking_dirty")
-            return False
-
-    def _hw_to_recovery(self, event: EventData) -> None:
-        self._align_to_physical_state()
+    async def _hw_to_recovery(self, event: EventData) -> None:
+        import anyio
+        await anyio.to_thread.run_sync(self._align_to_physical_state)
         if self.state == DutState.RECOVERY: return
 
         logger.info("routing_to_hardware_recovery", action="power_cycle_required")
-        if self.state != DutState.POWER_OFF: self._do_power_off()
+        if self.state != DutState.POWER_OFF: 
+            await anyio.to_thread.run_sync(self._do_power_off)
 
-        self.recovery_strategy.trigger_recovery(self)
-        time.sleep(2.0)
+        await self.recovery_strategy.trigger_recovery(self)
+        await anyio.sleep(2.0)
 
-    def release_recovery(self) -> None:
-        """Release the recovery strap after payload delivery.
-
-        Must be called by the provisioner (e.g. TEZI, DFU) once it has
-        successfully pushed a payload into SoC RAM.  Delegates to the
-        configured RecoveryStrategy:
-
-        - GPIO-automated stations: no-op (pin already de-asserted during
-          trigger_recovery after the SoC latch delay).
-        - Manual-jumper stations:  shows an operator prompt to physically
-          remove the strap so the board can boot from the payload.
-        """
+    async def release_recovery(self) -> None:
+        """Release the recovery strap after payload delivery."""
         logger.info("releasing_recovery_strap", strategy=type(self.recovery_strategy).__name__)
-        self.recovery_strategy.release_recovery(self)
+        await self.recovery_strategy.release_recovery(self)

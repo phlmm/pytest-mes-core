@@ -1,3 +1,4 @@
+import anyio
 # src/pytest_mes_core/telemetry/base.py
 import time
 from datetime import datetime, timezone
@@ -100,6 +101,9 @@ class TestRecord(BaseModel):
         if not validator_res.passed and validator_res.error_msg:
             self.context[f"{pfx}error"] = validator_res.error_msg
 
+    async def async_absorb(self, validator_res, prefix, *args, **kwargs):
+        return await anyio.to_thread.run_sync(self.absorb, validator_res, prefix, *args, **kwargs)
+
 # ==========================================
 # EXPORTER PROTOCOL
 # ==========================================
@@ -117,6 +121,9 @@ class TelemetryExporter(Protocol):
         """
         ...
 
+    async def async_start_session(self, context, *args, **kwargs):
+        return await anyio.to_thread.run_sync(self.start_session, context, *args, **kwargs)
+
     def emit_record(self, record: TestRecord) -> None:
         """
         Synchronously flushes a single test result to the datastore.
@@ -124,9 +131,15 @@ class TelemetryExporter(Protocol):
         """
         ...
 
+    async def async_emit_record(self, record, *args, **kwargs):
+        return await anyio.to_thread.run_sync(self.emit_record, record, *args, **kwargs)
+
     def end_session(self, session_passed: bool) -> None:
         """
         Finalizes the run.
         Closes DB connections, zips artifacts, or generates the final JSON payload.
         """
         ...
+
+    async def async_end_session(self, session_passed, *args, **kwargs):
+        return await anyio.to_thread.run_sync(self.end_session, session_passed, *args, **kwargs)

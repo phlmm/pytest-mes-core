@@ -382,8 +382,9 @@ class SdMuxRecoveryStrategy:
         self._mux = mux
         self._latch_time_s = latch_time_s
 
-    def trigger_recovery(self, fsm: Any) -> None:
+    async def trigger_recovery(self, fsm: Any) -> None:
         """Assert RECOVERY# via the sdFST GPIO, power-cycle, then release after latch."""
+        import anyio
         logger.info(
             'sd_mux_recovery_trigger',
             gpio=self._mux.cfg.recovery_gpio,
@@ -391,25 +392,25 @@ class SdMuxRecoveryStrategy:
         )
         # 0. Switch SD to 'dut' so the SD card is available to the DUT before power is applied.
         logger.info('sd_mux_to_dut_before_boot', device_path=self._mux.device_path)
-        self._mux._set_mux_state('dut')
-        time.sleep(0.3)
+        await anyio.to_thread.run_sync(self._mux._set_mux_state, 'dut')
+        await anyio.sleep(0.3)
 
         # 1. Assert RECOVERY# — must happen BEFORE power is applied so the
         #    SoC BootROM samples it on the rising edge of VDD.
-        self._mux.recovery_assert()
+        await anyio.to_thread.run_sync(self._mux.recovery_assert)
 
         # 2. Apply power.  _do_energize() reconnects the serial port as well.
-        fsm._do_energize()
+        await anyio.to_thread.run_sync(fsm._do_energize)
 
         # 3. Hold asserted long enough for BootROM to latch the boot mode.
         logger.debug('sd_mux_recovery_latch_wait', latch_time_s=self._latch_time_s)
-        time.sleep(self._latch_time_s)
+        await anyio.sleep(self._latch_time_s)
 
         # 4. Release — RECOVERY# goes high; subsequent resets boot normally.
-        self._mux.recovery_release()
+        await anyio.to_thread.run_sync(self._mux.recovery_release)
         logger.info('sd_mux_recovery_trigger_complete', action='pin_released_dut_enumerating_on_usb')
 
 
-    def release_recovery(self, fsm: Any) -> None:
+    async def release_recovery(self, fsm: Any) -> None:
         """No-op — the pin was already released inside trigger_recovery."""
         logger.debug('sd_mux_release_recovery_no_op', reason='pin_released_during_trigger_after_latch')

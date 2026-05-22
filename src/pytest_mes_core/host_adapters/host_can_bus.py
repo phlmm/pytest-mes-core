@@ -126,3 +126,13 @@ class HostCanAdapter(BaseHostAdapter):
             if msg and msg.arbitration_id == expected_id and (bytes(msg.data) == expected_payload):
                 return True
         return False
+
+    async def async_send(self, can_id: int, payload: bytes) -> None:
+        """Async wrapper for send()."""
+        import anyio
+        await anyio.to_thread.run_sync(self.send, can_id, payload)
+
+    async def async_expect(self, expected_id: int, expected_payload: bytes, timeout_s: float=2.0) -> bool:
+        """Async wrapper for expect()."""
+        import anyio
+        return await anyio.to_thread.run_sync(self.expect, expected_id, expected_payload, timeout_s)

@@ -1,8 +1,11 @@
 import structlog
-import telnetlib
+import socket
 import logging
 import time
 from typing import Optional
+from functools import partial
+import anyio
+
 logger = structlog.get_logger('mes_core.instruments.virtual_psu')
 
 class VirtualRenodePsu:
@@ -18,28 +21,46 @@ class VirtualRenodePsu:
     def __init__(self, host: str='127.0.0.1', monitor_port: int=3333):
         self.host = host
         self.monitor_port = monitor_port
-        self._tn: Optional[telnetlib.Telnet] = None
+        self._sock: Optional[socket.socket] = None
         self._is_on = False
 
     def connect(self) -> None:
-        """Connects to the Renode Monitor port via Telnet."""
+        """Connects to the Renode Monitor port via raw TCP socket."""
         logger.debug('connecting_to_renode_monitor_at_host_monitor_port', host=self.host, monitor_port=self.monitor_port)
         try:
-            self._tn = telnetlib.Telnet(self.host, self.monitor_port, timeout=5)
-            self._tn.read_until(b'(machine-0)', timeout=2)
+            self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self._sock.settimeout(5.0)
+            self._sock.connect((self.host, self.monitor_port))
+            self._read_until(b'(machine-0)', timeout=2.0)
             logger.info('[Virtual PSU] Connected to Renode Simulation Monitor.')
         except ConnectionRefusedError:
             logger.critical('fatal_could_not_connect_to_renode_monitor_at_host_monitor_port', host=self.host, monitor_port=self.monitor_port)
             logger.critical('Is the RenodeRunner active?')
             raise
 
+    def _read_until(self, expected: bytes, timeout: float = 2.0) -> bytes:
+        """Reads from the socket until expected bytes are found or timeout."""
+        if not self._sock:
+            return b''
+        self._sock.settimeout(timeout)
+        data = bytearray()
+        try:
+            while expected not in data:
+                chunk = self._sock.recv(4096)
+                if not chunk:
+                    break
+                data.extend(chunk)
+        except socket.timeout:
+            pass
+        return bytes(data)
+
     def _send_cmd(self, cmd: str) -> str:
         """Sends a command to the Renode monitor and reads the response."""
-        if not self._tn:
+        if not self._sock:
             return ''
         logger.debug('tx_cmd', cmd=cmd)
-        self._tn.write(f'{cmd}\n'.encode('ascii'))
-        resp = self._tn.read_until(b'(machine-0)', timeout=2).decode('utf-8', errors='ignore')
+        self._sock.sendall(f'{cmd}\n'.encode('ascii'))
+        resp = self._read_until(b'(machine-0)', timeout=2.0).decode('utf-8', errors='ignore')
         logger.debug('rx_val', val=resp.strip())
         return resp
 
@@ -72,3 +93,25 @@ class VirtualRenodePsu:
         if not self._is_on:
             return 0.0
         return 0.45 + time.time() % 0.05
+
+    # ------------------------------------------------------------------
+    # Async API (anyio-compatible)
+    # ------------------------------------------------------------------
+
+    async def async_connect(self) -> None:
+        await anyio.to_thread.run_sync(self.connect)
+
+    async def async_set_voltage(self, volts: float) -> None:
+        await anyio.to_thread.run_sync(partial(self.set_voltage, volts))
+
+    async def async_set_current_limit(self, amps: float) -> None:
+        await anyio.to_thread.run_sync(partial(self.set_current_limit, amps))
+
+    async def async_enable_output(self) -> None:
+        await anyio.to_thread.run_sync(self.enable_output)
+
+    async def async_disable_output(self) -> None:
+        await anyio.to_thread.run_sync(self.disable_output)
+
+    async def async_measure_current(self) -> float:
+        return await anyio.to_thread.run_sync(self.measure_current)

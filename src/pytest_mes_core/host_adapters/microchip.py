@@ -53,3 +53,12 @@ class HostPickitAdapter(BaseHostAdapter):
         """
         with self:
             yield self
+
+    def async_lock_usb_bus(self):
+        """Async version of lock_usb_bus()."""
+        from contextlib import asynccontextmanager
+        @asynccontextmanager
+        async def _async_lock():
+            async with self:
+                yield self
+        return _async_lock()

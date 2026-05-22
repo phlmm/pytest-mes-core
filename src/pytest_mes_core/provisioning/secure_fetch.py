@@ -1,3 +1,4 @@
+import anyio
 import structlog
 import os
 import hashlib
@@ -114,6 +115,10 @@ class SecureAssetFetcher:
         logger.info('asset_verified_successfully_sha256_val', val=actual_hash[:8])
         return dest
 
+    @staticmethod
+    async def async_fetch_and_verify(url, expected_sha256, dest, timeout_s, *args, **kwargs):
+        return await anyio.to_thread.run_sync(SecureAssetFetcher.fetch_and_verify, url, expected_sha256, dest, timeout_s, *args, **kwargs)
+
     @classmethod
     def resolve_payload(cls, uri: str, expected_sha256: Optional[str]=None) -> Path:
         """The Master Entrypoint: Handles both Local Paths and Remote URLs.
@@ -155,3 +160,6 @@ class SecureAssetFetcher:
         if not expected_sha256:
             raise ValueError(f"FATAL: Remote URL {uri} requires a 'payload_sha256' in TOML for integrity.")
         return cls.fetch_and_verify(url=uri, expected_sha256=expected_sha256, dest=dest_file)
+    @classmethod
+    async def async_resolve_payload(cls, uri, expected_sha256, *args, **kwargs):
+        return await anyio.to_thread.run_sync(cls.resolve_payload, uri, expected_sha256, *args, **kwargs)

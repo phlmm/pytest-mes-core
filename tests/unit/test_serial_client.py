@@ -661,3 +661,141 @@ class TestConnect:
         with patch("serial.Serial", side_effect=serial.SerialException("no such device")):
             with pytest.raises(TransportConnectionError, match="Failed to bind"):
                 client.connect()
+
+
+# ===========================================================================
+# USB Hardware Reset
+# ===========================================================================
+
+class TestUsbHardwareReset:
+    @patch("os.path.realpath")
+    @patch("os.path.exists")
+    @patch("builtins.open")
+    def test_resolve_usb_device_path_success(self, mock_open, mock_exists, mock_realpath):
+        client = _make_client(port="/dev/serial/by-id/usb-some-serial-if04")
+        
+        # Realpath calls:
+        # 1. os.path.realpath(port_path) -> "/dev/ttyACM5"
+        # 2. os.path.realpath("/sys/class/tty/ttyACM5/device") -> "/sys/devices/.../3-5.4:1.4"
+        mock_realpath.side_effect = lambda path: {
+            "/dev/serial/by-id/usb-some-serial-if04": "/dev/ttyACM5",
+            "/sys/class/tty/ttyACM5/device": "/sys/devices/pci0000:00/0000:00:14.0/usb3/3-5/3-5.4/3-5.4:1.4"
+        }.get(path, path)
+        
+        # Exists calls:
+        # - "/sys/class/tty/ttyACM5/device" -> True
+        # - for each parent, we check "busnum" and "devnum"
+        def exists_side_effect(path):
+            if path == "/sys/class/tty/ttyACM5/device":
+                return True
+            if path in (
+                "/sys/devices/pci0000:00/0000:00:14.0/usb3/3-5/3-5.4/busnum",
+                "/sys/devices/pci0000:00/0000:00:14.0/usb3/3-5/3-5.4/devnum"
+            ):
+                return True
+            return False
+            
+        mock_exists.side_effect = exists_side_effect
+        
+        # Open calls:
+        # - busnum -> "3\n"
+        # - devnum -> "69\n"
+        mock_busnum = MagicMock()
+        mock_busnum.__enter__.return_value.read.return_value = "3\n"
+        mock_devnum = MagicMock()
+        mock_devnum.__enter__.return_value.read.return_value = "69\n"
+        
+        def open_side_effect(file_path, mode="r", *args, **kwargs):
+            if "busnum" in file_path:
+                return mock_busnum
+            if "devnum" in file_path:
+                return mock_devnum
+            raise FileNotFoundError(file_path)
+            
+        mock_open.side_effect = open_side_effect
+        
+        usb_path = client._resolve_usb_device_path()
+        assert usb_path == "/dev/bus/usb/003/069"
+
+    @patch("os.path.realpath")
+    @patch("os.path.exists")
+    def test_resolve_usb_device_path_missing_sysfs(self, mock_exists, mock_realpath):
+        client = _make_client(port="/dev/ttyACM5")
+        mock_realpath.return_value = "/dev/ttyACM5"
+        mock_exists.return_value = False
+        with pytest.raises(FileNotFoundError, match="Sysfs directory not found"):
+            client._resolve_usb_device_path()
+
+    @patch("os.path.realpath")
+    @patch("os.path.exists")
+    def test_resolve_usb_device_path_missing_busnum_devnum(self, mock_exists, mock_realpath):
+        client = _make_client(port="/dev/ttyACM5")
+        mock_realpath.side_effect = lambda path: path
+        mock_exists.side_effect = lambda path: path == "/sys/class/tty/ttyACM5/device"
+        with pytest.raises(ValueError, match="Could not find busnum/devnum"):
+            client._resolve_usb_device_path()
+
+    @patch("sys.platform", "linux")
+    @patch("builtins.open")
+    @patch("fcntl.ioctl")
+    @patch("time.sleep")
+    def test_reset_hardware_success(self, mock_sleep, mock_ioctl, mock_open):
+        client = _make_client(port="/dev/ttyACM5")
+        _attach_mock_serial(client)
+        client.disconnect = MagicMock()
+        client.connect = MagicMock()
+        client._resolve_usb_device_path = MagicMock(return_value="/dev/bus/usb/003/069")
+        
+        mock_file = MagicMock()
+        mock_open.return_value.__enter__.return_value = mock_file
+        
+        client.reset_hardware()
+        
+        client.disconnect.assert_called_once()
+        mock_open.assert_called_once_with("/dev/bus/usb/003/069", "w+b")
+        mock_ioctl.assert_called_once_with(mock_file.fileno(), 21780, 0)
+        mock_sleep.assert_called_once_with(1.0)
+        client.connect.assert_called_once()
+
+    @patch("sys.platform", "linux")
+    @patch("builtins.open")
+    @patch("fcntl.ioctl")
+    @patch("time.sleep")
+    def test_reset_hardware_not_connected(self, mock_sleep, mock_ioctl, mock_open):
+        client = _make_client(port="/dev/ttyACM5")
+        assert not client.is_connected
+        client.disconnect = MagicMock()
+        client.connect = MagicMock()
+        client._resolve_usb_device_path = MagicMock(return_value="/dev/bus/usb/003/069")
+        
+        mock_file = MagicMock()
+        mock_open.return_value.__enter__.return_value = mock_file
+        
+        client.reset_hardware()
+        
+        client.disconnect.assert_not_called()
+        mock_ioctl.assert_called_once()
+        client.connect.assert_not_called()
+
+    @patch("sys.platform", "linux")
+    @patch("builtins.open")
+    def test_reset_hardware_permission_error(self, mock_open):
+        client = _make_client(port="/dev/ttyACM5")
+        client._resolve_usb_device_path = MagicMock(return_value="/dev/bus/usb/003/069")
+        mock_open.side_effect = PermissionError("Permission denied")
+        
+        with pytest.raises(PermissionError, match="Ensure your user has write access"):
+            client.reset_hardware()
+
+    @patch("sys.platform", "darwin")
+    def test_reset_hardware_unsupported_platform(self):
+        client = _make_client(port="/dev/ttyACM5")
+        with pytest.raises(OSError, match="only supported on Linux"):
+            client.reset_hardware()
+
+    def test_async_reset_hardware(self):
+        client = _make_client(port="/dev/ttyACM5")
+        client.reset_hardware = MagicMock()
+        import anyio
+        anyio.run(client.async_reset_hardware)
+        client.reset_hardware.assert_called_once()

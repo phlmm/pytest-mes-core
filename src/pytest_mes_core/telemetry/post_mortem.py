@@ -1,3 +1,4 @@
+import anyio
 import structlog
 import time
 import socket
@@ -81,6 +82,9 @@ class JtagCrashDumper:
             crash_data['error'] = str(e)
         return crash_data
 
+    async def async_execute_hardware_dump(self, dcc_addr, stack_addr, *args, **kwargs):
+        return await anyio.to_thread.run_sync(self.execute_hardware_dump, dcc_addr, stack_addr, *args, **kwargs)
+
     def execute_gdb_backtrace(self, elf_path: Path) -> str:
         """Uses headless GDB to generate a human-readable C-code backtrace.
 
@@ -117,3 +121,5 @@ class JtagCrashDumper:
                 err_msg = f"GDB toolchain '{self.gdb_toolchain}' not found in system PATH."
                 logger.critical('fatal_err_msg', err_msg=err_msg)
                 return err_msg
+    async def async_execute_gdb_backtrace(self, elf_path, *args, **kwargs):
+        return await anyio.to_thread.run_sync(self.execute_gdb_backtrace, elf_path, *args, **kwargs)
