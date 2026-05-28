@@ -1,4 +1,5 @@
 import structlog
+# src/pytest_mes_core/host_adapters/sd_mux.py
 import os
 import logging
 import subprocess
@@ -79,14 +80,31 @@ class HostUsbSdMuxAdapter(BaseHostAdapter):
     # Internal helpers
     # ------------------------------------------------------------------
 
+        # ==========================================
+        # HARDWARE INTELLIGENCE: Auto-pad to 12 digits
+        # ==========================================
+        # The Linux Automation Mux always exposes a 12-digit USB Serial (e.g. 000000001781).
+        # zfill(12) allows the operator's TOML to simply say "1781" and it will still work perfectly.
+
+        if self.cfg.serial_id.startswith("/dev/"):
+            # Operator explicitly provided a path (e.g., "/dev/sg2")
+            self.device_path = self.cfg.serial_id
+        else:
+            # Automatically resolve to the udev symlink
+            normalized_serial = self.cfg.serial_id.zfill(12)
+            self.device_path = f"/dev/usb-sd-mux/id-{normalized_serial}"
+
     def _set_mux_state(self, state: str) -> None:
         """Helper to invoke the usbsdmux CLI."""
         if state not in ['host', 'dut', 'off']:
             raise ValueError("Mux state must be 'host', 'dut', or 'off'")
+
+        # 1. Pre-flight check: Ensure the udev symlink actually exists in Linux
         if not os.path.exists(self.device_path):
-            err_msg = f"USB-SD-Mux not found at '{self.device_path}'. Is it plugged in and udev rules installed?"
+            err_msg = f"USB-SD-Mux not found at '{self.device_path}'. Is it plugged in, and are the udev rules (99-usbsdmux.rules) installed?"
             logger.critical('fatal_err_msg', err_msg=err_msg)
             raise HostAdapterError(err_msg)
+
         cmd = ['usbsdmux', self.device_path, state]
         logger.debug('executing_val', val=' '.join(cmd))
         try:
@@ -314,8 +332,12 @@ class HostUsbSdMuxAdapter(BaseHostAdapter):
         try:
             self._mutex_context = hardware_mutex(resource_name=f'sdmux_{self.cfg.serial_id}', timeout_s=self.mutex_timeout_s)
             self._mutex_context.__enter__()
+            # 2. Toggle physical hardware to HOST
             logger.info('hardware_locked_toggling_device_path_to_host_pc', device_path=self.device_path)
             self._set_mux_state('host')
+
+            # 3. Defeat Linux Kernel USB Enumeration Jitter
+            # Give the Host PC 2 seconds to enumerate the block device (e.g., /dev/sdc)
             logger.debug('[SD-Mux] Delaying 2.0s for Linux Kernel block device enumeration...')
             time.sleep(2.0)
             return self
@@ -329,7 +351,7 @@ class HostUsbSdMuxAdapter(BaseHostAdapter):
         try:
             logger.info('zero_leakage_toggling_device_path_back_to_dut', device_path=self.device_path)
             self._set_mux_state('dut')
-            time.sleep(1.0)
+            time.sleep(1.0) # Allow DUT to detect insertion
         except Exception as e:
             logger.warning('teardown_hardware_failure_on_serial_id_e', serial_id=self.cfg.serial_id, e=e)
         finally:

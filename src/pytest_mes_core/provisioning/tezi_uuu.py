@@ -41,9 +41,13 @@ class UuuTeziProvisioner(BaseProvisioner):
                 res_uuu = subprocess.run(['uuu', '-lsusb'], capture_output=True, text=True, timeout=5)
                 out_uuu = res_uuu.stdout.lower() + res_uuu.stderr.lower()
                 return self.usb_path in out_uuu
+            
+            # 1. Native OS Radar (Bypasses uuu permission/sudo traps)
             res_lsusb = subprocess.run(['lsusb'], capture_output=True, text=True, timeout=5)
             if self._LSUSB_NXP_RE.search(res_lsusb.stdout):
                 return True
+                
+            # 2. Fallback to uuu (Check stderr as well, where uuu sometimes prints)
             res_uuu = subprocess.run(['uuu', '-lsusb'], capture_output=True, text=True, timeout=5)
             return bool(self._UUU_RECOVERY_RE.search(res_uuu.stdout))
         except subprocess.TimeoutExpired:
@@ -110,14 +114,19 @@ class UuuTeziProvisioner(BaseProvisioner):
                 device_found = True
                 break
             try:
-                time.sleep(0.5)
+                time.sleep(0.5) # Fast poll to snap execution instantly
             except KeyboardInterrupt:
                 raise ProvisioningError("USB polling interrupted by operator (Ctrl+C).")
         if not device_found:
             err_msg = f'Timeout waiting for USB Recovery mode{target_str}. Is the boot jumper set?'
             logger.critical('fatal_err_msg', err_msg=err_msg)
             raise ProvisioningError(err_msg)
+            
         logger.info('dut_detected_injecting_tezi_payload_from_name', name=tezi_dir.name)
+        
+        # 2. Execute uuu securely
+        # Note: If the host lacks NXP udev rules, uuu will fail here with a libusb permission error.
+        # The operator must either run Pytest with sudo, or install the udev rules.
         cmd = ['uuu']
         if self.usb_path:
             cmd.extend(['-m', self.usb_path])
@@ -126,6 +135,8 @@ class UuuTeziProvisioner(BaseProvisioner):
             process = LiveProcess(cmd, self.flash_timeout_s, logger).execute()
             # Strip ANSI escape sequences from stdout to handle colored terminal text
             clean_stdout = re.sub(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])', '', process.stdout)
+            
+            # 3. Analyze output physics
             if process.returncode != 0:
                 log_path = process.export_log(Path('/tmp/mes_artifacts'))
                 logger.critical('tezi_fatal_uuu_rejected_the_payload_code_returncode_trace_saved_to_log_path', returncode=process.returncode, log_path=log_path)
@@ -136,7 +147,9 @@ class UuuTeziProvisioner(BaseProvisioner):
                 log_path = process.export_log(Path('/tmp/mes_artifacts'))
                 logger.critical('tezi_fatal_uuu_falsely_exited_0_payload_never_executed_trace_saved_to_log_path', log_path=log_path)
                 raise ProvisioningError("uuu script failed to execute fully. Missing 'Done' confirmation.")
+            
             logger.info('tezi_flash_successfully_pushed_to_soc_ram_in_duration_s_s', duration_s=process.duration_s)
+            
             # Delegate strap-release to the FSM's RecoveryStrategy.  GPIO-automated
             # stations are a no-op; manual-jumper stations show the operator prompt.
             if fsm is not None:
@@ -147,6 +160,7 @@ class UuuTeziProvisioner(BaseProvisioner):
             err_msg = f'Failed to execute uuu command: {e}'
             logger.critical('fatal_err_msg', err_msg=err_msg)
             raise ProvisioningError(err_msg)
+            
         if serial_client:
             logger.info('[TEZI] Waiting for TEZI OS shell to begin live log tailing...')
             if not serial_client.is_connected:
@@ -158,7 +172,6 @@ class UuuTeziProvisioner(BaseProvisioner):
                 from pytest_mes_core.state_machine import UartEventStream
                 from pytest_mes_core.events import PromptDetected, PanicDetected, BootDataReceived
                 from pytest_mes_core.transports.constants import ANSI_ESCAPE_B, PANIC_PATTERN_B
-
 
                 stream = UartEventStream(
                     serial=serial_client,
