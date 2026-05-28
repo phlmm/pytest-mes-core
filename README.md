@@ -65,6 +65,20 @@ The framework uses `hatchling` and isolates C-extension dependencies to allow cr
 
 ### Setting up a Clean Environment (Recommended)
 
+### Using as a Dependency in Another Project
+
+To install the framework directly from Git into another project's virtual environment:
+
+```bash
+# On Linux (installs physical hardware drivers):
+pip install "pytest-mes-core[all] @ git+https://github.com/phlmm/pytest-mes-core.git"
+
+# On Windows/macOS (installs mock dependencies only):
+pip install "pytest-mes-core[dev,docs,instruments] @ git+https://github.com/phlmm/pytest-mes-core.git"
+```
+
+### Local Development Setup
+
 To run the unit tests and work on the module locally, it is highly recommended to use a clean Python virtual environment.
 
 ```bash
@@ -85,7 +99,10 @@ pip install --upgrade pip setuptools wheel
 pip install -e ".[linux-hardware,instruments]"
 
 # For Developer Laptops running the unit tests (Installs all mock dependencies):
+# On Linux:
 pip install -e ".[all]"
+# On Windows/macOS (avoids Linux-only hardware drivers):
+pip install -e ".[dev,docs,instruments]"
 
 # 5. Execute the proof tests
 pytest tests/
@@ -222,8 +239,5 @@ async def test_full_system_stress(dut_transport, hardware_profiler):
 ### Execution
 Run the test suite on the factory floor, defining the operator and the hardware BOM:
 ```bash
-pytest projects/evse_board/ \
-    -p mes_core \
-    --operator-id=FILIP-01 \
-    --env-config=projects/custom/station_env.toml
+pytest projects/evse_board/ -p mes_core --operator-id=FILIP-01 --env-config=projects/custom/station_env.toml
 ```

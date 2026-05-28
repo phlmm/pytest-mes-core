@@ -1,0 +1,24 @@
+# -----------------------------------------------------------------------------
+# 1. Line Endings (CRLF -> LF)
+# -----------------------------------------------------------------------------
+# Enforce Linux line endings (LF) for all text files on checkout and commit.
+# This ensures that if a Windows developer clones the repository, it stays LF.
+* text=auto eol=lf
+
+# -----------------------------------------------------------------------------
+# 2. Binary Files (Prevent Git from diffing these)
+# -----------------------------------------------------------------------------
+*.pdf binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.pcap binary
+
+# -----------------------------------------------------------------------------
+# 3. Diff Configurations (Better `git diff` formatting)
+# -----------------------------------------------------------------------------
+# This tells Git to use specific language heuristics when generating diffs.
+*.py diff=python
+*.md diff=markdown
+*.toml diff=toml
+*.json diff=json

@@ -1,0 +1,15 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background-color: #0f172a; /* Tailwind slate-900 */
+  color: #f8fafc; /* Tailwind slate-50 */
+}
+
+#root {
+  height: 100%;
+}

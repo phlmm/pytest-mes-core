@@ -98,7 +98,8 @@ class McuAppStateMachine:
             auto_transitions=False,
             after_state_change="_record_timestamp",
         )
-        self.machine.on_enter('*', '_notify_waiters')
+        for state in self.machine.states.values():
+            state.on_enter.append('_notify_waiters')
 
         # Base transitions (linear boot chain)
         base_transitions = [

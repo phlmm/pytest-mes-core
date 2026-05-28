@@ -1,8 +1,39 @@
-.*
-tags
-**/__pycache__/**
-**/venv/**
-**/pytest_cache/**
+# Python / Pytest
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+env/
+.coverage
+htmlcov/
+pytest_x_output.txt
+
+# OS Generated Files & Bloat
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Documentation
+site/
+docs_build/
+
+# Framework Artifacts & Configurations
 artifacts/
 projects/
-site/**
+
+# Ctags / IDEs
+tags
+.vscode/
+.idea/
+
+# Editor / Scratch files
+scratch.py
+test_*.log
+test_out*.txt
+*.pcap
