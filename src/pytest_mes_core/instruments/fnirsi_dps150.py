@@ -437,6 +437,57 @@ class DPS150:
         """Disable the output."""
         self._write_byte(REG_W_OUTPUT, 0)
 
+    # --- Legacy aliases for pytest-mes-core compatibility ---
+    def enable_output(self) -> None:
+        self.output_on()
+
+    def disable_output(self) -> None:
+        self.output_off()
+
+    def set_current_limit(self, amps: float) -> None:
+        self.set_current(amps)
+
+    def measure_current(self) -> float:
+        state = self.read_state()
+        return state['output_current'] if state else 0.0
+
+    def measure_voltage(self) -> float:
+        state = self.read_state()
+        return state['output_voltage'] if state else 0.0
+
+    def read_live_values(self) -> tuple[float, float, float]:
+        state = self.read_state()
+        if state:
+            return state['output_voltage'], state['output_current'], state['output_power']
+        return 0.0, 0.0, 0.0
+
+    async def async_set_voltage(self, volts: float) -> None:
+        import anyio
+        from functools import partial
+        await anyio.to_thread.run_sync(partial(self.set_voltage, volts))
+
+    async def async_set_current_limit(self, amps: float) -> None:
+        import anyio
+        from functools import partial
+        await anyio.to_thread.run_sync(partial(self.set_current_limit, amps))
+
+    async def async_enable_output(self) -> None:
+        import anyio
+        await anyio.to_thread.run_sync(self.enable_output)
+
+    async def async_disable_output(self) -> None:
+        import anyio
+        await anyio.to_thread.run_sync(self.disable_output)
+
+    async def async_measure_current(self) -> float:
+        import anyio
+        return await anyio.to_thread.run_sync(self.measure_current)
+
+    async def async_measure_voltage(self) -> float:
+        import anyio
+        return await anyio.to_thread.run_sync(self.measure_voltage)
+    # --------------------------------------------------------
+
     def set_output(self, volts: float, amps: float):
         """Set voltage and current, then enable output.
 
