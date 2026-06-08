@@ -51,11 +51,14 @@ def psu_hardware(request: pytest.FixtureRequest, mes_env: StationEnvironment) ->
             psu.set_ocp(mes_env.psu_hardware.ocp_limit)
         if hasattr(mes_env.psu_hardware, 'default_voltage') and mes_env.psu_hardware.default_voltage is not None:
             psu.set_voltage(mes_env.psu_hardware.default_voltage)
+            psu.default_voltage = mes_env.psu_hardware.default_voltage
         if hasattr(mes_env.psu_hardware, 'default_current') and mes_env.psu_hardware.default_current is not None:
             psu.set_current(mes_env.psu_hardware.default_current)
     else:
         psu = ScpiPowerSupply(mes_env.psu_hardware)
         psu.connect()
+        if hasattr(mes_env.psu_hardware, 'default_voltage') and mes_env.psu_hardware.default_voltage is not None:
+            psu.default_voltage = mes_env.psu_hardware.default_voltage
 
     if hasattr(mes_env.psu_hardware, 'enable_data_logging') and mes_env.psu_hardware.enable_data_logging:
         if hasattr(psu, 'start_data_logger'):
