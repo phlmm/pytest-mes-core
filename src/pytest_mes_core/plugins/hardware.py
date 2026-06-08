@@ -42,13 +42,13 @@ def psu_hardware(request: pytest.FixtureRequest, mes_env: StationEnvironment) ->
         yield None
         return
     if mes_env.psu_hardware.vendor == "fnirsi":
-        from pytest_mes_core.instruments.fnirsi_dps150 import FnirsiDPS150
-        psu = FnirsiDPS150(port=mes_env.psu_hardware.serial_port, baudrate=mes_env.psu_hardware.baudrate)
+        from pytest_mes_core.instruments.fnirsi_dps150 import DPS150
+        psu = DPS150(port=mes_env.psu_hardware.serial_port, baud=mes_env.psu_hardware.baudrate)
         psu.connect()
         if hasattr(mes_env.psu_hardware, 'ovp_limit') and mes_env.psu_hardware.ovp_limit is not None:
-            psu.set_ovp_limit(mes_env.psu_hardware.ovp_limit)
+            psu.set_ovp(mes_env.psu_hardware.ovp_limit)
         if hasattr(mes_env.psu_hardware, 'ocp_limit') and mes_env.psu_hardware.ocp_limit is not None:
-            psu.set_ocp_limit(mes_env.psu_hardware.ocp_limit)
+            psu.set_ocp(mes_env.psu_hardware.ocp_limit)
         if hasattr(mes_env.psu_hardware, 'default_voltage') and mes_env.psu_hardware.default_voltage is not None:
             psu.set_voltage(mes_env.psu_hardware.default_voltage)
         if hasattr(mes_env.psu_hardware, 'default_current') and mes_env.psu_hardware.default_current is not None:
