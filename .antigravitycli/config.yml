@@ -1,0 +1,27 @@
+# Antigravity Multi-Agent Pipeline Configuration for pytest-mes-core
+
+name: pytest-mes-core-pipeline
+description: Pipeline for designing, reviewing, and implementing hardware-in-the-loop tests.
+
+agents:
+  designer_reviewer:
+    model: gemini-3.1-pro-high
+    skills:
+      - mes-designer-reviewer
+    description: Proposes designs and does final code reviews.
+
+  vv_architecture:
+    model: gemini-3.1-pro-high
+    skills:
+      - mes-vv-architecture
+    description: Reviews designs and implementations for physical safety, Host/Target boundaries, and concurrency (asyncio).
+
+  fast_implementer:
+    model: gemini-3.1-flash
+    description: Quickly implements code and tests based on the approved design. Runs local validation via `pytest`.
+
+workflow:
+  1: designer_reviewer generates proposed design.
+  2: vv_architecture reviews and approves design.
+  3: fast_implementer writes code, runs `pytest tests/`, and reports results.
+  4: designer_reviewer performs final code review and validation.
