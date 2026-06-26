@@ -991,8 +991,14 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
         logger.info("applying_raw_power", medium=self.context.active_boot_medium)
 
         if self.psu:
-            if hasattr(self.psu, 'default_voltage'):
+            if hasattr(self.psu, 'default_voltage') and hasattr(self.psu, "set_voltage"):
                 self.psu.set_voltage(self.psu.default_voltage)
+            elif hasattr(self.psu, "set_voltage"):
+                self.psu.set_voltage(getattr(self.cfg, "target_voltage", 5.0))
+                
+            if hasattr(self.psu, 'default_current') and hasattr(self.psu, "set_current"):
+                self.psu.set_current(self.psu.default_current)
+                
             self.psu.enable_output()
             if hasattr(self.psu, "measure_current"):
                 t_end = time.perf_counter() + 1.0
