@@ -57,13 +57,13 @@ class HostPeripheralSerialAdapter(BaseHostAdapter):
             self.ser.baudrate = self.cfg.baudrate
             self.ser.timeout = self.cfg.timeout_s
             self.ser.exclusive = True
-            
+
             # Prevent PySerial from asserting DTR/RTS upon opening the port.
-            # This prevents the USB-RS232 dongle from constantly pulling the MCU's 
+            # This prevents the USB-RS232 dongle from constantly pulling the MCU's
             # reset line low or triggering spurious SWRST (Software Resets).
             self.ser.dtr = False
             self.ser.rts = False
-            
+
             self.ser.open()
             self.ser.reset_input_buffer()
             self.ser.reset_output_buffer()
@@ -97,14 +97,6 @@ class HostPeripheralSerialAdapter(BaseHostAdapter):
                     pass
                 try:
                     self.ser.reset_input_buffer()
-                except Exception:
-                    pass
-                try:
-                    self.ser.rts = False
-                except Exception:
-                    pass
-                try:
-                    self.ser.dtr = False
                 except Exception:
                     pass
                 self.ser.close()
