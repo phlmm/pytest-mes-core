@@ -44,3 +44,5 @@ pytest_*.log
 
 # Project documents that don't belong in the code repo
 *.pdf
+
+.mes_pending_uuid.txt
