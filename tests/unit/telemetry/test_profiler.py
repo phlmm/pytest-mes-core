@@ -36,3 +36,40 @@ async def test_async_hardware_profiler():
     assert summary["avg_temp_c"] == 85.0
     assert summary["peak_current_a"] == 1.5
     assert summary["avg_voltage_v"] == 12.0
+
+
+@pytest.mark.anyio
+async def test_async_hardware_profiler_negative_temperature():
+    # Cold-chamber / HALT testing: thermal_zone temps can be sub-zero millidegrees.
+    dut = MagicMock()
+    dut.is_connected = True
+    dut.async_safe_run = AsyncMock(return_value=CommandResult(command="", stdout="-5000\n", stderr="", exited=0, ok=True, duration_s=0.1))
+
+    profiler = AsyncHardwareProfiler(dut=dut, interval_s=0.1)
+
+    async with profiler:
+        await anyio.sleep(0.25)
+
+    assert len(profiler.metrics["temp_c"]) >= 1
+    assert all(t == -5.0 for t in profiler.metrics["temp_c"])
+    summary = profiler.summarize()
+    assert summary["peak_temp_c"] == -5.0
+    assert summary["avg_temp_c"] == -5.0
+
+
+@pytest.mark.anyio
+async def test_async_hardware_profiler_garbage_console_noise():
+    # Non-numeric console noise on the thermal_zone read must be skipped, not raise.
+    dut = MagicMock()
+    dut.is_connected = True
+    dut.async_safe_run = AsyncMock(return_value=CommandResult(command="", stdout="garbage\n", stderr="", exited=0, ok=True, duration_s=0.1))
+
+    profiler = AsyncHardwareProfiler(dut=dut, interval_s=0.1)
+
+    async with profiler:
+        await anyio.sleep(0.25)
+
+    assert profiler.metrics["temp_c"] == []
+    summary = profiler.summarize()
+    assert "peak_temp_c" not in summary
+    assert "avg_temp_c" not in summary

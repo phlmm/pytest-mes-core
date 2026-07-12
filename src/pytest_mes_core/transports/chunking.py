@@ -88,7 +88,7 @@ class HostSideBuffer:
                         if fallback:
                             parser = getattr(fallback, 'parser', None)
                             if parser:
-                                new_lines = parser.extract_lines()
+                                new_lines = [l for l in parser.extract_lines()]
                                 if new_lines:
                                     with self._lock:
                                         self._buffer.extend(new_lines)
@@ -96,7 +96,7 @@ class HostSideBuffer:
                                     logger.debug('passive_rx_val_lines_from_watchdog_total_lines_read', val=len(new_lines), _lines_read=self._lines_read)
                     except Exception:
                         pass
-                    self._stop_event.wait(timeout=self.poll_interval_s)
+                    self._stop_event.wait(timeout=self._effective_poll_s)
                     continue
                 run_timeout = max(2.0, self.poll_interval_s * 1.5)
                 logger.debug('tx_cmd', cmd=cmd)

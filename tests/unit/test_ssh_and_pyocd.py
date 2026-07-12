@@ -192,6 +192,31 @@ class TestSSHSafeRun:
         actual_cmd = mock_conn.run.call_args[0][0]
         assert long_cmd in actual_cmd
 
+    def test_sensitive_kwarg_never_reaches_conn_run(self):
+        """Fix 6: `sensitive` is a safe_run-only signal -- it must be popped
+        before conn.run() is called, or fabric raises TypeError."""
+        client, mock_conn = _connected_client()
+        mock_conn.run.return_value = _make_run_result(stdout="ok", exited=0)
+        client.safe_run("echo 'super-secret-private-key-chunk'", sensitive=True)
+        assert "sensitive" not in mock_conn.run.call_args.kwargs
+        # The actual command still executes unmodified.
+        actual_cmd = mock_conn.run.call_args[0][0]
+        assert "super-secret-private-key-chunk" in actual_cmd
+
+    def test_sensitive_command_masked_in_forensic_journal(self):
+        """With forensic_journaling=True and sensitive=True, the journaled
+        command must be masked, not the raw secret."""
+        client, mock_conn = _make_client(forensic=True)
+        mock_conn.is_connected = True
+        mock_conn.run.return_value = _make_run_result(stdout="ok", exited=0)
+        client.safe_run("echo 'super-secret-private-key-chunk'", sensitive=True)
+        actual_cmd = mock_conn.run.call_args[0][0]
+        journal_part, _, real_cmd_part = actual_cmd.partition(";")
+        assert "super-secret-private-key-chunk" not in journal_part
+        assert "EXEC: ******** (sensitive)" in journal_part
+        # The real command must still execute (only the journal entry is masked).
+        assert "super-secret-private-key-chunk" in real_cmd_part
+
 
 # ===========================================================================
 # safe_run — exception branches

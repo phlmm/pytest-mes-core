@@ -6,7 +6,7 @@ All transports are fully mocked — no hardware needed.
 import time
 import threading
 import pytest
-from unittest.mock import MagicMock, PropertyMock, patch
+from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 from pytest_mes_core.transports.failover import FailoverTransport
 from pytest_mes_core.transports.base import CommandResult, TransportConnectionError
@@ -97,6 +97,132 @@ def test_connect_is_idempotent_when_already_connected():
     router.connect()
     primary.connect.assert_not_called()
     fallback.connect.assert_not_called()
+
+
+def test_connect_resets_is_failed_over_on_successful_primary_reconnect():
+    """Fix 5a: after a previously failed-over matrix reconnects and the
+    primary comes back up during connect(), is_failed_over must be reset to
+    False immediately — traffic must not keep routing to the slow fallback
+    until the recovery thread happens to notice."""
+    primary = MagicMock()
+    type(primary).is_connected = PropertyMock(return_value=False)
+    primary.connect.return_value = None
+
+    fallback = MagicMock()
+    type(fallback).is_connected = PropertyMock(return_value=False)
+    fallback.watchdog = None
+    fallback.connect.return_value = None
+
+    router = FailoverTransport(primary, fallback)
+    router.is_failed_over = True  # matrix was failed-over from a previous cycle
+
+    router.connect()
+    time.sleep(0.05)
+
+    assert router.is_failed_over is False
+    primary.connect.assert_called_once()
+
+    router._stop_recovery.set()
+    if router._recovery_thread:
+        router._recovery_thread.join(timeout=2.0)
+
+
+def test_concurrent_connect_spawns_only_one_recovery_thread():
+    """Fix 5b: two concurrent connect() calls must never each spawn their own
+    recovery thread — _start_recovery_thread() re-checks liveness under
+    _connect_lock."""
+    router, primary, fallback = _make_failover(
+        primary_connected=False, fallback_connected=False
+    )
+    type(primary).is_connected = PropertyMock(return_value=False)
+
+    threads_created = []
+    original_thread_cls = threading.Thread
+
+    def tracking_thread(*args, **kwargs):
+        t = original_thread_cls(*args, **kwargs)
+        threads_created.append(t)
+        return t
+
+    # Build the driver (worker) threads with the *unpatched* Thread class first —
+    # patching threading.Thread globally would otherwise also intercept these.
+    workers = [original_thread_cls(target=router.connect) for _ in range(5)]
+    with patch("pytest_mes_core.transports.failover.threading.Thread", side_effect=tracking_thread):
+        for w in workers:
+            w.start()
+        for w in workers:
+            w.join(timeout=2.0)
+
+    assert len(threads_created) == 1
+
+    router._stop_recovery.set()
+    if router._recovery_thread:
+        router._recovery_thread.join(timeout=2.0)
+
+
+def test_async_connect_resets_is_failed_over_on_successful_primary_reconnect():
+    """Fix 5a (async path): async_connect() must also clear is_failed_over on
+    a successful primary reconnect."""
+    import anyio
+
+    primary = MagicMock()
+    type(primary).is_connected = PropertyMock(return_value=False)
+    primary.async_connect = AsyncMock(return_value=None)
+
+    fallback = MagicMock()
+    type(fallback).is_connected = PropertyMock(return_value=False)
+    fallback.watchdog = None
+    fallback.async_connect = AsyncMock(return_value=None)
+
+    router = FailoverTransport(primary, fallback)
+    router.is_failed_over = True
+
+    anyio.run(router.async_connect)
+
+    assert router.is_failed_over is False
+
+    router._stop_recovery.set()
+    if router._recovery_thread:
+        router._recovery_thread.join(timeout=2.0)
+
+
+def test_concurrent_async_connect_spawns_only_one_recovery_thread():
+    """Fix 5b (async path): two concurrent async_connect() calls must never
+    each spawn their own recovery thread."""
+    import anyio
+
+    primary = MagicMock()
+    type(primary).is_connected = PropertyMock(return_value=False)
+    primary.async_connect = AsyncMock(return_value=None)
+
+    fallback = MagicMock()
+    type(fallback).is_connected = PropertyMock(return_value=False)
+    fallback.watchdog = None
+    fallback.async_connect = AsyncMock(return_value=None)
+
+    router = FailoverTransport(primary, fallback)
+
+    threads_created = []
+    original_thread_cls = threading.Thread
+
+    def tracking_thread(*args, **kwargs):
+        t = original_thread_cls(*args, **kwargs)
+        threads_created.append(t)
+        return t
+
+    async def run_concurrent():
+        with patch("pytest_mes_core.transports.failover.threading.Thread", side_effect=tracking_thread):
+            async with anyio.create_task_group() as tg:
+                for _ in range(5):
+                    tg.start_soon(router.async_connect)
+
+    anyio.run(run_concurrent)
+
+    assert len(threads_created) == 1
+
+    router._stop_recovery.set()
+    if router._recovery_thread:
+        router._recovery_thread.join(timeout=2.0)
 
 
 # ---------------------------------------------------------------------------

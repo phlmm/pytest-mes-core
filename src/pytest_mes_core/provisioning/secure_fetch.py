@@ -1,4 +1,5 @@
 import anyio
+import functools
 import structlog
 import os
 import hashlib
@@ -102,6 +103,7 @@ class SecureAssetFetcher:
             raise SecureFetchError('Firmware download interrupted by operator (Ctrl+C).')
         except Exception as e:
             logger.error('network_io_failure_mid_stream_e', e=e)
+            temp_dest.unlink(missing_ok=True)
             raise SecureFetchError(f'Failed to fetch asset: {e}')
         actual_hash = hasher.hexdigest().lower()
         if actual_hash != expected_sha256:
@@ -116,8 +118,9 @@ class SecureAssetFetcher:
         return dest
 
     @staticmethod
-    async def async_fetch_and_verify(url, expected_sha256, dest, timeout_s, *args, **kwargs):
-        return await anyio.to_thread.run_sync(SecureAssetFetcher.fetch_and_verify, url, expected_sha256, dest, timeout_s, *args, **kwargs)
+    async def async_fetch_and_verify(url: str, expected_sha256: str, dest: Path, timeout_s: float = 30.0) -> Path:
+        return await anyio.to_thread.run_sync(
+            functools.partial(SecureAssetFetcher.fetch_and_verify, url, expected_sha256, dest, timeout_s=timeout_s))
 
     @classmethod
     def resolve_payload(cls, uri: str, expected_sha256: Optional[str]=None) -> Path:
@@ -161,5 +164,6 @@ class SecureAssetFetcher:
             raise ValueError(f"FATAL: Remote URL {uri} requires a 'payload_sha256' in TOML for integrity.")
         return cls.fetch_and_verify(url=uri, expected_sha256=expected_sha256, dest=dest_file)
     @classmethod
-    async def async_resolve_payload(cls, uri, expected_sha256, *args, **kwargs):
-        return await anyio.to_thread.run_sync(cls.resolve_payload, uri, expected_sha256, *args, **kwargs)
+    async def async_resolve_payload(cls, uri: str, expected_sha256: Optional[str] = None) -> Path:
+        return await anyio.to_thread.run_sync(
+            functools.partial(cls.resolve_payload, uri, expected_sha256))

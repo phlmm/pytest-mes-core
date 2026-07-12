@@ -111,10 +111,16 @@ class EphemeralSSHClient:
         kwargs.setdefault('hide', True)
         kwargs.setdefault('warn', True)
         kwargs.setdefault('in_stream', False)
-        log_cmd = cmd if len(cmd) < 256 else cmd[:253] + '...'
+        # MUST pop before self.conn.run(**kwargs) below -- fabric raises TypeError
+        # on any kwarg it doesn't recognize.
+        sensitive = bool(kwargs.pop('sensitive', False))
+        log_cmd = '********' if sensitive else (cmd if len(cmd) < 256 else cmd[:253] + '...')
         escaped_cmd = log_cmd.replace("'", "'\\''")
         if getattr(self.cfg, 'forensic_journaling', False):
-            wrapped_cmd = f"logger -t MES_Factory 'EXEC: {escaped_cmd}' ; {cmd}"
+            if sensitive:
+                wrapped_cmd = f"logger -t MES_Factory 'EXEC: ******** (sensitive)' ; {cmd}"
+            else:
+                wrapped_cmd = f"logger -t MES_Factory 'EXEC: {escaped_cmd}' ; {cmd}"
         else:
             wrapped_cmd = cmd
         logger.debug('tx_log_cmd', log_cmd=log_cmd)

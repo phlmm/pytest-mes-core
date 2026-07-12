@@ -1,17 +1,21 @@
 import re
 import anyio
+import math
 import structlog
-from typing import Optional, List
+import collections
+from typing import Optional, Deque
 from anyio.abc import TaskGroup, CancelScope
 from pytest_mes_core.config.protocols import UdpDiagnosticConfig
 from pytest_mes_core.transports.base import TransportTimeoutError
 
 logger = structlog.get_logger('mes_core.transports.udp_logger')
 
+_MAX_LOGS = 50_000
+
 class AsyncUdpLogReceiver:
     def __init__(self, config: UdpDiagnosticConfig):
         self.config = config
-        self._logs: List[str] = []
+        self._logs: Deque[str] = collections.deque(maxlen=_MAX_LOGS)
         self._subscribers = []
         self._cancel_scope: Optional[CancelScope] = None
 
@@ -34,13 +38,14 @@ class AsyncUdpLogReceiver:
                                     send_stream.send_nowait(decoded)
                                 except anyio.WouldBlock:
                                     pass
-                                except anyio.ClosedResourceError:
+                                except (anyio.ClosedResourceError, anyio.BrokenResourceError):
                                     if send_stream in self._subscribers:
                                         self._subscribers.remove(send_stream)
                     except Exception as e:
                         logger.warning("Error decoding UDP packet", error=e)
         except anyio.get_cancelled_exc_class():
-            pass
+            logger.debug("UDP Log Receiver cancelled")
+            raise
         except Exception as e:
             logger.error("UDP socket error", error=e)
 
@@ -60,17 +65,22 @@ class AsyncUdpLogReceiver:
 
     async def async_wait_for_regex(self, pattern: str, timeout_s: float = 5.0) -> str:
         regex = re.compile(pattern)
-        
-        # Check historical logs first
-        for log in self._logs:
-            if regex.search(log):
-                return log
-                
-        # Register subscriber
-        send_stream, receive_stream = anyio.create_memory_object_stream(self.config.buffer_size)
+
+        # Register the subscriber FIRST, then scan history. Scanning history
+        # before registering left a window where a packet arriving between
+        # the scan and registration was missed entirely (never in `_logs`
+        # snapshot we iterated, never delivered to a stream that didn't exist
+        # yet). Registering first means any such packet lands in the stream
+        # instead; a message landing in both the history scan and the stream
+        # is harmless since the first match wins and we return immediately.
+        send_stream, receive_stream = anyio.create_memory_object_stream(math.inf)
         self._subscribers.append(send_stream)
-        
+
         try:
+            for log in self._logs:
+                if regex.search(log):
+                    return log
+
             with anyio.fail_after(timeout_s):
                 async for log in receive_stream:
                     if regex.search(log):

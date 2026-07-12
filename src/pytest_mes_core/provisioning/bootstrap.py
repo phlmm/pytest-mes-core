@@ -2,54 +2,14 @@ import anyio
 import structlog
 import time
 import logging
-from typing import Any, Optional, List
+from typing import List
 
-class _DummyLine:
-
-    def request(self, *args: Any, **kwargs: Any) -> None:
-        pass
-
-    async def async_request(self, *args, **kwargs):
-        return await anyio.to_thread.run_sync(self.request, *args, **kwargs)
-
-    def set_value(self, value: int) -> None:
-        pass
-
-    async def async_set_value(self, value, *args, **kwargs):
-        return await anyio.to_thread.run_sync(self.set_value, value, *args, **kwargs)
-
-    def release(self) -> None:
-        pass
-
-    async def async_release(self, *args, **kwargs):
-        return await anyio.to_thread.run_sync(self.release, *args, **kwargs)
-
-class _DummyChip:
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        pass
-
-    def get_line(self, offset: int) -> _DummyLine:
-        return _DummyLine()
-
-    async def async_get_line(self, offset, *args, **kwargs):
-        return await anyio.to_thread.run_sync(self.get_line, offset, *args, **kwargs)
-
-    def close(self) -> None:
-        pass
-
-    async def async_close(self, *args, **kwargs):
-        return await anyio.to_thread.run_sync(self.close, *args, **kwargs)
-
-class _DummyGpiod:
-    LINE_REQ_DIR_OUT: int = 2
-    Chip = _DummyChip
 try:
     import gpiod
     HAS_GPIOD = True
 except ImportError:
     HAS_GPIOD = False
-    gpiod = _DummyGpiod()
+    gpiod = None
 from pytest_mes_core.config import BootstrapConfig
 from pytest_mes_core.provisioning.base import ProvisioningError
 logger = structlog.get_logger('mes_core.provisioning.bootstrap')
@@ -84,8 +44,8 @@ class HardwareBootstrapper:
         logger.info('forcing_silicon_into_val_mode_states_target_states', val=mode_name.upper(), target_states=target_states)
         self._strobe_hardware(target_states)
 
-    async def async_set_boot_mode(self, mode_name, *args, **kwargs):
-        return await anyio.to_thread.run_sync(self.set_boot_mode, mode_name, *args, **kwargs)
+    async def async_set_boot_mode(self, mode_name: str) -> None:
+        return await anyio.to_thread.run_sync(self.set_boot_mode, mode_name)
 
     def _strobe_hardware(self, target_states: List[int]) -> None:
         """Internal helper to assert multiplexed boot pins and strobe the reset line.
@@ -100,31 +60,25 @@ class HardwareBootstrapper:
         if not HAS_GPIOD:
             logger.warning('[Bootstrap] gpiod missing. Hardware boot state bypassed! (OK if testing on Windows/Mac)')
             return
-        chip: Optional[Any] = None
-        b_lines: List[Any] = []
-        r_line: Optional[Any] = None
+        from gpiod.line import Direction, Value  # local import next to usage
+
         try:
-            logger.debug('binding_to_gpio_chip_gpiochip', gpiochip=self.cfg.gpiochip)
-            chip = gpiod.Chip(f'gpiochip{self.cfg.gpiochip}')
-            for i, pin in enumerate(self.cfg.boot_pins):
-                logger.debug('acquiring_lock_on_boot_pin_pin', pin=pin)
-                line = chip.get_line(pin)
-                line.request(consumer=f'mes_boot_{i}', type=gpiod.LINE_REQ_DIR_OUT)
-                b_lines.append(line)
-            logger.debug('acquiring_lock_on_reset_pin_reset_pin', reset_pin=self.cfg.reset_pin)
-            r_line = chip.get_line(self.cfg.reset_pin)
-            r_line.request(consumer='mes_reset', type=gpiod.LINE_REQ_DIR_OUT)
-            logger.debug('asserting_boot_pins_to_states_target_states', target_states=target_states)
-            for line, state in zip(b_lines, target_states):
-                line.set_value(state)
-            reset_assert_val = 0 if self.cfg.reset_active_low else 1
-            reset_release_val = 1 if self.cfg.reset_active_low else 0
-            logger.debug('asserting_reset_line_value_reset_assert_val', reset_assert_val=reset_assert_val)
-            r_line.set_value(reset_assert_val)
-            time.sleep(0.1)
-            logger.debug('releasing_reset_line_value_reset_release_val_silicon_sampling_boot_pins_now', reset_release_val=reset_release_val)
-            r_line.set_value(reset_release_val)
-            time.sleep(0.5)
+            chip_path = f'/dev/gpiochip{self.cfg.gpiochip}'
+            pins = list(self.cfg.boot_pins) + [self.cfg.reset_pin]
+            logger.debug('requesting_gpio_lines_on_chip_path_for_pins', chip_path=chip_path, pins=pins)
+            config = {pin: gpiod.LineSettings(direction=Direction.OUTPUT) for pin in pins}
+            with gpiod.request_lines(chip_path, consumer='mes_bootstrap', config=config) as request:
+                logger.debug('asserting_boot_pins_to_states_target_states', target_states=target_states)
+                for pin, state in zip(self.cfg.boot_pins, target_states):
+                    request.set_value(pin, Value.ACTIVE if state else Value.INACTIVE)
+                reset_assert = Value.INACTIVE if self.cfg.reset_active_low else Value.ACTIVE
+                reset_release = Value.ACTIVE if self.cfg.reset_active_low else Value.INACTIVE
+                logger.debug('asserting_reset_line_value_reset_assert', reset_assert=reset_assert)
+                request.set_value(self.cfg.reset_pin, reset_assert)
+                time.sleep(0.1)
+                logger.debug('releasing_reset_line_value_reset_release_silicon_sampling_boot_pins_now', reset_release=reset_release)
+                request.set_value(self.cfg.reset_pin, reset_release)
+                time.sleep(0.5)
         except (KeyboardInterrupt, Exception) as e:
             if isinstance(e, KeyboardInterrupt):
                 err_msg = 'Bootstrap GPIO sequencing interrupted by operator (Ctrl+C).'
@@ -132,34 +86,17 @@ class HardwareBootstrapper:
                 err_msg = f'Failed to toggle physical bootstrap pins: {e}'
             logger.critical('fatal_err_msg', err_msg=err_msg)
             raise ProvisioningError(err_msg)
-        finally:
-            logger.debug('[Bootstrap] ZERO-LEAKAGE: Releasing GPIO locks back to OS.')
-            for line in b_lines:
-                try:
-                    line.release()
-                except Exception:
-                    pass
-            if r_line:
-                try:
-                    r_line.release()
-                except Exception:
-                    pass
-            if chip:
-                try:
-                    chip.close()
-                except Exception:
-                    pass
 
     def force_recovery_mode(self) -> None:
         """Convenience wrapper to force the silicon into 'recovery' mode."""
         self.set_boot_mode('recovery')
 
-    async def async_force_recovery_mode(self, *args, **kwargs):
-        return await anyio.to_thread.run_sync(self.force_recovery_mode, *args, **kwargs)
+    async def async_force_recovery_mode(self) -> None:
+        return await anyio.to_thread.run_sync(self.force_recovery_mode)
 
     def force_normal_boot(self) -> None:
         """Convenience wrapper to force the silicon into 'normal' or 'emmc' mode."""
         mode = 'emmc' if 'emmc' in self.cfg.boot_modes else 'normal'
         self.set_boot_mode(mode)
-    async def async_force_normal_boot(self, *args, **kwargs):
-        return await anyio.to_thread.run_sync(self.force_normal_boot, *args, **kwargs)
+    async def async_force_normal_boot(self) -> None:
+        return await anyio.to_thread.run_sync(self.force_normal_boot)

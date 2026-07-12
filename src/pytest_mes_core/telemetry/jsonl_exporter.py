@@ -37,8 +37,8 @@ class JsonlTelemetryExporter:
         self.active_file = session_dir / f'{context.run_id}.jsonl'
         logger.info('session_armed_streaming_localized_jsonl_to_active_file', active_file=self.active_file)
 
-    async def async_start_session(self, context, *args, **kwargs):
-        return await anyio.to_thread.run_sync(self.start_session, context, *args, **kwargs)
+    async def async_start_session(self, context: StationContext) -> None:
+        return await anyio.to_thread.run_sync(self.start_session, context)
 
     def emit_record(self, record: TestRecord) -> None:
         """Serializes and flushes a single payload to the active file."""
@@ -47,6 +47,7 @@ class JsonlTelemetryExporter:
             logger.critical('fatal_err_msg', err_msg=err_msg)
             raise TelemetryDeliveryError(err_msg)
         try:
+            record.sanitize()
             payload_str = record.model_dump_json(exclude_none=True) + '\n'
         except Exception as e:
             logger.critical('=' * 60)
@@ -68,15 +69,15 @@ class JsonlTelemetryExporter:
             self._execute_emergency_dump(payload_str)
             raise TelemetryDeliveryError('Telemetry flush failed! Disk full? Emergency dump attempted.')
 
-    async def async_emit_record(self, record, *args, **kwargs):
-        return await anyio.to_thread.run_sync(self.emit_record, record, *args, **kwargs)
+    async def async_emit_record(self, record: TestRecord) -> None:
+        return await anyio.to_thread.run_sync(self.emit_record, record)
 
     def end_session(self, session_passed: bool) -> None:
         """Finalizes the run. (JSONL does not require EOF markers, so we just log it)."""
         logger.info('machine_stream_finalized_overall_result_val', val='PASS' if session_passed else 'FAIL')
 
-    async def async_end_session(self, session_passed, *args, **kwargs):
-        return await anyio.to_thread.run_sync(self.end_session, session_passed, *args, **kwargs)
+    async def async_end_session(self, session_passed: bool) -> None:
+        return await anyio.to_thread.run_sync(self.end_session, session_passed)
 
     def _atomic_append(self, filepath: Path, payload: str) -> None:
         """Writes data to the physical silicon with extreme paranoia."""

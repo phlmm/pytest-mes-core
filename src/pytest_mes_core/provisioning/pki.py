@@ -1,8 +1,10 @@
 import anyio
+import functools
 import structlog
 import hashlib
 import base64
 import logging
+import time
 from pathlib import Path
 from pytest_mes_core.transports import DutTransport
 from pytest_mes_core.provisioning import ProvisioningError
@@ -61,12 +63,11 @@ class PkiProvisioner:
         b64_temp = f'{remote_dest}.b64'
         transport.safe_run(f'> {b64_temp}')
         for chunk in b64_chunks:
-            res_chunk = transport.safe_run(f"echo '{chunk}' >> {b64_temp}")
+            res_chunk = transport.safe_run(f"echo '{chunk}' >> {b64_temp}", sensitive=True)
             if res_chunk.exited != 0:
                 err_msg = f'Failed to write payload chunk to DUT: {res_chunk.stderr.strip()}'
                 logger.critical('fatal_err_msg', err_msg=err_msg)
                 raise ProvisioningError(err_msg)
-            import time
             time.sleep(0.05)
         res_decode = transport.safe_run(f'base64 -d {b64_temp} > {remote_dest}')
         transport.safe_run(f'rm -f {b64_temp}')
@@ -87,8 +88,9 @@ class PkiProvisioner:
         logger.info('injection_successful_and_cryptographically_verified_remote_dest', remote_dest=remote_dest)
 
     @staticmethod
-    async def async_provision_credential(transport, local_filepath, remote_dest, permissions, *args, **kwargs):
-        return await anyio.to_thread.run_sync(PkiProvisioner.provision_credential, transport, local_filepath, remote_dest, permissions, *args, **kwargs)
+    async def async_provision_credential(transport: DutTransport, local_filepath: Path, remote_dest: str, permissions: str = '400') -> None:
+        return await anyio.to_thread.run_sync(
+            functools.partial(PkiProvisioner.provision_credential, transport, local_filepath, remote_dest, permissions))
 
 class PkiPairingValidator:
     """
@@ -134,5 +136,6 @@ class PkiPairingValidator:
         logger.info('[PKI] Cryptographic pairing mathematically proven.')
         return ValidatorResult(passed=True)
     @staticmethod
-    async def async_verify_x509_pairing(transport, remote_cert_path, remote_key_path, *args, **kwargs):
-        return await anyio.to_thread.run_sync(PkiPairingValidator.verify_x509_pairing, transport, remote_cert_path, remote_key_path, *args, **kwargs)
+    async def async_verify_x509_pairing(transport: DutTransport, remote_cert_path: str, remote_key_path: str) -> ValidatorResult:
+        return await anyio.to_thread.run_sync(
+            functools.partial(PkiPairingValidator.verify_x509_pairing, transport, remote_cert_path, remote_key_path))

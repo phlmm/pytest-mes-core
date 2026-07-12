@@ -1,5 +1,5 @@
 from enum import Enum
-from typing import Literal, Optional
+from typing import Dict, Literal, Optional
 from pydantic import BaseModel, Field, SecretStr
 
 class TimeDaemonType(str, Enum):
@@ -54,6 +54,13 @@ class StateMachineConfig(BaseHardwareConfig):
     cold_boot_timeout_s: float = Field(default=60.0)
     autoboot_enabled: bool = Field(default=True)
 
+    gpio_reset_pin: Optional[str] = Field(default=None, description="GPIO pin name for the DUT hardware RESET line.")
+    gpio_recovery_pin: Optional[str] = Field(default="RECOVERY_BTN", description="GPIO pin name asserting the recovery strap.")
+    recovery_latch_time_s: float = Field(default=1.5, description="Seconds to hold the recovery strap after power-on.")
+    power_off_threshold_a: float = Field(default=0.05, description="PSU current below which the DUT is considered POWER_OFF.")
+    boot_straps_gpio_map: Dict[str, Dict[str, bool]] = Field(default_factory=dict, description="Boot medium -> {gpio pin: level} strap map.")
+    storage_data_encrypted: Optional[str] = Field(default="/dev/mapper/data_crypt", description="Encrypted data partition device to verify mounted; None/empty disables the check.")
+
     def get_os_password(self) -> Optional[str]:
         return self.os_password.get_secret_value() if self.os_password else None
 
@@ -74,3 +81,11 @@ class MqttBearerOverrideConfig(BaseModel):
         "lte"  — force Quectel LTE modem bearer.
     """
     mode: Literal["auto", "eth", "wifi", "lte"] = Field(default="auto")
+    sim_installed: bool = Field(
+        default=False,
+        description="True when a physical SIM is installed in the LTE modem.",
+    )
+    sim_apn: str = Field(
+        default="internet",
+        description="APN for the installed SIM (e.g. 'internet' for Yettel Bulgaria).",
+    )

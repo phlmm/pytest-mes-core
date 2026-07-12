@@ -14,6 +14,14 @@ T = TypeVar('T', bound=BaseModel)
 class StationEnvironment(BaseModel):
     """The Indisputable Hardware BOM."""
     model_config = ConfigDict(extra='forbid')
+    def get(self, key: str, default=None):
+        """Dict-like access for backward compatibility.
+
+        Allows code such as ``station_cfg.get('probe_rs_chip', 'STM32H563ZITx')``
+        to retrieve attributes from the Pydantic model. If the attribute does not
+        exist, ``default`` is returned.
+        """
+        return getattr(self, key, default)
     station_meta: StationMetaConfig
     telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)
     git_auth: Optional[GitAuthConfig] = None

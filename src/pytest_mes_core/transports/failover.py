@@ -61,6 +61,21 @@ class FailoverTransport(DutTransport):
     def is_connected(self) -> bool:
         return self.fallback.is_connected if self.is_failed_over else self.primary.is_connected
 
+    def _start_recovery_thread(self) -> None:
+        """Arms the background recovery-probe thread, guarded against double-spawn.
+
+        Must be called while holding (or having just released, per the async
+        caller's brief-lock pattern) ``_connect_lock`` semantics: it re-checks
+        thread liveness under the lock so two concurrent connect() calls never
+        each spawn their own recovery thread.
+        """
+        with self._connect_lock:
+            if self._recovery_thread and self._recovery_thread.is_alive():
+                return
+            self._stop_recovery.clear()
+            self._recovery_thread = threading.Thread(target=self._probe_primary_recovery, daemon=True)
+            self._recovery_thread.start()
+
     def connect(self) -> None:
         """Connects both primary and fallback transports and arms the failover matrix.
 
@@ -68,8 +83,10 @@ class FailoverTransport(DutTransport):
         concurrent callers each pass the ``is_connected`` check and both spawn
         a recovery thread.
         """
+        armed = False
         with self._connect_lock:
             if not self.is_connected:
+                armed = True
                 logger.info('[Router] Arming dual-transport failover matrix...')
 
                 # Connect the reliable fallback (UART) first so it is available immediately
@@ -79,14 +96,16 @@ class FailoverTransport(DutTransport):
                 # If the board is in BOOTLOADER or POWER_OFF, this will naturally fail.
                 try:
                     self.primary.connect()
+                    self.is_failed_over = False
                 except TransportConnectionError:
                     logger.warning('[Router] Primary transport offline during setup. Matrix starting in FAILOVER mode.')
                     self.is_failed_over = True
 
-                self._stop_recovery.clear()
-                self._recovery_thread = threading.Thread(target=self._probe_primary_recovery, daemon=True)
-                self._recovery_thread.start()
-                logger.debug('[Router] Dual-transport routing matrix armed.')
+        # _start_recovery_thread() re-acquires _connect_lock itself, so it must be
+        # called after the lock above is released (threading.Lock is not reentrant).
+        if armed:
+            self._start_recovery_thread()
+            logger.debug('[Router] Dual-transport routing matrix armed.')
 
     def disconnect(self) -> None:
         """Tears down the dual-transport matrix and stops the recovery thread.
@@ -114,13 +133,15 @@ class FailoverTransport(DutTransport):
 
             try:
                 await self.primary.async_connect()
+                self.is_failed_over = False
             except TransportConnectionError:
                 logger.warning('[Router] Primary transport offline during async setup. Matrix starting in FAILOVER mode.')
                 self.is_failed_over = True
 
-            self._stop_recovery.clear()
-            self._recovery_thread = threading.Thread(target=self._probe_primary_recovery, daemon=True)
-            self._recovery_thread.start()
+            # _start_recovery_thread() serializes concurrent arming attempts on
+            # _connect_lock, preventing the double-thread-spawn race that existed
+            # when this method built the Thread inline outside any lock.
+            self._start_recovery_thread()
             logger.debug('[Router] Dual-transport routing matrix armed.')
 
     async def async_disconnect(self) -> None:

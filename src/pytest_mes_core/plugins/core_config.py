@@ -350,7 +350,7 @@ def pytest_unconfigure(config: pytest.Config) -> None:
     if watchdog:
         watchdog.__exit__(None, None, None)
     if telemetry_sink:
-        tests_failed = bool(config.pluginmanager.get_plugin('session').testsfailed)
+        tests_failed = bool(getattr(config.pluginmanager.get_plugin('session'), 'testsfailed', False))
         session_passed = not tests_failed
         telemetry_sink.end_session(session_passed=session_passed)
         htmlpath = getattr(config.option, 'htmlpath', None)

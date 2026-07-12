@@ -9,7 +9,7 @@ import anyio
 from abc import ABC, abstractmethod
 from typing import Dict, Optional, Pattern, Any, Callable, List, Generator
 from dataclasses import dataclass, field
-from transitions import Machine, EventData
+from transitions import EventData
 from enum import Enum, auto
 from tenacity import retry, stop_after_attempt, wait_fixed, before_sleep_log
 from pytest_mes_core.transports.constants import ANSI_ESCAPE_B, PANIC_PATTERN_B
@@ -17,7 +17,7 @@ from pytest_mes_core.transports.constants import ANSI_ESCAPE_B, PANIC_PATTERN_B
 from pytest_mes_core.config import StateMachineConfig, BootProfilerConfig
 from pytest_mes_core.instruments import ScpiPowerSupply
 from pytest_mes_core.transports import EphemeralSerialClient, EphemeralSSHClient
-from pytest_mes_core.transports import TransportTimeoutError, TransportConnectionError
+from pytest_mes_core.transports import TransportTimeoutError, TransportConnectionError, TransportError
 from pytest_mes_core.manifest import HardwareManifest
 
 try:
@@ -56,7 +56,7 @@ class BootloaderSyncError(StateMachineError):
 
 from pytest_mes_core.events import (
     UartEvent, PromptDetected, AutobootWindowDetected,
-    PanicDetected, MilestoneReached, BootDataReceived, bus
+    PanicDetected, MilestoneReached, BootDataReceived, IdleTick, bus
 )
 
 
@@ -133,6 +133,7 @@ class UartEventStream:
 
         rx_queue = self.serial.subscribe(maxsize=0)
         last_rx_time = time.perf_counter()
+        last_event_yield = time.perf_counter()
         _local_buf = ""  # private — never shared with self.serial.parser
         _silent_pings = 0  # consecutive pings with no RX — TX health indicator
 
@@ -164,6 +165,14 @@ class UartEventStream:
                             logger.debug("[UART] Console silent. Injecting ping to redraw prompt...")
                         self.serial.raw_write(active_ping_char)
                         last_rx_time = time.perf_counter()
+                    # Heartbeat: a silent UART produces no events at all, which
+                    # starves any consumer that only checks its own deadlines
+                    # "on every event loop iteration".  Yield a local-only
+                    # IdleTick roughly every second so those checks still run.
+                    if time.perf_counter() - last_event_yield >= 1.0:
+                        elapsed = round(time.perf_counter() - t_start, 3)
+                        last_event_yield = time.perf_counter()
+                        yield IdleTick(elapsed_s=elapsed)
                     continue
 
                 if not chunk:
@@ -175,7 +184,6 @@ class UartEventStream:
                 last_rx_time = time.perf_counter()
 
                 # Decode into the private local buffer; strip ANSI escape codes.
-                decoded = chunk.decode('utf-8', errors='replace')
                 _local_buf += self.ansi_pattern.sub(b'', chunk).decode('utf-8', errors='replace')
                 elapsed = round(time.perf_counter() - t_start, 3)
 
@@ -189,6 +197,7 @@ class UartEventStream:
                         raw_output=_local_buf[-500:],
                     )
                     bus.emit_uart_event(ev)
+                    last_event_yield = time.perf_counter()
                     yield ev
                     return
 
@@ -197,6 +206,7 @@ class UartEventStream:
                     autoboot_fired = True
                     ev = AutobootWindowDetected(elapsed_s=elapsed)
                     bus.emit_uart_event(ev)
+                    last_event_yield = time.perf_counter()
                     yield ev
 
                 # 3. Prompt detection — each type yielded at most once
@@ -206,6 +216,7 @@ class UartEventStream:
                         logger.debug(f"[UART-FSM] Detected prompt '{ptype}' in buffer")
                         ev = PromptDetected(elapsed_s=elapsed, prompt_type=ptype)
                         bus.emit_uart_event(ev)
+                        last_event_yield = time.perf_counter()
                         yield ev
 
                 # 4. Line-level processing — extract complete lines from the
@@ -219,12 +230,14 @@ class UartEventStream:
                         continue
                     ev = BootDataReceived(elapsed_s=elapsed, line=clean_line)
                     bus.emit_uart_event(ev)
+                    last_event_yield = time.perf_counter()
                     yield ev
                     found_keys = [k for k, v in pending_milestones.items() if v in clean_line]
                     for k in found_keys:
                         pending_milestones.pop(k)
                         ev2 = MilestoneReached(elapsed_s=elapsed, name=k)
                         bus.emit_uart_event(ev2)
+                        last_event_yield = time.perf_counter()
                         yield ev2
         finally:
             self.serial.unsubscribe(rx_queue)
@@ -259,6 +272,7 @@ class UartEventStream:
 
         rx_queue = self.serial.subscribe(maxsize=0)
         last_rx_time = time.perf_counter()
+        last_event_yield = time.perf_counter()
         _local_buf = ""  # private — never shared with self.serial.parser
         _silent_pings = 0  # consecutive pings with no RX — TX health indicator
 
@@ -267,7 +281,7 @@ class UartEventStream:
                 # Offload blocking queue.get to thread so the event loop stays free
                 try:
                     chunk = await anyio.to_thread.run_sync(
-                        functools.partial(rx_queue.get, timeout=0.05)
+                        functools.partial(rx_queue.get, timeout=0.25)
                     )
                 except queue.Empty:
                     if active_ping_char and (time.perf_counter() - last_rx_time > 5.0):
@@ -289,6 +303,14 @@ class UartEventStream:
                             logger.debug("[UART] Console silent. Injecting ping to redraw prompt...")
                         self.serial.raw_write(active_ping_char)
                         last_rx_time = time.perf_counter()
+                    # Heartbeat: a silent UART produces no events at all, which
+                    # starves any consumer that only checks its own deadlines
+                    # "on every event loop iteration".  Yield a local-only
+                    # IdleTick roughly every second so those checks still run.
+                    if time.perf_counter() - last_event_yield >= 1.0:
+                        elapsed = round(time.perf_counter() - t_start, 3)
+                        last_event_yield = time.perf_counter()
+                        yield IdleTick(elapsed_s=elapsed)
                     continue
 
                 if not chunk:
@@ -310,6 +332,7 @@ class UartEventStream:
                         raw_output=_local_buf[-500:],
                     )
                     bus.emit_uart_event(ev)
+                    last_event_yield = time.perf_counter()
                     yield ev
                     return
 
@@ -317,6 +340,7 @@ class UartEventStream:
                     autoboot_fired = True
                     ev = AutobootWindowDetected(elapsed_s=elapsed)
                     bus.emit_uart_event(ev)
+                    last_event_yield = time.perf_counter()
                     yield ev
 
                 for ptype, pbytes in prompts.items():
@@ -325,6 +349,7 @@ class UartEventStream:
                         logger.debug(f"[UART-FSM] Detected prompt '{ptype}' in buffer")
                         ev = PromptDetected(elapsed_s=elapsed, prompt_type=ptype)
                         bus.emit_uart_event(ev)
+                        last_event_yield = time.perf_counter()
                         yield ev
 
                 _local_buf = _local_buf.replace('\r\n', '\n').replace('\r', '\n')
@@ -335,12 +360,14 @@ class UartEventStream:
                         continue
                     ev = BootDataReceived(elapsed_s=elapsed, line=clean_line)
                     bus.emit_uart_event(ev)
+                    last_event_yield = time.perf_counter()
                     yield ev
                     found_keys = [k for k, v in pending_milestones.items() if v in clean_line]
                     for k in found_keys:
                         pending_milestones.pop(k)
                         ev2 = MilestoneReached(elapsed_s=elapsed, name=k)
                         bus.emit_uart_event(ev2)
+                        last_event_yield = time.perf_counter()
                         yield ev2
         finally:
             self.serial.unsubscribe(rx_queue)
@@ -363,6 +390,19 @@ class DutState(Enum):
     OS_USERLAND = auto()
     RECOVERY = auto()
     DIRTY = auto()
+
+
+def _state_name(value: Any) -> str:
+    """Normalizes a state reference to its name string.
+
+    ``transitions`` sometimes hands back an Enum member (e.g. ``self.state``)
+    and sometimes a plain name string (e.g. ``event.transition.source``).
+    Pydantic would otherwise coerce an Enum straight to ``str(value)``
+    (its numeric ``auto()`` value for ``DutState``), so normalize explicitly.
+    """
+    if isinstance(value, Enum):
+        return value.name
+    return str(value)
 
 # ==========================================
 # BOOT STRATEGIES (Strategy Pattern)
@@ -471,11 +511,11 @@ class GpioRecoveryStrategy(RecoveryStrategy):
     """
     async def trigger_recovery(self, fsm: 'EmbeddedLinuxStateMachine') -> None:
         import anyio
-        recovery_pin = getattr(fsm.cfg, "gpio_recovery_pin", "RECOVERY_BTN")
+        recovery_pin = fsm.cfg.gpio_recovery_pin
         if fsm.gpio and recovery_pin:
             await anyio.to_thread.run_sync(fsm.gpio.set_pin, recovery_pin, True)
             await anyio.to_thread.run_sync(fsm._do_energize)
-            await anyio.sleep(getattr(fsm.cfg, "recovery_latch_time_s", 1.5))
+            await anyio.sleep(fsm.cfg.recovery_latch_time_s)
             await anyio.to_thread.run_sync(fsm.gpio.set_pin, recovery_pin, False)
         else:
             if _is_headless():
@@ -490,7 +530,7 @@ class GpioRecoveryStrategy(RecoveryStrategy):
 
     async def release_recovery(self, fsm: 'EmbeddedLinuxStateMachine') -> None:
         import anyio
-        recovery_pin = getattr(fsm.cfg, "gpio_recovery_pin", "RECOVERY_BTN")
+        recovery_pin = fsm.cfg.gpio_recovery_pin
         if fsm.gpio and recovery_pin:
             # Automated stations: pin was already de-asserted inside trigger_recovery()
             # after recovery_latch_time_s.  Nothing to do here.
@@ -531,19 +571,24 @@ class DefaultSWUpdateStrategy(ContextValidationStrategy):
     the active RootFS partition.
     """
     async def verify_linux_context(self, fsm: 'EmbeddedLinuxStateMachine') -> None:
+        if not fsm.serial.is_connected:
+            logger.debug("swupdate_context_check_skipped", reason="serial_not_connected_ssh_only_session")
+            fsm.context.active_rootfs = "UNKNOWN"
+            return
+
         logger.info("validating_ab_partitions_via_swupdate")
         res_sw = await fsm.serial.async_safe_run("swupdate -g", timeout_s=3.0, check_exit_code=False)
 
         if res_sw.ok:
             output = res_sw.stdout.strip()
-            shell_prompt = getattr(fsm.cfg, "os_shell_prompt", "~#")
+            shell_prompt = fsm.cfg.os_shell_prompt
             lines = [l.strip() for l in output.split('\n') if l.strip() and "swupdate" not in l and shell_prompt not in l]
             fsm.context.active_rootfs = lines[-1] if lines else "UNKNOWN"
         else:
             logger.debug("swupdate_not_found_or_failed", action="setting_rootfs_to_unknown")
             fsm.context.active_rootfs = "UNKNOWN"
 
-        crypto_part = getattr(fsm.cfg, 'storage_data_encrypted', '/dev/mapper/data_crypt')
+        crypto_part = fsm.cfg.storage_data_encrypted
         if crypto_part:
             mount_res = await fsm.serial.async_safe_run("mount | grep /data", timeout_s=3.0, check_exit_code=False)
             fsm.context.crypto_data_mounted = crypto_part in mount_res.stdout
@@ -636,7 +681,7 @@ class BaseDutStateMachine(ABC):
         self._register_custom_states()
 
     def _register_custom_states(self) -> None:
-        """Override this in project subclasses to add custom states andtransitions.
+        """Override this in project subclasses to add custom states and transitions.
         This runs automatically during __init__ to patch the FSM.
         logger.info("[EVSE FSM] Injecting custom EVSE hardware states...")
         # Add the new states to the existing machine
@@ -663,8 +708,8 @@ class BaseDutStateMachine(ABC):
         from pytest_mes_core.events import bus, StateChanged
         ev = StateChanged(
             fsm_name=self.__class__.__name__,
-            old_state=event.transition.source,
-            new_state=self.state,
+            old_state=_state_name(event.transition.source),
+            new_state=_state_name(self.state),
             trigger=event.event.name,
             timestamp=time.time()
         )
@@ -708,7 +753,7 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
                 # Robustness: Debounce current measurement over 3 samples to ignore transient dips
                 samples = [float(self.psu.measure_current()) for _ in range(3)]
                 avg_current = sum(samples) / len(samples)
-                power_threshold = getattr(self.cfg, "power_off_threshold_a", 0.05)
+                power_threshold = self.cfg.power_off_threshold_a
                 
                 if avg_current < power_threshold:
                     logger.debug("probe_result", domain="power", current_a=avg_current, threshold_a=power_threshold, state="POWER_OFF")
@@ -817,7 +862,7 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
         Probe is skipped when:
         - ``force`` is False AND the PSU is present AND state is not DIRTY
           (PSU presence means we can trust the power-cycle history).
-        - ``force`` is False AND the state is RECOVERY or BOOTLOADER
+        - ``force`` is False AND the state is RECOVERY, BOOTLOADER, or POWER_OFF
           (these were explicitly set by a transition command; we know the hardware).
 
         Probing from an explicitly-commanded state is dangerous: a false POWER_OFF
@@ -859,7 +904,7 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
         """
         if not medium:
             medium = "default"
-        straps = getattr(self.cfg, "boot_straps_gpio_map", {}).get(medium)
+        straps = self.cfg.boot_straps_gpio_map.get(medium)
 
         if self.gpio:
             if straps:
@@ -893,7 +938,7 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
 
         If no reset pin is defined, falls back to a hard power cycle.
         """
-        reset_pin = getattr(self.cfg, "gpio_reset_pin", None)
+        reset_pin = self.cfg.gpio_reset_pin
         if self.gpio and reset_pin:
             # Robustness: Prevent backpowering the SoC through the reset pin
             if self.state == DutState.POWER_OFF:
@@ -997,9 +1042,14 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
     def _set_uboot_trap_and_reboot(self) -> None:
         logger.info("hot_patching_uboot_env")
         # Robustness: We MUST check exit codes here. Silently failing fw_setenv will brick the FSM trap loop.
-        self.serial.safe_run("fw_setenv mes_prev_bootcmd \"$(fw_printenv -n bootcmd)\"", timeout_s=3.0, check_exit_code=True)
-        self.serial.safe_run("fw_setenv bootcmd 'echo MES Framework Trap'", timeout_s=3.0, check_exit_code=True)
-        self.serial.safe_run("reboot", timeout_s=2.0, check_exit_code=False)
+        self.transport.safe_run("fw_setenv mes_prev_bootcmd \"$(fw_printenv -n bootcmd)\"", timeout_s=3.0, check_exit_code=True)
+        self.transport.safe_run("fw_setenv bootcmd 'echo MES Framework Trap'", timeout_s=3.0, check_exit_code=True)
+        try:
+            self.transport.safe_run("reboot", timeout_s=2.0, check_exit_code=False)
+        except TransportError:
+            pass  # connection dropping during reboot is expected
+        if self.ssh.is_connected:
+            self.ssh.disconnect()  # session is dead either way; avoid a stale socket
 
     def _restore_uboot_trap(self) -> None:
         logger.info("restoring_original_uboot_env")
@@ -1162,52 +1212,6 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
 
         raise TransportTimeoutError("Timed out waiting for Linux Shell prompt.")
 
-    # Backward-compatible aliases for any external code referencing old methods
-    def _do_wait_for_bootloader(self, spam_interrupt: bool) -> None:
-        import anyio
-        anyio.from_thread.run(self.event_wait_for_bootloader, intercept_autoboot=spam_interrupt)
-
-    def _do_boot_from_bootloader_to_os(self) -> None:
-        import anyio
-        anyio.from_thread.run(self.event_boot_from_bootloader_to_os)
-
-    def _do_wait_for_os(self) -> None:
-        import anyio
-        anyio.from_thread.run(self.event_wait_for_os_shell)
-
-
-    def _finalize_os_boot(self) -> None:
-        """Executes final OS verification and bridges the SSH transport.
-
-        Relies on the Yocto image to have pre-baked SSH keys or default passwords.
-        Harvests systemd boot times and establishes the primary SSH connection
-        once the OS is fully validated.
-        """
-        if self.ssh.is_connected:
-            return
-
-        # 1. Parse SWUpdate or Custom Validators
-        import anyio
-        anyio.from_thread.run(self._verify_linux_context)
-
-        # 1.5. Harvest Kernel Boot Analytics (UART only — skipped in SSH-only sessions)
-        if self.serial.is_connected:
-            res_sysd = self.serial.safe_run("systemd-analyze time", timeout_s=5.0, check_exit_code=False)
-            if res_sysd.ok and "Startup finished in" in res_sysd.stdout:
-                try:
-                    k_match = re.search(r'([\d\.]+)s\s*\(kernel\)', res_sysd.stdout)
-                    u_match = re.search(r'([\d\.]+)s\s*\(userspace\)', res_sysd.stdout)
-                    if k_match: self.boot_metrics["t_systemd_kernel_s"] = float(k_match.group(1))
-                    if u_match: self.boot_metrics["t_systemd_userspace_s"] = float(u_match.group(1))
-                except Exception:
-                    pass
-
-        # 2. Establish the high-speed SSH pipeline.
-        # BUG-4 fix: sshd may not be listening yet even though the shell prompt is up.
-        # Retry for up to 10 s with 1 s intervals before propagating the error.
-        logger.info("establishing_primary_ssh_transport")
-        self._connect_ssh_with_retry()
-
     @retry(
         stop=stop_after_attempt(10),
         wait=wait_fixed(1.0),
@@ -1344,9 +1348,18 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
             return
 
         if self.state == DutState.OS_USERLAND:
-            await self.serial.async_safe_run("reboot", timeout_s=2.0, check_exit_code=False)
+            if self.cfg.autoboot_enabled:
+                await self._async_reboot_dut()
+            else:
+                await anyio.to_thread.run_sync(self._set_uboot_trap_and_reboot)
         elif self.state == DutState.ENERGIZED:
             if not self.psu:
+                if not self.cfg.autoboot_enabled:
+                    logger.warning(
+                        "soft_reboot_without_autoboot_trap",
+                        reason="autoboot_disabled_and_no_trap_installed",
+                        hint="bootloader interception may fail; a full trap flow from a login prompt is out of scope",
+                    )
                 await anyio.to_thread.run_sync(self._do_soft_reboot)
             else:
                 await anyio.to_thread.run_sync(self._do_power_off)
@@ -1374,11 +1387,13 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
                 await self.finalize_os_boot()
                 return
             await anyio.to_thread.run_sync(self._do_hardware_reset)
+            self.machine.set_state(DutState.ENERGIZED)  # board is freshly rebooting -> treat as hot-login candidate
 
         if self.state == DutState.ENERGIZED:
             if await self._try_hot_login():
                 return
             await anyio.to_thread.run_sync(self._do_hardware_reset)
+            self.machine.set_state(DutState.DIRTY)       # escalate: full cold boot below
 
         if self.state in [DutState.RECOVERY, DutState.DIRTY, DutState.POWER_OFF]:
             if self.state != DutState.POWER_OFF:
@@ -1405,6 +1420,16 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
             return self.ssh
         return self.serial
 
+    async def _async_reboot_dut(self) -> None:
+        """Reboot via the best available transport; tolerate the pipe dying mid-command."""
+        t = self.transport  # prefers connected SSH, falls back to serial
+        try:
+            await t.async_safe_run("reboot", timeout_s=2.0, check_exit_code=False)
+        except TransportError:
+            pass  # connection dropping during reboot is expected
+        if self.ssh.is_connected:
+            self.ssh.disconnect()  # session is dead either way; avoid a stale socket
+
     async def _try_resume_existing_os(self) -> bool:
         """Liveness check for an existing OS_USERLAND session. Returns True if board is alive.
         """
@@ -1415,7 +1440,7 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
             res = await self.ssh.async_safe_run("echo MES_HEARTBEAT", timeout_s=2.0)
             if "MES_HEARTBEAT" in res.stdout:
                 return True
-        except (TransportConnectionError, Exception) as e:
+        except Exception as e:
             logger.debug("ssh_liveness_check_failed", reason=str(e))
 
         logger.debug("verifying_uart_heartbeat_existing_os")

@@ -42,8 +42,8 @@ class DeveloperMarkdownExporter:
         with open(self.filepath, 'w', encoding='utf-8') as f:
             f.write(header)
 
-    async def async_start_session(self, context, *args, **kwargs):
-        return await anyio.to_thread.run_sync(self.start_session, context, *args, **kwargs)
+    async def async_start_session(self, context: StationContext) -> None:
+        return await anyio.to_thread.run_sync(self.start_session, context)
 
     def emit_record(self, record: TestRecord) -> None:
         """Serializes and flushes a single payload to the active markdown file.
@@ -54,12 +54,14 @@ class DeveloperMarkdownExporter:
         if not self.filepath:
             return
         self.total_duration += record.duration_s
-        status_icon = '✅ PASS' if record.passed else '❌ FAIL'
+        status_icon = '✅ PASS' if record.passed else ('⏭️ SKIP' if record.outcome == 'skipped' else '❌ FAIL')
         retry_tag = f' *(Retry {record.iteration})*' if record.context.get('is_retry') else ''
         md = f'## {status_icon}: `{record.test_name}`{retry_tag}\n'
         md += f'- **Duration:** {record.duration_s}s\n'
         md += f"- **FSM State:** `{record.context.get('fsm_state', 'UNKNOWN')}`\n\n"
-        if not record.passed and record.error_message:
+        if record.outcome == 'skipped' and record.error_message:
+            md += f'### Skipped: {record.error_message}\n'
+        if not record.passed and record.error_message and record.outcome != 'skipped':
             md += f'### Error: {record.error_message}\n'
             full_trace = record.context.get('full_traceback')
             if full_trace:
@@ -85,8 +87,8 @@ class DeveloperMarkdownExporter:
         with open(self.filepath, 'a', encoding='utf-8') as f:
             f.write(md)
 
-    async def async_emit_record(self, record, *args, **kwargs):
-        return await anyio.to_thread.run_sync(self.emit_record, record, *args, **kwargs)
+    async def async_emit_record(self, record: TestRecord) -> None:
+        return await anyio.to_thread.run_sync(self.emit_record, record)
 
     def end_session(self, session_passed: bool) -> None:
         """Finalizes the session and renames the file with the final status.
@@ -145,5 +147,5 @@ class DeveloperMarkdownExporter:
             logger.debug('bringup_report_finalized_and_renamed_to_final_name', final_name=final_name)
         except Exception as e:
             logger.error('failed_to_rename_bringup_report_e', e=e)
-    async def async_end_session(self, session_passed, *args, **kwargs):
-        return await anyio.to_thread.run_sync(self.end_session, session_passed, *args, **kwargs)
+    async def async_end_session(self, session_passed: bool) -> None:
+        return await anyio.to_thread.run_sync(self.end_session, session_passed)

@@ -27,13 +27,28 @@ class MqttClient:
 
         if self.cfg.tls:
             import ssl
-            self._client.tls_set(cert_reqs=ssl.CERT_NONE)
-            self._client.tls_insecure_set(True)
+            import os
+            
+            ca_certs = self.cfg.ca_cert_path if self.cfg.ca_cert_path and os.path.exists(self.cfg.ca_cert_path) else None
+            certfile = self.cfg.client_cert_path if self.cfg.client_cert_path and os.path.exists(self.cfg.client_cert_path) else None
+            keyfile = self.cfg.client_key_path if self.cfg.client_key_path and os.path.exists(self.cfg.client_key_path) else None
+            
+            if not ca_certs and os.path.exists("/etc/ssl/certs/ca-certificates.crt"):
+                ca_certs = "/etc/ssl/certs/ca-certificates.crt"
+
+            if self.cfg.tls_insecure:
+                self._client.tls_set(ca_certs=ca_certs, certfile=certfile, keyfile=keyfile, cert_reqs=ssl.CERT_NONE)
+                self._client.tls_insecure_set(True)
+            else:
+                self._client.tls_set(ca_certs=ca_certs, certfile=certfile, keyfile=keyfile, cert_reqs=ssl.CERT_REQUIRED)
+                self._client.tls_insecure_set(False)
 
         self._connected_event = threading.Event()
         self._subscribers = []
         self._sub_lock = threading.Lock()
         
+        import logging
+        self._client.enable_logger(logging.getLogger("paho.mqtt"))
         self._client.on_connect = self._on_connect
         self._client.on_disconnect = self._on_disconnect
         self._client.on_message = self._on_message
@@ -48,11 +63,11 @@ class MqttClient:
 
     def _on_disconnect(self, client, userdata, disconnect_flags, reason_code, properties):
         self._connected_event.clear()
-        logger.debug("mqtt_disconnected", reason_code=reason_code)
+        logger.warning("mqtt_disconnected", reason_code=reason_code)
 
     def _on_message(self, client, userdata, msg):
         payload = msg.payload
-        print(f"\n[MQTT Client] Received msg on {msg.topic}, len={len(payload)}")
+        logger.debug("mqtt_rx", topic=msg.topic, size=len(payload))
         with self._sub_lock:
             for q in self._subscribers:
                 try:
@@ -97,7 +112,7 @@ class MqttClient:
     async def async_disconnect(self) -> None:
         await anyio.to_thread.run_sync(self.disconnect)
 
-    def subscribe(self, maxsize: int = 1024) -> queue.Queue:
+    def subscribe(self, maxsize: int = 0) -> queue.Queue:
         q = queue.Queue(maxsize=maxsize)
         with self._sub_lock:
             self._subscribers.append(q)
@@ -108,23 +123,23 @@ class MqttClient:
             if q in self._subscribers:
                 self._subscribers.remove(q)
 
-    def write_line(self, line: str, sensitive: bool = False) -> None:
+    def write_line(self, line: str, sensitive: bool = False, retain: bool = False, qos: int = 1) -> None:
         if not self.is_connected:
             raise TransportConnectionError("MQTT is disconnected")
         if not sensitive:
-            logger.debug("mqtt_tx", topic=self.cfg.publish_topic, payload=line)
+            logger.debug("mqtt_tx", topic=self.cfg.publish_topic, payload=line, retain=retain)
         else:
-            logger.debug("mqtt_tx", topic=self.cfg.publish_topic, payload="********")
+            logger.debug("mqtt_tx", topic=self.cfg.publish_topic, payload="********", retain=retain)
         
-        info = self._client.publish(self.cfg.publish_topic, line.encode('utf-8'), qos=1)
+        info = self._client.publish(self.cfg.publish_topic, line.encode('utf-8'), qos=qos, retain=retain)
         info.wait_for_publish(timeout=2.0)
         if not info.is_published():
             raise TransportConnectionError("Failed to publish MQTT message")
 
-    def raw_write(self, data: bytes) -> None:
+    def raw_write(self, data: bytes, retain: bool = False, qos: int = 1) -> None:
         if not self.is_connected:
             raise TransportConnectionError("MQTT is disconnected")
-        info = self._client.publish(self.cfg.publish_topic, data, qos=1)
+        info = self._client.publish(self.cfg.publish_topic, data, qos=qos, retain=retain)
         info.wait_for_publish(timeout=2.0)
         if not info.is_published():
             raise TransportConnectionError("Failed to publish MQTT raw message")
@@ -155,7 +170,7 @@ class MqttClient:
         try:
             while time.perf_counter() < t_end:
                 try:
-                    wait_time = 0.5 if got_first else min(0.1, t_end - time.perf_counter())
+                    wait_time = 0.5 if got_first else max(0.005, min(0.1, t_end - time.perf_counter()))
                     chunk = q.get(timeout=wait_time)
                     stdout_chunks.append(chunk.decode('utf-8', errors='replace'))
                     got_first = True
@@ -180,12 +195,13 @@ class MqttClient:
             partial(self.safe_run, cmd, timeout_s=timeout_s, check_exit_code=check_exit_code, auto_retry=auto_retry, **kwargs)
         )
 
-    def publish_json(self, payload: dict) -> None:
+    def publish_json(self, payload: dict, retain: bool = False, qos: int = 1) -> None:
         """Fire-and-forget JSON publish."""
-        self.write_line(json.dumps(payload))
+        self.write_line(json.dumps(payload), retain=retain, qos=qos)
 
-    async def async_publish_json(self, payload: dict) -> None:
-        await anyio.to_thread.run_sync(self.publish_json, payload)
+    async def async_publish_json(self, payload: dict, retain: bool = False, qos: int = 1) -> None:
+        from functools import partial
+        await anyio.to_thread.run_sync(partial(self.publish_json, payload, retain=retain, qos=qos))
 
     def wait_for_event(self, event_code: str, timeout_s: float = 10.0) -> dict:
         """Waits for a specific JSON event from the subscribed topic."""
@@ -213,3 +229,12 @@ class MqttClient:
         return await anyio.to_thread.run_sync(
             partial(self.wait_for_event, event_code, timeout_s)
         )
+
+    def clear_retained_messages(self, topic: str) -> None:
+        if not self.is_connected:
+            raise TransportConnectionError("MQTT is disconnected")
+        info = self._client.publish(topic, b"", qos=1, retain=True)
+        info.wait_for_publish(timeout=2.0)
+        if not info.is_published():
+            raise TransportConnectionError(f"Failed to clear retained messages on {topic}")
+        logger.debug("mqtt_clear_retained", topic=topic)

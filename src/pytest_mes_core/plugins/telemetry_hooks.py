@@ -148,10 +148,20 @@ def mes_record(request: pytest.FixtureRequest, mes_env: StationEnvironment, tele
         rep_call = getattr(request.node, 'rep_call', None)
         if rep_setup and rep_setup.failed:
             record.passed = False
+            record.outcome = 'failed'
             short_err = str(rep_setup.longrepr).splitlines()[-1] if rep_setup.longrepr else 'Unknown Setup Error'
             record.error_message = f'SETUP FAILURE: {short_err}'
+        elif rep_setup and getattr(rep_setup, 'skipped', False):
+            record.passed = False
+            record.outcome = 'skipped'
+            record.error_message = f'SKIPPED: {rep_setup.longrepr[2] if isinstance(rep_setup.longrepr, tuple) else rep_setup.longrepr}'
+        elif rep_call and getattr(rep_call, 'skipped', False):
+            record.passed = False
+            record.outcome = 'skipped'
+            record.error_message = f'SKIPPED: {rep_call.longrepr[2] if isinstance(rep_call.longrepr, tuple) else rep_call.longrepr}'
         elif rep_call:
             record.passed = bool(rep_call.passed)
+            record.outcome = 'passed' if rep_call.passed else 'failed'
             if rep_call.failed:
                 full_trace = str(rep_call.longrepr)
                 short_err = full_trace.splitlines()[-1] if full_trace else 'Unknown Assertion Failure'

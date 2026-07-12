@@ -18,6 +18,7 @@ class OperatorReceiptExporter:
         self.base_log_dir = base_log_dir
         self.total_tests = 0
         self.failed_tests = 0
+        self.skipped_tests = 0
         self.start_time: Optional[float] = None
         self._context: Optional[StationContext] = None
 
@@ -34,8 +35,8 @@ class OperatorReceiptExporter:
         self._context = context
         self.start_time = time.perf_counter()
 
-    async def async_start_session(self, context, *args, **kwargs):
-        return await anyio.to_thread.run_sync(self.start_session, context, *args, **kwargs)
+    async def async_start_session(self, context: StationContext) -> None:
+        return await anyio.to_thread.run_sync(self.start_session, context)
 
     def emit_record(self, record: TestRecord) -> None:
         """Updates internal statistics based on the emitted test record.
@@ -44,11 +45,15 @@ class OperatorReceiptExporter:
             record: The test record to process.
         """
         self.total_tests += 1
-        if not record.passed:
+        if record.outcome == "skipped":
+            self.skipped_tests += 1
+        elif record.outcome == "failed":
+            self.failed_tests += 1
+        elif record.outcome == "unknown" and not record.passed:
             self.failed_tests += 1
 
-    async def async_emit_record(self, record, *args, **kwargs):
-        return await anyio.to_thread.run_sync(self.emit_record, record, *args, **kwargs)
+    async def async_emit_record(self, record: TestRecord) -> None:
+        return await anyio.to_thread.run_sync(self.emit_record, record)
 
     def end_session(self, session_passed: bool) -> None:
         """Finalizes the run and writes the receipt file.
@@ -72,9 +77,9 @@ class OperatorReceiptExporter:
         filepath = receipt_dir / filename
         duration = round(time.perf_counter() - self.start_time, 2) if self.start_time else 0.0
         hw_sn_line = f'PCB HW SN    : {hw_sn}\n' if hw_sn else ''
-        receipt_body = f'=== EOL TEST RECEIPT ===\nRun ID       : {run_id}\nStatus       : {status}\nJig ID       : {self._context.jig_id}\nOperator     : {self._context.operator_id}\nDUT Serial   : {serial}\n{hw_sn_line}Duration     : {duration} seconds\n------------------------\nTotal Tests  : {self.total_tests}\nFailed Tests : {self.failed_tests}\n========================\n'
+        receipt_body = f'=== EOL TEST RECEIPT ===\nRun ID       : {run_id}\nStatus       : {status}\nJig ID       : {self._context.jig_id}\nOperator     : {self._context.operator_id}\nDUT Serial   : {serial}\n{hw_sn_line}Duration     : {duration} seconds\n------------------------\nTotal Tests  : {self.total_tests}\nSkipped Tests : {self.skipped_tests}\nFailed Tests : {self.failed_tests}\n========================\n'
         with open(filepath, 'w', encoding='utf-8') as f:
             f.write(receipt_body)
-        logger.warning('generated_operator_receipt_name', name=filepath.name)
-    async def async_end_session(self, session_passed, *args, **kwargs):
-        return await anyio.to_thread.run_sync(self.end_session, session_passed, *args, **kwargs)
+        logger.info('generated_operator_receipt_name', name=filepath.name)
+    async def async_end_session(self, session_passed: bool) -> None:
+        return await anyio.to_thread.run_sync(self.end_session, session_passed)

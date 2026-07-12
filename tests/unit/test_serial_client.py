@@ -238,9 +238,11 @@ class TestWriteLine:
         assert written == b"echo hello\n"
 
     def test_write_line_raises_when_ser_none(self):
+        """Minor fix: write_line() must raise TransportConnectionError like
+        every other closed-port path in this file, not a bare RuntimeError."""
         client = _make_client()
         assert client.ser is None
-        with pytest.raises(RuntimeError, match="UART is closed"):
+        with pytest.raises(TransportConnectionError, match="UART is closed"):
             client.write_line("cmd")
 
     def test_write_line_truncates_log_for_long_commands(self):
@@ -560,6 +562,59 @@ class TestRawIO:
         # Should return at most the partial bytes (timeout is 5 s but test feeds early)
         assert result.startswith(b"partial") or len(result) <= 100
 
+    def test_default_raw_queue_is_bounded_to_2048(self):
+        """Fix 3: the default raw queue must be bounded, not an unbounded permanent
+        subscriber that leaks memory over long chatty-UART sessions."""
+        client = _make_client()
+        assert client._default_raw_queue.maxsize == 2048
+
+    def test_default_raw_queue_drops_oldest_on_overflow(self):
+        """Fix 3: publishing past the default queue's capacity must evict the
+        oldest chunk (drop-oldest), not silently drop the newest arrival —
+        FSM probes via raw_read_chunk() want the freshest data."""
+        client = _make_client()
+        mock_ser = _attach_mock_serial(client)
+
+        # Feed 2049 distinct single-byte chunks through the RX daemon's publish
+        # loop directly (bypassing the thread/timing complexity of a real read
+        # loop): each call simulates one in_waiting/read cycle.
+        total = 2049
+        chunks = [bytes([i % 256]) + f"#{i}".encode() for i in range(total)]
+        call_count = {"n": 0}
+
+        def in_waiting_side_effect():
+            n = call_count["n"]
+            if n < total:
+                return len(chunks[n])
+            return 0
+
+        def read_side_effect(_n):
+            n = call_count["n"]
+            call_count["n"] += 1
+            return chunks[n]
+
+        type(mock_ser).in_waiting = PropertyMock(side_effect=in_waiting_side_effect)
+        mock_ser.read.side_effect = read_side_effect
+
+        client.start_rx_daemon()
+        deadline = time.perf_counter() + 5.0
+        while call_count["n"] < total and time.perf_counter() < deadline:
+            time.sleep(0.01)
+        # Allow the last publish to land.
+        time.sleep(0.05)
+        client.stop_rx_daemon()
+
+        assert client._default_raw_queue.qsize() <= 2048
+
+        # The very first chunk (sentinel) must have been evicted; the queue
+        # must hold the newest chunk.
+        drained = []
+        while not client._default_raw_queue.empty():
+            drained.append(client._default_raw_queue.get_nowait())
+
+        assert chunks[0] not in drained
+        assert chunks[-1] in drained
+
 
 # ===========================================================================
 # raw_set_timeout / read_clean_stream / live_buffer
@@ -661,6 +716,18 @@ class TestConnect:
         with patch("serial.Serial", side_effect=serial.SerialException("no such device")):
             with pytest.raises(TransportConnectionError, match="Failed to bind"):
                 client.connect()
+
+    def test_connect_is_idempotent_when_already_open(self):
+        """Fix 5: connect() must no-op if the port is already open — a second
+        serial.Serial(..., exclusive=True) open would otherwise fail as busy
+        and leak the old fd (e.g. when FailoverTransport.connect() unconditionally
+        calls fallback.connect() while the port is already bound)."""
+        client = _make_client()
+        _attach_mock_serial(client)
+        assert client.is_connected is True
+        with patch("serial.Serial") as mock_serial_cls:
+            client.connect()
+            mock_serial_cls.assert_not_called()
 
 
 # ===========================================================================

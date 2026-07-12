@@ -63,8 +63,12 @@ class AsyncHardwareProfiler:
                 try:
                     # Fast-poll the thermal zone via FSM transport
                     res = await self.dut.async_safe_run("cat /sys/class/thermal/thermal_zone0/temp", timeout_s=1.0, check_exit_code=False)
-                    if res.ok and res.stdout.strip().isdigit():
-                        self.metrics["temp_c"].append(round(int(res.stdout.strip()) / 1000.0, 2))
+                    raw = res.stdout.strip()
+                    if res.ok and raw:
+                        try:
+                            self.metrics["temp_c"].append(round(int(raw) / 1000.0, 2))
+                        except ValueError:
+                            pass  # non-numeric console noise — skip the sample
                 except Exception as e:
                     logger.debug("dut_poll_error", error=str(e))
 

@@ -63,7 +63,6 @@ class LiveProcess:
                 _stdout_chunks.append(chunk)
             proc.wait(timeout=self.timeout_s)
             self.returncode = proc.returncode
-            self.stdout = ''.join(_stdout_chunks)
         except subprocess.TimeoutExpired:
             self.logger.critical(f'\n[OS] FATAL: Process hung for >{self.timeout_s}s! Executing hard kill.')
             proc.kill()
@@ -85,12 +84,13 @@ class LiveProcess:
             if proc.poll() is None:
                 proc.kill()
                 proc.wait()
+            self.stdout = ''.join(_stdout_chunks)
             self.duration_s = round(time.perf_counter() - t0, 3)
             self.executed = True
         return self
 
-    async def async_execute(self, *args, **kwargs):
-        return await anyio.to_thread.run_sync(self.execute, *args, **kwargs)
+    async def async_execute(self) -> 'LiveProcess':
+        return await anyio.to_thread.run_sync(self.execute)
 
     def export_log(self, export_dir: Path) -> Path:
         """Dumps the raw unedited output to a discrete text file for CI/CD artifacts.
@@ -118,8 +118,8 @@ class LiveProcess:
         self.logger.debug(f'[OS] Process trace exported to {filepath}')
         return filepath
 
-    async def async_export_log(self, export_dir, *args, **kwargs):
-        return await anyio.to_thread.run_sync(self.export_log, export_dir, *args, **kwargs)
+    async def async_export_log(self, export_dir: Path) -> Path:
+        return await anyio.to_thread.run_sync(self.export_log, export_dir)
 
     def to_dict(self) -> dict:
         """Serializes the telemetry for injection into Pytest JSON reports.

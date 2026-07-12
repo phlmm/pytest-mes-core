@@ -27,6 +27,25 @@ class UuuTeziProvisioner(BaseProvisioner):
         self.flash_timeout_s = flash_timeout_s
         self.usb_path = usb_path
 
+    @staticmethod
+    def _invoke_release_recovery(fsm: Any) -> None:
+        """Bridge to the FSM's async release_recovery from this sync context.
+
+        provision() may run inside an anyio worker thread (async_provision path)
+        or in a plain sync context; handle both. Sync callables (test mocks,
+        custom FSMs) are invoked directly.
+        """
+        import inspect
+        import anyio
+        fn = fsm.release_recovery
+        if inspect.iscoroutinefunction(fn):
+            try:
+                anyio.from_thread.run(fn)      # inside an anyio worker thread
+            except RuntimeError:
+                anyio.run(fn)                  # plain sync caller, no loop
+        else:
+            fn()
+
     def _is_device_in_recovery(self) -> bool:
         """Polls the Linux USB tree to verify the SoC BootROM is visible.
 
@@ -107,7 +126,6 @@ class UuuTeziProvisioner(BaseProvisioner):
         logger.info('waiting_up_to_wait_for_recovery_s_s_for_dut_to_enter_recovery_mode_target_str', wait_for_recovery_s=self.wait_for_recovery_s, target_str=target_str)
         t_wait_start = time.perf_counter()
         device_found = False
-        import anyio
         while time.perf_counter() - t_wait_start < self.wait_for_recovery_s:
             logger.debug('[TEZI] Polling USB bus for NXP BootROM...')
             if self._is_device_in_recovery():
@@ -153,7 +171,7 @@ class UuuTeziProvisioner(BaseProvisioner):
             # Delegate strap-release to the FSM's RecoveryStrategy.  GPIO-automated
             # stations are a no-op; manual-jumper stations show the operator prompt.
             if fsm is not None:
-                fsm.release_recovery()
+                self._invoke_release_recovery(fsm)
         except ProcessTimeoutError:
             raise ProvisioningError(f'uuu execution timed out after {self.flash_timeout_s}s! USB EMI reset?')
         except ProcessExecutionError as e:
@@ -215,6 +233,16 @@ class UuuTeziProvisioner(BaseProvisioner):
                 _media_check_verified = False
                 _media_check_deadline = 0.0
                 _shell_fallback_deadline = time.perf_counter() + 15.0
+
+                def _report_flash_success() -> bool:
+                    """Advances the FSM (if any) and logs the shared success body."""
+                    logger.info('[TEZI] Installation Success Signature detected! TEZI flash complete.')
+                    if fsm is not None:
+                        from pytest_mes_core.state_machine import DutState
+                        fsm.machine.set_state(DutState.ENERGIZED)
+                        logger.info('fsm_state_advanced_recovery_to_energized')
+                    return True
+
                 # To clear any stale data (including data buffered in the USB-to-serial chip/OS
                 # which doesn't show up until we send \r\n), we perform an interactive hardware flush.
                 try:
@@ -266,15 +294,19 @@ class UuuTeziProvisioner(BaseProvisioner):
                                 except Exception as e:
                                     logger.error('[TEZI] TX probe write failed', error=str(e))
                                     tail_sent = True  # skip tail, rely on RX-only fallback
-                        elif event.prompt_type in ("success_installed", "success_rebooting", "success_prompt", "post_install_login"):
+                        elif event.prompt_type in ("success_installed", "success_rebooting", "post_install_login"):
+                            # These three signatures are conclusive proof of a successful
+                            # flash whenever they appear — they cannot occur pre-install
+                            # (the stream was flushed at open()) — so they are trusted
+                            # even if seen before tail_sent is set.
+                            return _report_flash_success()
+                        elif event.prompt_type == "success_prompt":
                             if not tail_sent:
+                                # Generic caller-supplied pattern (default "login:") — only
+                                # trusted once we're actively tailing tezi.log, otherwise a
+                                # stray pre-install login prompt could be mistaken for success.
                                 continue
-                            logger.info('[TEZI] Installation Success Signature detected! TEZI flash complete.')
-                            if fsm is not None:
-                                from pytest_mes_core.state_machine import DutState
-                                fsm.state = DutState.ENERGIZED
-                                logger.info('fsm_state_advanced_recovery_to_energized')
-                            return True
+                            return _report_flash_success()
 
                     # Step 2: Watch for the TX probe echo and media check in data events.
                     if isinstance(event, BootDataReceived):

@@ -33,9 +33,17 @@ class BareMetalStateMachine:
       loop is never blocked during parallel jig operations.
     """
 
-    def __init__(self, psu: Any = None, swd_transport: Any = None):
+    def __init__(
+        self,
+        psu: Any = None,
+        swd_transport: Any = None,
+        ota_flag_addr: Optional[int] = None,
+        ota_flag_value: Optional[bytes] = None,
+    ):
         self.psu = psu
         self.swd = swd_transport
+        self.ota_flag_addr = ota_flag_addr
+        self.ota_flag_value = ota_flag_value
 
         self.machine = AsyncMachine(
             model=self,
@@ -150,12 +158,29 @@ class BareMetalStateMachine:
     async def _hw_trigger_ota(self, event: Any) -> None:
         """Sets an OTA flag in RAM/RTC register and resets into the Bootloader.
 
-        The magic address and value must be configured in the application
-        firmware (e.g., a known SRAM address or RTC Backup Register that the
-        MCU Bootloader checks on reset).
+        If ``ota_flag_addr``/``ota_flag_value`` were supplied at construction
+        time, this actually writes that magic value to the given address via
+        the SWD transport's ``write_memory()`` before resetting, so the MCU
+        Bootloader can detect it on the next reset. If they are not
+        configured, no flag is written here — it is the caller's
+        responsibility to have set it via some other means (e.g. firmware
+        pre-arming its own flag) before triggering this transition.
         """
         import anyio
         logger.info("[MCU] Rebooting into OTA Bootloader mode...")
         if self.swd:
+            if (
+                self.ota_flag_addr is not None
+                and self.ota_flag_value is not None
+                and hasattr(self.swd, "write_memory")
+            ):
+                logger.debug(
+                    "[MCU] Writing OTA flag",
+                    addr=hex(self.ota_flag_addr),
+                    value=self.ota_flag_value,
+                )
+                await anyio.to_thread.run_sync(
+                    self.swd.write_memory, self.ota_flag_addr, self.ota_flag_value
+                )
             await anyio.to_thread.run_sync(self.swd.reset)
 

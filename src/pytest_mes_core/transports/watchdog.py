@@ -29,6 +29,7 @@ class UartKernelWatchdog:
         self._stop_event = None
         self._panic_callbacks: List[Callable[[], None]] = []
         self._muted = False  # suppresses panic detection during known-noisy windows
+        self._t0: float = 0.0  # monitor loop start time (monotonic), for elapsed_s
 
     def start(self) -> None:
         """Spawns the background watchdog task to monitor the serial stream."""
@@ -92,6 +93,8 @@ class UartKernelWatchdog:
 
     async def _monitor_loop(self) -> None:
         import queue
+        import time
+        self._t0 = time.monotonic()
         while not self._stop_event.is_set():
             if not self.serial_client.is_connected:
                 await anyio.sleep(0.5)
@@ -126,9 +129,11 @@ class UartKernelWatchdog:
                                 except Exception as cb_exc:
                                     logger.error('[Watchdog] Panic callback raised: %s', cb_exc)
 
-                            # Dispatch Pydantic Event via Pluggy EventBus
-                            import time
-                            bus.emit_uart_event(PanicDetected(elapsed_s=time.time(), raw_output=self._panic_msg))
+                            # Dispatch Pydantic Event via Pluggy EventBus. elapsed_s is
+                            # seconds since this monitor loop started (monotonic clock),
+                            # not wall-clock time — matches the field's name/semantics.
+                            elapsed_s = round(time.monotonic() - self._t0, 3)
+                            bus.emit_uart_event(PanicDetected(elapsed_s=elapsed_s, raw_output=self._panic_msg))
                             break
                     except queue.Empty:
                         await anyio.sleep(0.05)

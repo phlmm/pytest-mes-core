@@ -2,9 +2,25 @@ import anyio
 # src/pytest_mes_core/telemetry/base.py
 import time
 from datetime import datetime, timezone
-from typing import Dict, Any, Protocol, Optional, Union
+from typing import Dict, Any, Protocol, Optional, Union, Literal
 from pydantic import BaseModel, Field, ConfigDict, model_validator
 from pytest_mes_core.protocols.base import ValidatorResult
+
+
+def _coerce_json_safe(value: Any) -> Any:
+    """Recursively coerce a value into something json-serializable.
+
+    Keeps primitives (str/int/float/bool/None) as-is, recurses into
+    lists/dicts to catch nested non-serializable objects, and stringifies
+    anything else (Exceptions, sockets, arbitrary objects, etc.).
+    """
+    if isinstance(value, dict):
+        return {k: _coerce_json_safe(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_coerce_json_safe(v) for v in value]
+    if isinstance(value, (str, int, float, bool, type(None))):
+        return value
+    return str(value)
 
 # ==========================================
 # DOMAIN EXCEPTIONS
@@ -58,6 +74,7 @@ class TestRecord(BaseModel):
 
     test_name: str
     passed: bool = False
+    outcome: Literal["passed", "failed", "skipped", "unknown"] = "unknown"
     iteration: int = 1
     duration_s: float = 0.0
     error_message: Optional[str] = None
@@ -70,21 +87,26 @@ class TestRecord(BaseModel):
     context: Dict[str, Any] = Field(default_factory=dict)
     timestamp_utc: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
+    def sanitize(self) -> None:
+        """Coerce non-serializable objects in context/metrics to strings.
+
+        Must be called immediately before serialization: context and metrics
+        are mutated freely after construction (fixtures, absorb(), tests), so
+        the construction-time validator alone cannot guarantee a dumpable
+        record.
+        """
+        self.context = {k: _coerce_json_safe(v) for k, v in self.context.items()}
+        self.metrics = {k: _coerce_json_safe(v) for k, v in self.metrics.items()}
+
     @model_validator(mode='after')
     def _sanitize_context(self) -> 'TestRecord':
         """
-        Safety net: Stringifies any non-standard Python objects in the context dictionary
-        to prevent Pydantic serialization crashes during the JSONL dump.
+        Safety net: Stringifies any non-standard Python objects in the context/
+        metrics dictionaries to prevent Pydantic serialization crashes during
+        the JSONL dump. Also re-run via sanitize() immediately before
+        serialization, since both dicts are mutated freely post-construction.
         """
-        safe_context = {}
-        for k, v in self.context.items():
-            # Allow primitives and basic structures
-            if isinstance(v, (str, int, float, bool, type(None), list, dict)):
-                safe_context[k] = v
-            else:
-                # Force complex objects (Exceptions, Sockets, etc.) to strings
-                safe_context[k] = str(v)
-        self.context = safe_context
+        self.sanitize()
         return self
 
     def absorb(self, validator_res: ValidatorResult, prefix: str = "") -> None:
@@ -101,8 +123,8 @@ class TestRecord(BaseModel):
         if not validator_res.passed and validator_res.error_msg:
             self.context[f"{pfx}error"] = validator_res.error_msg
 
-    async def async_absorb(self, validator_res, prefix, *args, **kwargs):
-        return await anyio.to_thread.run_sync(self.absorb, validator_res, prefix, *args, **kwargs)
+    async def async_absorb(self, validator_res: ValidatorResult, prefix: str = "") -> None:
+        return await anyio.to_thread.run_sync(self.absorb, validator_res, prefix)
 
 # ==========================================
 # EXPORTER PROTOCOL
@@ -121,8 +143,7 @@ class TelemetryExporter(Protocol):
         """
         ...
 
-    async def async_start_session(self, context, *args, **kwargs):
-        return await anyio.to_thread.run_sync(self.start_session, context, *args, **kwargs)
+    async def async_start_session(self, context: StationContext) -> None: ...
 
     def emit_record(self, record: TestRecord) -> None:
         """
@@ -131,8 +152,7 @@ class TelemetryExporter(Protocol):
         """
         ...
 
-    async def async_emit_record(self, record, *args, **kwargs):
-        return await anyio.to_thread.run_sync(self.emit_record, record, *args, **kwargs)
+    async def async_emit_record(self, record: TestRecord) -> None: ...
 
     def end_session(self, session_passed: bool) -> None:
         """
@@ -141,5 +161,4 @@ class TelemetryExporter(Protocol):
         """
         ...
 
-    async def async_end_session(self, session_passed, *args, **kwargs):
-        return await anyio.to_thread.run_sync(self.end_session, session_passed, *args, **kwargs)
+    async def async_end_session(self, session_passed: bool) -> None: ...

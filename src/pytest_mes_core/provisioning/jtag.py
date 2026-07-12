@@ -79,8 +79,8 @@ class OpenOcdRpcProvisioner(BaseProvisioner):
             raise ProvisioningError(err_msg)
         return True
 
-    async def async_provision(self, image_path, *args, **kwargs):
-        return await anyio.to_thread.run_sync(self.provision, image_path, *args, **kwargs)
+    async def async_provision(self, image_path: Path) -> bool:
+        return await anyio.to_thread.run_sync(self.provision, image_path)
 
     def _evaluate_rpc_response(self, stdout: str) -> None:
         """Parses the daemon's text stream to map cryptic C-errors to Domain Exceptions.

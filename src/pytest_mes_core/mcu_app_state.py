@@ -52,12 +52,11 @@ from __future__ import annotations
 
 import enum
 import time
-from typing import Any, Dict, List, Optional, Set
-import threading
+from typing import Any, Dict, List, Optional
 
 import structlog
 from transitions import MachineError
-from transitions.extensions.asyncio import AsyncMachine
+from transitions.extensions import LockedMachine as Machine
 
 logger = structlog.get_logger("mes_core.mcu_app_state")
 
@@ -84,13 +83,16 @@ class McuAppStateMachine:
     def __init__(self, initial_state: str = McuAppState.OFFLINE.value) -> None:
         self.logger = logger.bind(fsm="app")
         self._state_timestamps: Dict[str, float] = {}
-        self._async_waiters: Dict[str, Set[Any]] = {}
+        self._state_durations: Dict[str, float] = {}
 
         # Collect base + extension states
         base_states = [s.value for s in McuAppState]
         all_states = base_states + self.extra_states()
 
-        self.machine = AsyncMachine(
+        # LockedMachine: feed_event() is fed from foreign threads (MQTT/UDP
+        # callbacks per this module's docstring) — a plain Machine's internal
+        # transition bookkeeping is not thread-safe against concurrent triggers.
+        self.machine = Machine(
             model=self,
             states=all_states,
             initial=initial_state,
@@ -98,8 +100,6 @@ class McuAppStateMachine:
             auto_transitions=False,
             after_state_change="_record_timestamp",
         )
-        for state in self.machine.states.values():
-            state.on_enter.append('_notify_waiters')
 
         # Base transitions (linear boot chain)
         base_transitions = [
@@ -160,31 +160,33 @@ class McuAppStateMachine:
     # Waiting for states (async only)
     # ------------------------------------------------------------------
 
-    async def async_wait_for(self, target_state: str, timeout_s: float = 30.0) -> bool:
-        """Async variant of ``wait_for``."""
+    async def async_wait_for(
+        self, target_state: str, timeout_s: float = 30.0, poll_interval_s: float = 0.05
+    ) -> bool:
+        """Wait for ``target_state`` to have been entered.
+
+        Implemented as a poll against the recorded entry timestamps
+        (``_state_timestamps``, stamped by ``_record_timestamp`` on every
+        entry) rather than an event/waiter registration. Events are fed from
+        foreign threads (MQTT/UDP callbacks per this module's docstring):
+        ``anyio.Event.set()`` is not thread-safe when called off the event
+        loop thread, and a waiter-registration scheme has a TOCTOU window
+        between checking ``self.state`` and registering the waiter. Polling
+        only ever reads shared state, so it is thread-safe by construction
+        and also catches states that were entered and exited transiently
+        between polls (e.g. a fast boot chain) via the timestamp check.
+        """
         import anyio
+        t_start = time.monotonic()
         if self.state == target_state:
             return True
 
-        event = anyio.Event()
-        self._async_waiters.setdefault(target_state, set()).add(event)
-
-        try:
-            with anyio.fail_after(timeout_s):
-                await event.wait()
-            return True
-        except TimeoutError:
-            if target_state in self._async_waiters and event in self._async_waiters[target_state]:
-                self._async_waiters[target_state].remove(event)
-            return False
-
-    async def _notify_waiters(self, event_data: Any) -> None:
-        state = self.state
-            
-        if state in self._async_waiters:
-            for ev in self._async_waiters[state]:
-                ev.set()
-            self._async_waiters[state].clear()
+        with anyio.move_on_after(timeout_s):
+            while True:
+                if self.state == target_state or self._state_timestamps.get(target_state, -1.0) >= t_start:
+                    return True
+                await anyio.sleep(poll_interval_s)
+        return False
 
     # ------------------------------------------------------------------
     # Introspection
@@ -192,19 +194,41 @@ class McuAppStateMachine:
 
     @property
     def state_durations(self) -> Dict[str, float]:
-        """Time spent in each state since the FSM was created."""
-        return dict(self._state_timestamps)
+        """Time spent in each state since the FSM was created.
+
+        Returns accumulated durations for every state that has been
+        *exited* at least once, plus the running time accrued so far in the
+        current state (which has no exit yet to account for it).
+        """
+        durations = dict(self._state_durations)
+        current_entry = self._state_timestamps.get(self.state)
+        if current_entry is not None:
+            durations[self.state] = durations.get(self.state, 0.0) + (time.monotonic() - current_entry)
+        return durations
 
     def _record_timestamp(self, event: Any) -> None:
         """After-state-change callback: log the transition and record timing."""
-        self._state_timestamps[self.state] = time.monotonic()
-        trigger_name = getattr(event, "event", None) if hasattr(event, "event") else str(event)
+        now = time.monotonic()
+
+        old_state = event.transition.source
+        old_entry = self._state_timestamps.get(old_state)
+        if old_entry is not None:
+            self._state_durations[old_state] = self._state_durations.get(old_state, 0.0) + (now - old_entry)
+
+        self._state_timestamps[self.state] = now
+
+        # Extract the name from the transition event object if present
+        if hasattr(event, "event") and hasattr(event.event, "name"):
+            trigger_name = event.event.name
+        else:
+            trigger_name = str(getattr(event, "event", event))
+
         self.logger.info(
             "state_transition",
             new_state=self.state,
             trigger=trigger_name,
         )
-        
+
         from pytest_mes_core.events import bus, StateChanged
         ev = StateChanged(
             fsm_name=self.__class__.__name__,

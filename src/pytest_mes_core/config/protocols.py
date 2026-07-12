@@ -1,3 +1,4 @@
+import uuid
 from typing import Dict, List, Literal, Optional
 from pydantic import Field, SecretStr
 from pytest_mes_core.config.base import BaseHardwareConfig, TimeDaemonType
@@ -102,6 +103,7 @@ class HostSerialConfig(BaseHardwareConfig):
     port: str
     baudrate: int = Field(default=115200, gt=0)
     timeout_s: float = Field(default=1.0, gt=0)
+    os_shell_prompt: str = Field(default="~#", description="Default shell prompt safe_run waits for when expected_prompt is not passed.")
 
 class SysfsTargetConfig(BaseHardwareConfig):
     path: str
@@ -146,9 +148,13 @@ class HostMqttConfig(BaseHardwareConfig):
     broker_ip: str
     port: int = Field(default=1883, gt=0, le=65535)
     tls: bool = Field(default=False)
+    ca_cert_path: Optional[str] = None
+    client_cert_path: Optional[str] = None
+    client_key_path: Optional[str] = None
+    tls_insecure: bool = Field(default=True, description="Skip broker certificate verification. Default True preserves existing factory behavior; set False (with ca_cert_path) to verify.")
     username: Optional[str] = None
     password: Optional[SecretStr] = None
-    client_id: str = Field(default="pytest-mes-core")
+    client_id: str = Field(default_factory=lambda: f"pytest-mes-core-{uuid.uuid4().hex[:8]}")
     publish_topic: str = Field(default="mes/c2/cmd")
     subscribe_topic: str = Field(default="mes/c2/resp")
     timeout_s: float = Field(default=10.0, gt=0)

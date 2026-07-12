@@ -32,6 +32,13 @@ class BootDataReceived(UartEvent):
     """A complete line of boot output was received (for debug logging)."""
     line: str
 
+class IdleTick(UartEvent):
+    """Emitted by UartEventStream after ~1s of RX silence so consumers can
+    run timeout logic.  Purely local flow control -- never dispatched to the
+    EventBus (it is not telemetry, just a heartbeat for the caller's own
+    deadline checks when the UART itself is producing no events at all)."""
+    pass
+
 class StateChanged(BaseModel):
     """Fired when an FSM transitions from one state to another."""
     model_config = ConfigDict(frozen=True)

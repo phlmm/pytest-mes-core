@@ -37,7 +37,7 @@ class EphemeralSerialClient:
         self._stop_rx_event = threading.Event()
         self._rx_thread = None
 
-        self._default_raw_queue = queue.Queue()
+        self._default_raw_queue = queue.Queue(maxsize=2048)
         self._subscribers.append(self._default_raw_queue)
 
         self.parser = UartStreamParser()
@@ -55,7 +55,7 @@ class EphemeralSerialClient:
         if self._rx_thread and self._rx_thread.is_alive():
             self._rx_thread.join(timeout=1.0)
             
-    def subscribe(self, maxsize=1024) -> queue.Queue:
+    def subscribe(self, maxsize: int = 0) -> queue.Queue:
         q = queue.Queue(maxsize=maxsize)
         with self._sub_lock:
             self._subscribers.append(q)
@@ -81,7 +81,18 @@ class EphemeralSerialClient:
                                     try:
                                         q.put_nowait(chunk)
                                     except queue.Full:
-                                        pass
+                                        if q is self._default_raw_queue:
+                                            # Drop-oldest: the default queue is a permanent
+                                            # subscriber for occasional FSM probes, which want
+                                            # the freshest bytes, not whatever arrived first.
+                                            try:
+                                                q.get_nowait()
+                                            except queue.Empty:
+                                                pass
+                                            try:
+                                                q.put_nowait(chunk)
+                                            except queue.Full:
+                                                pass
                     if not chunk:
                         time.sleep(0.01)
                 except Exception:
@@ -90,6 +101,8 @@ class EphemeralSerialClient:
                 time.sleep(0.05)
 
     def connect(self) -> None:
+        if self.is_connected:
+            return
         try:
             self.ser = serial.Serial(port=self.cfg.port, baudrate=self.cfg.baudrate, timeout=0.1, exclusive=True)
             self.ser.reset_output_buffer()
@@ -242,7 +255,7 @@ class EphemeralSerialClient:
 
     def write_line(self, cmd: str, sensitive: bool=False) -> None:
         if self.ser is None:
-            raise RuntimeError('Cannot write while UART is closed.')
+            raise TransportConnectionError('Cannot write while UART is closed.')
         with self._tx_lock:
             if sensitive:
                 logger.debug("[UART] TX -> '********'")
@@ -259,7 +272,8 @@ class EphemeralSerialClient:
                 raise TransportConnectionError(f'UART write failed: {e}')
 
     def safe_run(self, cmd: str, timeout_s: float=30.0, check_exit_code: bool=False, auto_retry: bool=False, **kwargs: Any) -> CommandResult:
-        expected_prompt = kwargs.get('expected_prompt', getattr(self.cfg, 'os_shell_prompt', '~#'))
+        expected_prompt = kwargs.get('expected_prompt', self.cfg.os_shell_prompt)
+        sensitive = bool(kwargs.get('sensitive', False))
         if not self.is_connected or self.ser is None:
             raise TransportConnectionError('Serial port is closed.')
         with self._tx_lock:
@@ -292,7 +306,7 @@ class EphemeralSerialClient:
             except TransportTimeoutError:
                 pass
             self.flush_buffers()
-            self.write_line(injected_cmd)
+            self.write_line(injected_cmd, sensitive=sensitive)
             try:
                 raw_output = self.expect(expected_prompt, timeout_s)
                 duration = round(time.perf_counter() - t0, 3)
@@ -332,7 +346,7 @@ class EphemeralSerialClient:
                 return result
             except TransportTimeoutError as e:
                 duration = round(time.perf_counter() - t0, 3)
-                logger.warning('execution_timed_out_after_timeout_s_s_cmd', timeout_s=timeout_s, cmd=cmd)
+                logger.warning('execution_timed_out_after_timeout_s_s_cmd', timeout_s=timeout_s, cmd='********' if sensitive else cmd)
                 result = CommandResult(command=cmd, stdout=self.live_buffer, stderr=str(e), exited=-1, ok=False, duration_s=duration)
                 if check_exit_code:
                     raise RuntimeError(f"UART Command '{cmd}' timed out after {timeout_s}s")

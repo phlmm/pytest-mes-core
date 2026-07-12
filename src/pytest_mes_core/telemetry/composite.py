@@ -28,8 +28,8 @@ class CompositeTelemetryExporter:
         for exporter in self.exporters:
             exporter.start_session(context)
 
-    async def async_start_session(self, context, *args, **kwargs):
-        return await anyio.to_thread.run_sync(self.start_session, context, *args, **kwargs)
+    async def async_start_session(self, context: StationContext) -> None:
+        return await anyio.to_thread.run_sync(self.start_session, context)
 
     def emit_record(self, record: TestRecord) -> None:
         """Forwards the record to all registered exporters.
@@ -45,13 +45,13 @@ class CompositeTelemetryExporter:
             try:
                 exporter.emit_record(record)
             except Exception as e:
-                logger.error('router_failed_to_emit_to_name_e', __name__=type(exporter).__name__, e=e)
+                logger.error('router_failed_to_emit_to_name_e', exporter=type(exporter).__name__, e=e)
                 errors.append(str(e))
         if errors:
             raise TelemetryDeliveryError(f'Composite router failed to deliver payload: {errors}')
 
-    async def async_emit_record(self, record, *args, **kwargs):
-        return await anyio.to_thread.run_sync(self.emit_record, record, *args, **kwargs)
+    async def async_emit_record(self, record: TestRecord) -> None:
+        return await anyio.to_thread.run_sync(self.emit_record, record)
 
     def end_session(self, session_passed: bool) -> None:
         """Finalizes the session on all registered exporters.
@@ -67,9 +67,9 @@ class CompositeTelemetryExporter:
             try:
                 exporter.end_session(session_passed)
             except Exception as e:
-                logger.error('exporter_name_failed_teardown_e', __name__=type(exporter).__name__, e=e)
+                logger.error('exporter_name_failed_teardown_e', exporter=type(exporter).__name__, e=e)
                 errors.append(str(e))
         if errors:
             raise TelemetryDeliveryError(f'Composite router failed during teardown: {errors}')
-    async def async_end_session(self, session_passed, *args, **kwargs):
-        return await anyio.to_thread.run_sync(self.end_session, session_passed, *args, **kwargs)
+    async def async_end_session(self, session_passed: bool) -> None:
+        return await anyio.to_thread.run_sync(self.end_session, session_passed)

@@ -168,10 +168,14 @@ class DutTransport(Protocol):
         ...
 
     def expect(self, pattern: str, timeout_s: float = 5.0, blast_char: str = '', active_redraw: bool = True) -> str:
-        """Wait for a regex pattern to appear on the stream."""
+        """Wait for ``pattern`` to appear as a plain substring on the stream.
+
+        Note: despite the parameter name, implementations perform plain
+        substring matching, not regex matching.
+        """
         ...
 
     async def async_expect(self, pattern: str, timeout_s: float = 5.0, blast_char: str = '', active_redraw: bool = True) -> str:
-        """Async variant of expect."""
+        """Async variant of expect. Also plain substring matching, not regex."""
         ...
 

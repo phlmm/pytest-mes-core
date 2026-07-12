@@ -343,3 +343,99 @@ def test_tezi_provision_media_check_ignores_command_echo_success(mock_is_device,
         assert res is True
 
 
+@patch("pytest_mes_core.provisioning.tezi_uuu.LiveProcess")
+@patch.object(UuuTeziProvisioner, "_is_device_in_recovery")
+def test_tezi_provision_success_installed_before_tail_sent_is_trusted(mock_is_device, mock_live_process, tmp_path):
+    """Fix 9: 'success_installed' / 'success_rebooting' / 'post_install_login'
+    are conclusive whenever they appear -- they must not be discarded just
+    because no TEZI shell prompt was ever seen (tail_sent still False)."""
+    mock_is_device.return_value = True
+    payload_dir = tmp_path / "tezi"
+    payload_dir.mkdir()
+    (payload_dir / "uuu.auto").touch()
+
+    mock_proc = MagicMock()
+    mock_proc.execute.return_value = MagicMock(
+        returncode=0,
+        stdout="100%] Done",
+        duration_s=1.0
+    )
+    mock_live_process.return_value = mock_proc
+
+    from pytest_mes_core.events import PromptDetected
+    # No tezi_shell_* prompt ever arrives -- tail_sent stays False the whole
+    # time -- yet "success_installed" must still be trusted immediately.
+    events = [
+        PromptDetected(prompt_type="success_installed", elapsed_s=0.1),
+    ]
+
+    with patch("pytest_mes_core.state_machine.UartEventStream") as mock_stream_cls:
+        mock_stream = MagicMock()
+        mock_stream.open.return_value = events
+        mock_stream_cls.return_value = mock_stream
+
+        serial_client = MagicMock()
+        serial_client.is_connected = False
+
+        fsm = MagicMock()
+        fsm.machine = MagicMock()
+
+        provisioner = UuuTeziProvisioner(usb_path="1:1")
+        res = provisioner.provision(image_path=payload_dir, serial_client=serial_client, fsm=fsm)
+
+        assert res is True
+        fsm.machine.set_state.assert_called_once()
+
+
+@patch("pytest_mes_core.provisioning.tezi_uuu.LiveProcess")
+@patch.object(UuuTeziProvisioner, "_is_device_in_recovery")
+def test_tezi_provision_silent_uart_reaches_shell_fallback_via_idle_tick(mock_is_device, mock_live_process, tmp_path, capsys):
+    """Fix 8: a totally silent UART (e.g. broken TX wire) must not starve the
+    15 s shell-fallback / deadline checks -- UartEventStream's IdleTick
+    heartbeat must keep the consumer loop iterating even without real bytes.
+
+    Uses the REAL UartEventStream (not a mock) over a stub serial whose
+    subscribe() queue never receives anything, with time.perf_counter
+    accelerated 50x so the test doesn't have to sleep for real seconds.
+    """
+    import time
+    import queue as queue_module
+
+    mock_is_device.return_value = True
+    payload_dir = tmp_path / "tezi"
+    payload_dir.mkdir()
+    (payload_dir / "uuu.auto").touch()
+
+    mock_proc = MagicMock()
+    mock_proc.execute.return_value = MagicMock(
+        returncode=0,
+        stdout="100%] Done",
+        duration_s=1.0
+    )
+    mock_live_process.return_value = mock_proc
+
+    serial_client = MagicMock()
+    serial_client.is_connected = False
+    serial_client.subscribe.return_value = queue_module.Queue()  # never yields a byte
+
+    real_perf_counter = time.perf_counter
+    t0 = real_perf_counter()
+
+    def fake_perf_counter():
+        # Accelerate elapsed time 50x so 15-20 "virtual" seconds pass in a
+        # few hundred real milliseconds, while queue.Queue.get(timeout=...)
+        # (which uses real wall-clock waits internally) is unaffected.
+        return t0 + (real_perf_counter() - t0) * 50.0
+
+    provisioner = UuuTeziProvisioner(usb_path="1:1", flash_timeout_s=20)
+
+    with patch("time.perf_counter", side_effect=fake_perf_counter):
+        res = provisioner.provision(image_path=payload_dir, serial_client=serial_client)
+
+    # Never got any prompt at all -- pure silence -- so provision must
+    # eventually give up, but only after passing through the 15s fallback.
+    assert res is False
+    captured = capsys.readouterr()
+    assert "TEZI shell not detected within 15" in captured.out
+
+

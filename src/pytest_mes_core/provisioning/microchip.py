@@ -88,5 +88,5 @@ class MicrochipIpeProvisioner(BaseProvisioner):
             err_msg = f'Failed to execute IPECMD script. Error: {e}'
             logger.critical('icsp_fatal_err_msg', err_msg=err_msg)
             raise ProvisioningError(err_msg)
-    async def async_provision(self, image_path, *args, **kwargs):
-        return await anyio.to_thread.run_sync(self.provision, image_path, *args, **kwargs)
+    async def async_provision(self, image_path: Path) -> bool:
+        return await anyio.to_thread.run_sync(self.provision, image_path)
