@@ -37,3 +37,10 @@ scratch.py
 test_*.log
 test_out*.txt
 *.pcap
+
+# Generated test-run artifacts
+pytest_*.log
+.mes_tmp_report*
+
+# Project documents that don't belong in the code repo
+*.pdf
