@@ -3,6 +3,11 @@ import logging
 import time
 from pytest_mes_core.utils.daemon import DaemonProcess, DaemonStartupError
 
+
+@pytest.fixture
+def anyio_backend():
+    return "asyncio"
+
 def test_daemon_process_starts_and_stops():
     logger = logging.getLogger("test")
     # Tail -f /dev/null is a classic way to keep a process alive
@@ -53,6 +58,22 @@ def test_daemon_export_log(tmp_path):
     time.sleep(0.1) # Let IO consumer finish
     
     log_file = daemon.export_log(tmp_path)
-    
+
     assert log_file.exists()
     assert "daemon output" in log_file.read_text()
+
+
+@pytest.mark.anyio
+async def test_async_start_and_stop_with_default_timeout():
+    """async_start() must accept the default timeout_s (mirrors the sync
+    signature) and async_stop() must not require any positional args."""
+    logger = logging.getLogger("test")
+    daemon = DaemonProcess(cmd=["sleep", "5"], logger=logger)
+
+    result = await daemon.async_start()
+    assert result is daemon
+    assert daemon.proc is not None
+    assert daemon.proc.poll() is None
+
+    await daemon.async_stop()
+    assert daemon.proc is None

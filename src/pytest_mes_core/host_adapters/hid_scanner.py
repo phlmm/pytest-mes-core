@@ -2,6 +2,7 @@ import structlog
 import os
 import select
 import logging
+import time
 from typing import Optional, Any, List, TYPE_CHECKING
 
 class _DummyInputDevice:
@@ -77,6 +78,12 @@ class HeadlessBarcodeScanner(BaseHostAdapter):
                     if purged_count > 0:
                         logger.debug('purged_purged_count_stale_keystrokes_from_hardware_buffer', purged_count=purged_count)
                     return self
+                # Non-matching device -- close the fd so we don't leak one
+                # handle per input device on every scan session.
+                try:
+                    dev.close()
+                except Exception:
+                    pass
             except (IOError, PermissionError) as e:
                 logger.debug('cannot_access_path_e_skipping', path=path, e=e)
         err_msg = f"HID Scanner '{target}' not found or unplugged."
@@ -113,9 +120,11 @@ class HeadlessBarcodeScanner(BaseHostAdapter):
             raise HostAdapterError("Scanner not initialized. Must be used within a 'with' context manager.")
         logger.warning('operator_action_scan_barcode_now_timeout_scan_timeout_s_s', scan_timeout_s=self.cfg.scan_timeout_s)
         barcode = ''
+        t_end = time.perf_counter() + self.cfg.scan_timeout_s
         try:
             while True:
-                r, _, _ = select.select([self.device.fd], [], [], self.cfg.scan_timeout_s)
+                remaining = max(0.0, t_end - time.perf_counter())
+                r, _, _ = select.select([self.device.fd], [], [], remaining)
                 if not r:
                     logger.error('operator_failed_to_scan_within_scan_timeout_s_s', scan_timeout_s=self.cfg.scan_timeout_s)
                     raise HidScannerTimeoutError(f'Barcode scan timed out after {self.cfg.scan_timeout_s}s.')
@@ -123,7 +132,7 @@ class HeadlessBarcodeScanner(BaseHostAdapter):
                     if event.type == ecodes.EV_KEY and event.value == 1:
                         key = categorize(event)
                         keycode = key.keycode[0] if isinstance(key.keycode, list) else key.keycode
-                        if keycode == 'KEY_ENTER':
+                        if keycode in ('KEY_ENTER', 'KEY_KPENTER'):
                             logger.info('scan_successfully_captured_barcode', barcode=barcode)
                             return barcode
                         if keycode in self.KEY_MAPPING:

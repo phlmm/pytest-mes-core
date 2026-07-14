@@ -17,6 +17,27 @@ from pytest_mes_core.transports import EphemeralSSHClient, EphemeralSerialClient
 from pytest_mes_core.state_machine import EmbeddedLinuxStateMachine
 logger = structlog.get_logger('mes_core.orchestrator')
 
+def _resolve_target_state_name(marker: Optional[pytest.Mark]) -> str:
+    """Resolve the target DutState name from a `requires_state` marker's first arg.
+
+    Accepts either an actual ``DutState`` enum member (e.g.
+    ``@pytest.mark.requires_state(DutState.BOOTLOADER)``) or a bare string
+    (e.g. ``@pytest.mark.requires_state("BOOTLOADER")``) -- the latter is a
+    natural thing for a user to write when avoiding the enum import, and must
+    not raise ``AttributeError``.
+
+    Args:
+        marker: The `requires_state` marker, or ``None`` if absent.
+
+    Returns:
+        str: The resolved target state name. Defaults to ``'OS_USERLAND'``
+            when no marker or no args are present.
+    """
+    target = marker.args[0] if marker and marker.args else None
+    if target is None:
+        return 'OS_USERLAND'
+    return target.name if hasattr(target, 'name') else str(target)
+
 @pytest.fixture(scope='session')
 def dut_state_machine(request: pytest.FixtureRequest, mes_env: StationEnvironment, psu_hardware: Optional[ScpiPowerSupply], serial_client: Optional[EphemeralSerialClient], ssh_client: Optional[EphemeralSSHClient]) -> Generator[Optional[EmbeddedLinuxStateMachine], None, None]:
     """
@@ -93,7 +114,7 @@ def enforce_physical_state(request: pytest.FixtureRequest, dut_state_machine: Op
         logger.warning('[Router] requires_state marker ignored on anyio test. You must use await fsm.async_hw_boot_to_os() directly in your test body.')
         
     if marker and not is_async:
-        target_state_name = marker.args[0].name if marker and marker.args else 'OS_USERLAND'
+        target_state_name = _resolve_target_state_name(marker)
         current_state_name = dut_state_machine.state.name if hasattr(dut_state_machine.state, 'name') else str(dut_state_machine.state)
         if current_state_name == target_state_name:
             if target_state_name == 'OS_USERLAND' and hasattr(dut_state_machine, 'verify_heartbeat'):

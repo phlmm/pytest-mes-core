@@ -28,6 +28,15 @@ from .receipt_exporter import OperatorReceiptExporter
 from .markdown_exporter import DeveloperMarkdownExporter
 from .composite import CompositeTelemetryExporter
 
+# Backward-compat re-export: this module used to define its own dataclass-ABC
+# `HardwareManifest`/`ComponentIdentity` pair, shadowing the canonical
+# pydantic `HardwareManifest` in `pytest_mes_core.manifest` (the one actually
+# used by `plugins/manifest.py` and `state_machine.py`). Nothing in this
+# codebase imported the legacy classes, so `telemetry/manifest.py` was
+# removed; this re-export keeps `from pytest_mes_core.telemetry import
+# HardwareManifest` working for anyone who had it.
+from pytest_mes_core.manifest import HardwareManifest
+
 __all__ = [
     # Contracts & Data
     "StationContext",
@@ -41,5 +50,7 @@ __all__ = [
     "JsonlTelemetryExporter",
     "OperatorReceiptExporter",
     "DeveloperMarkdownExporter",
-    "CompositeTelemetryExporter"
+    "CompositeTelemetryExporter",
+    # Backward-compat
+    "HardwareManifest",
 ]

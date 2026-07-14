@@ -19,6 +19,7 @@ registers global hooks and session-scoped fixtures.
 import os
 import sys
 import json
+import pytest
 from pathlib import Path
 
 # All integration tests need PYTHONPATH set so the subprocess can find the source
@@ -486,3 +487,53 @@ def test_charlie(mes_record):
 
     assert passed_count == 2
     assert failed_count == 1
+
+
+# ==========================================
+# TEST: E-Stop arm-failure aborts the session when required=true
+# ==========================================
+def test_estop_arm_failure_aborts_session_when_required(pytester):
+    """
+    SAFETY: if the physical E-Stop watchdog cannot bind its GPIO line and the
+    config marks it required (the default), the whole session must abort via
+    pytest.exit — it must NOT be swallowed by pytest_configure's bootstrap
+    catch-all and silently run high-voltage tests unmonitored.
+
+    Uses gpiochip 99 (guaranteed absent) so arming always fails. Skips when
+    gpiod itself is not importable, since then arming is bypassed by design.
+    """
+    pytest.importorskip("gpiod")
+    _inject_pythonpath()
+
+    toml_path = pytester.makefile(".toml", """
+[station_meta]
+facility = "Pytester Safety Lab"
+jig_id = "JIG-ESTOP-01"
+
+[telemetry]
+exporter_type = "jsonl"
+log_directory = "artifacts/telemetry"
+
+[e_stop]
+enabled = true
+required = true
+gpiochip = 99
+line = 7
+""")
+
+    pytester.makepyfile("""
+def test_should_never_run():
+    assert True
+""")
+
+    result = pytester.runpytest_subprocess(
+        "-p", "no:mes_core",
+        "-p", "pytest_mes_core.plugin",
+        "--operator-id=PYTESTER",
+        f"--env-config={toml_path}",
+    )
+    # Session aborted before running any test
+    assert result.ret != 0
+    result.stdout.no_fnmatch_line("*1 passed*")
+    combined = str(result.stdout) + str(result.stderr)
+    assert "E-Stop safety watchdog failed to arm" in combined

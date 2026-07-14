@@ -6,37 +6,12 @@ import threading
 import logging
 from typing import Optional, Any
 
-class _DummyLine:
-
-    def request(self, *args: Any, **kwargs: Any) -> None:
-        pass
-
-    def get_value(self) -> int:
-        return 1
-
-    def release(self) -> None:
-        pass
-
-class _DummyChip:
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        pass
-
-    def get_line(self, offset: int) -> _DummyLine:
-        return _DummyLine()
-
-    def close(self) -> None:
-        pass
-
-class _DummyGpiod:
-    LINE_REQ_DIR_IN: int = 1
-    Chip = _DummyChip
 try:
     import gpiod
     HAS_GPIOD = True
 except ImportError:
     HAS_GPIOD = False
-    gpiod = _DummyGpiod()
+    gpiod = None
 from pytest_mes_core.config import EStopConfig
 from pytest_mes_core.host_adapters.base import BaseHostAdapter, HostAdapterError
 logger = structlog.get_logger('mes_core.host_adapters.safety')
@@ -53,8 +28,7 @@ class EStopWatchdog(BaseHostAdapter):
         self.cfg = cfg
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
-        self.chip: Optional[Any] = None
-        self.line: Optional[Any] = None
+        self._request: Optional[Any] = None
 
     def __enter__(self) -> 'EStopWatchdog':
         """Binds the GPIO line for the E-Stop button and spawns the monitor thread.
@@ -69,10 +43,14 @@ class EStopWatchdog(BaseHostAdapter):
             logger.warning('[Safety] gpiod not available. E-Stop bypassed. DANGEROUS IF PHYSICAL HIGH VOLTAGE IS PRESENT!')
             return self
         logger.debug('initializing_gpio_lock_on_host_chip_gpiochip_line_line', gpiochip=self.cfg.gpiochip, line=self.cfg.line)
+        from gpiod.line import Direction  # local import next to usage
+
         try:
-            self.chip = gpiod.Chip(f'gpiochip{self.cfg.gpiochip}')
-            self.line = self.chip.get_line(self.cfg.line)
-            self.line.request(consumer='mes_estop', type=gpiod.LINE_REQ_DIR_IN)
+            self._request = gpiod.request_lines(
+                f'/dev/gpiochip{self.cfg.gpiochip}',
+                consumer='mes_estop',
+                config={self.cfg.line: gpiod.LineSettings(direction=Direction.INPUT)},
+            )
         except Exception as e:
             err_msg = f'Failed to bind E-Stop hardware on chip{self.cfg.gpiochip}:line{self.cfg.line}. Error: {e}'
             logger.critical('fatal_err_msg', err_msg=err_msg)
@@ -89,32 +67,29 @@ class EStopWatchdog(BaseHostAdapter):
         self._stop_event.set()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=2.0)
-        if self.line:
+        if self._request:
             try:
-                self.line.release()
+                self._request.release()
             except Exception as e:
                 logger.debug('failed_to_release_line_lock_e', e=e)
-        if self.chip:
-            try:
-                self.chip.close()
-            except Exception as e:
-                logger.debug('failed_to_close_chip_e', e=e)
 
     def _monitor(self) -> None:
         """Background thread logic for monitoring physical E-Stop state.
-        
+
         Executes an immediate SIGINT and hard kill if the operator triggers the E-Stop
         or if consecutive I/O read failures occur.
         """
-        if not self.line:
+        if not self._request:
             return
+        from gpiod.line import Value  # local import next to usage
+
         trigger_state = 0 if self.cfg.active_low else 1
         logger.debug('background_poller_started_target_trigger_state_trigger_state', trigger_state=trigger_state)
         MAX_CONSECUTIVE_ERRORS = 3
         consecutive_errors = 0
         while not self._stop_event.is_set():
             try:
-                state = self.line.get_value()
+                state = 1 if self._request.get_value(self.cfg.line) == Value.ACTIVE else 0
                 consecutive_errors = 0
                 logger.debug('pin_state_state', state=state)
                 if state == trigger_state:

@@ -188,6 +188,25 @@ def _is_port_open(ip: str, port: int) -> bool:
         # EADDRINUSE (or similar) -> port is occupied.
         return True
 
+def _mosquitto_broker_cmd(cfg: Any) -> tuple[list, str]:
+    """Build the mosquitto argv + write its conf file. Returns (argv, conf_path)."""
+    conf_path = f"/tmp/mes_mosquitto_{os.getpid()}.conf"
+    with open(conf_path, "w") as f:
+        f.write(f"listener {cfg.port} 0.0.0.0\nallow_anonymous true\n")
+    return (["mosquitto", "-c", conf_path], conf_path)
+
+
+def _amqtt_broker_cmd(cfg: Any, amqtt_bin: str) -> tuple[list, str]:
+    """Build the amqtt argv + write its conf file. Returns (argv, conf_path)."""
+    conf_path = f"/tmp/mes_amqtt_{os.getpid()}.yml"
+    with open(conf_path, "w") as f:
+        # Added sys_interval: 0 to fix crash on Python 3.14+
+        f.write(f"listeners:\n  default:\n    type: tcp\n    bind: 0.0.0.0:{cfg.port}\n"
+                "sys_interval: 0\n"
+                "auth:\n  allow-anonymous: true\n  plugins:\n    - auth.anonymous\n")
+    return ([amqtt_bin, "-c", conf_path], conf_path)
+
+
 @pytest.fixture(scope='session', autouse=True)
 def embedded_mqtt_broker(mes_env: StationEnvironment):
     """
@@ -197,35 +216,28 @@ def embedded_mqtt_broker(mes_env: StationEnvironment):
     if not mes_env.host_mqtt or "primary" not in mes_env.host_mqtt:
         yield None
         return
-        
+
     cfg = mes_env.host_mqtt["primary"]
     if cfg.broker_ip not in ("127.0.0.1", "localhost", "169.254.5.50"):
         yield None
         return
-        
+
     if _is_port_open(cfg.broker_ip, cfg.port):
         yield None
         return
-        
+
     try:
         # ── Preference: mosquitto (more robust) ──────────────────────────────
-        conf_path = "/tmp/mes_mosquitto.conf"
-        with open(conf_path, "w") as f:
-            f.write(f"listener {cfg.port} 0.0.0.0\nallow_anonymous true\n")
-        proc = subprocess.Popen(["mosquitto", "-v", "-c", conf_path])
+        argv, conf_path = _mosquitto_broker_cmd(cfg)
+        proc = subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         logger.info("Started embedded mosquitto broker.")
     except FileNotFoundError:
         try:
             # ── Fallback: amqtt ─────────────────────────────────────────────
             amqtt_bin = os.path.join(sys.prefix, "bin", "amqtt")
             if os.path.exists(amqtt_bin):
-                conf_path = "/tmp/mes_amqtt.yml"
-                with open(conf_path, "w") as f:
-                    # Added sys_interval: 0 to fix crash on Python 3.14+
-                    f.write("listeners:\n  default:\n    type: tcp\n    bind: 0.0.0.0:1883\n"
-                            "sys_interval: 0\n"
-                            "auth:\n  allow-anonymous: true\n  plugins:\n    - auth.anonymous\n")
-                proc = subprocess.Popen([amqtt_bin, "-c", conf_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                argv, conf_path = _amqtt_broker_cmd(cfg, amqtt_bin)
+                proc = subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 logger.info("Started embedded amqtt broker.")
             else:
                 logger.warning("Neither 'mosquitto' nor 'amqtt' found. Skipping embedded broker.")
@@ -235,7 +247,7 @@ def embedded_mqtt_broker(mes_env: StationEnvironment):
             logger.warning(f"Failed to start embedded broker: {e}")
             yield None
             return
-    
+
     for _ in range(20):
         if _is_port_open(cfg.broker_ip, cfg.port):
             break

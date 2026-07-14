@@ -20,6 +20,34 @@ from pytest_mes_core.host_adapters.diagnostics import ResourceDiagnostics
 from pytest_mes_core.telemetry import StationContext, TelemetryExporter, JsonlTelemetryExporter, OperatorReceiptExporter, DeveloperMarkdownExporter, CompositeTelemetryExporter
 logger = structlog.get_logger('mes_core.config')
 
+def _arm_estop_watchdog(bom: StationEnvironment, config: pytest.Config) -> None:
+    """Arms the physical E-Stop watchdog, if configured, aborting the session
+    when arming fails and the hardware is marked as safety-required.
+
+    Args:
+        bom: The parsed station Bill-Of-Materials/hardware configuration.
+        config: The Pytest configuration object.
+    """
+    if not (bom.e_stop and bom.e_stop.enabled):
+        return
+    watchdog = EStopWatchdog(bom.e_stop)
+    try:
+        watchdog.__enter__()
+        config._mes_watchdog = watchdog
+    except Exception as e:
+        logger.critical('fatal_e_stop_watchdog_failed_to_arm_e', e=e)
+        try:
+            watchdog.__exit__(None, None, None)
+        except Exception:
+            pass
+        if getattr(bom.e_stop, 'required', True):
+            pytest.exit(
+                'MES Framework aborted: E-Stop safety watchdog failed to arm and '
+                'e_stop.required is true. Refusing to run high-voltage tests unmonitored. '
+                f'Reason: {e}',
+                returncode=2,
+            )
+
 def pytest_addoption(parser: pytest.Parser) -> None:
     """
     Registers custom command-line arguments for the MES framework.
@@ -66,7 +94,15 @@ def operator_id(request: pytest.FixtureRequest) -> str:
 def mes_env(request: pytest.FixtureRequest) -> StationEnvironment:
     """
     Parses the hardware TOML configuration into a strongly typed Python object.
+
+    Reuses the BOM already parsed (and cached on ``config._mes_bom``) by
+    ``pytest_configure`` when available, so the TOML isn't parsed and
+    validated twice into two independent ``StationEnvironment`` instances
+    that could diverge.
     """
+    bom = getattr(request.config, '_mes_bom', None)
+    if bom is not None:
+        return bom
     toml_path = Path(request.config.getoption('--env-config'))
     return load_toml_config(toml_path, StationEnvironment)
 
@@ -154,17 +190,7 @@ def pytest_configure(config: pytest.Config) -> None:
         try:
             bom = load_toml_config(toml_path, StationEnvironment)
             config._mes_bom = bom
-            if bom.e_stop and bom.e_stop.enabled:
-                watchdog = EStopWatchdog(bom.e_stop)
-                try:
-                    watchdog.__enter__()
-                    config._mes_watchdog = watchdog
-                except Exception as e:
-                    logger.critical('fatal_e_stop_watchdog_failed_to_arm_e', e=e)
-                    try:
-                        watchdog.__exit__(None, None, None)
-                    except Exception:
-                        pass
+            _arm_estop_watchdog(bom, config)
             session_id = str(uuid.uuid4())
             ctx = StationContext(facility=bom.station_meta.facility, jig_id=bom.station_meta.jig_id, operator_id=config.getoption('--operator-id', default='UNKNOWN'), dut_serial=config.getoption('--board-serial', default='UNKNOWN'), work_order=config.getoption('--work-order', default='UNKNOWN'))
             setattr(ctx, 'run_id', session_id)
@@ -201,6 +227,12 @@ def pytest_configure(config: pytest.Config) -> None:
                 metadata['Work Order'] = ctx.work_order
                 metadata['Test Timestamp'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             logger.info('bootstrapping_mes_session_for_jig_jig_id', jig_id=bom.station_meta.jig_id)
+        except pytest.exit.Exception:
+            # pytest.exit() raises _pytest.outcomes.Exit, which subclasses
+            # Exception — it must escape this catch-all or the deliberate
+            # session aborts above (E-Stop arming, telemetry init) are
+            # silently swallowed and the session runs anyway.
+            raise
         except Exception as e:
             logger.critical('fatal_failed_to_load_hardware_bom_e', e=e)
 

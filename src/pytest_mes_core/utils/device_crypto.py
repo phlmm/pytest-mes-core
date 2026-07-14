@@ -15,12 +15,19 @@ Usage::
     from pytest_mes_core.utils.device_crypto import DeviceCrypto
 
     # With a project-specific key
-    crypto = DeviceCrypto(key=bytes.fromhex("A1B2C3D4E5F67890123456789012AB"))
+    crypto = DeviceCrypto(key=bytes.fromhex("A1B2C3D4E5F67890123456789012ABCD"))
 
     encrypted = crypto.encrypt("hello world")
     plaintext = crypto.decrypt(encrypted)
 
 The key can be loaded from ``station_env.toml`` or passed directly.
+
+Only genuinely non-envelope input (invalid JSON, non-dict, or missing
+``iv``/``ciphertext``/``hmac`` keys) is passed through unchanged. A
+well-formed envelope that fails HMAC verification/decryption under both
+the primary and fallback keys is a tampered or corrupted message -- it
+raises :class:`DeviceCryptoError` instead of being silently returned as
+raw envelope JSON.
 """
 
 from __future__ import annotations
@@ -35,6 +42,11 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.hmac import HMAC
 
 logger = structlog.get_logger("mes_core.utils.device_crypto")
+
+
+class DeviceCryptoError(Exception):
+    """Raised when a well-formed envelope fails HMAC verification/decryption
+    under every configured key -- i.e. a tampered or corrupted message."""
 
 
 class DeviceCrypto:
@@ -95,33 +107,56 @@ class DeviceCrypto:
         If decryption with the primary key fails and a ``fallback_key``
         was provided, retries with the fallback (key rotation support).
 
-        If the input is not a valid envelope (missing fields, invalid
-        JSON), returns the input unchanged -- this allows transparent
-        pass-through of unencrypted messages.
+        If the input is not a valid envelope at all (invalid JSON, not a
+        JSON object, or missing ``iv``/``ciphertext``/``hmac`` keys), it is
+        returned unchanged -- this allows transparent pass-through of
+        unencrypted messages.
+
+        If the input IS a well-formed envelope but HMAC verification or
+        decryption fails under every configured key, the message is a
+        tampered or corrupted envelope, not a plain-text pass-through --
+        this raises :class:`DeviceCryptoError` instead of returning the
+        raw envelope JSON.
 
         Returns
         -------
         str
             The decrypted plaintext, or the original input if not an envelope.
+
+        Raises
+        ------
+        DeviceCryptoError
+            If the input is a well-formed envelope but fails to verify/decrypt
+            with all configured keys.
         """
         try:
-            return self._try_decrypt(envelope_json, self._key)
-        except Exception:
+            data = json.loads(envelope_json)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return envelope_json
+        if not isinstance(data, dict) or not all(
+            k in data for k in ("iv", "ciphertext", "hmac")
+        ):
+            return envelope_json
+
+        try:
+            return self._try_decrypt(data, self._key)
+        except Exception as primary_exc:
             if self._fallback_key:
                 try:
                     logger.debug("crypto_trying_fallback_key")
-                    return self._try_decrypt(envelope_json, self._fallback_key)
+                    return self._try_decrypt(data, self._fallback_key)
                 except Exception:
                     pass
-            # Not a valid envelope or decryption failed -- return as-is
-            return envelope_json
+            logger.warning(
+                "crypto_envelope_verification_failed",
+                error=str(primary_exc),
+            )
+            raise DeviceCryptoError(
+                "Envelope HMAC verification/decryption failed with all configured keys"
+            ) from primary_exc
 
     @staticmethod
-    def _try_decrypt(envelope_json: str, key: bytes) -> str:
-        data = json.loads(envelope_json)
-        if not all(k in data for k in ("iv", "ciphertext", "hmac")):
-            raise ValueError("Missing envelope fields")
-
+    def _try_decrypt(data: dict, key: bytes) -> str:
         iv = base64.b64decode(data["iv"])
         ciphertext = base64.b64decode(data["ciphertext"])
         mac_received = base64.b64decode(data["hmac"])

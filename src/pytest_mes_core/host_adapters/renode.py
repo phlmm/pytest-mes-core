@@ -1,11 +1,12 @@
 import structlog
 import os
 import subprocess
+import tempfile
 import time
 import logging
 import socket
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 logger = structlog.get_logger('mes_core.host_adapters.renode')
 
 class RenodeRunnerError(Exception):
@@ -25,10 +26,12 @@ class RenodeRunner:
         self.monitor_port = monitor_port
         self.uart_port = uart_port
         self._process: Optional[subprocess.Popen] = None
+        self._log_path: Optional[Path] = None
+        self._log_file: Optional[Any] = None
 
     def start(self) -> None:
         """Spawns the headless Renode process and waits for the monitor port.
-        
+
         Raises:
             FileNotFoundError: If the Renode script does not exist.
             RenodeRunnerError: If the simulator fails to bind the TCP monitor port.
@@ -37,10 +40,15 @@ class RenodeRunner:
             raise FileNotFoundError(f'Renode script not found: {self.script_path}')
         logger.info('starting_headless_simulation_using_name', name=self.script_path.name)
         cmd = ['renode', '--disable-x11', '--port', str(self.monitor_port), '-e', f's @{self.script_path.absolute()}']
-        self._process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self._log_path = Path(tempfile.gettempdir()) / f'mes_renode_{self.monitor_port}.log'
+        self._log_file = open(self._log_path, 'w')
+        self._process = subprocess.Popen(cmd, stdout=self._log_file, stderr=subprocess.STDOUT, text=True)
         if not self._wait_for_port(self.monitor_port, timeout=10.0):
             self.stop()
-            raise RenodeRunnerError(f'Renode failed to bind monitor port {self.monitor_port}')
+            raise RenodeRunnerError(
+                f'Renode failed to bind monitor port {self.monitor_port}. '
+                f'See simulation log at {self._log_path}'
+            )
         logger.info('simulation_running_monitor_monitor_port_uart_uart_port', monitor_port=self.monitor_port, uart_port=self.uart_port)
 
     def stop(self) -> None:
@@ -53,6 +61,12 @@ class RenodeRunner:
             except subprocess.TimeoutExpired:
                 self._process.kill()
             self._process = None
+        if self._log_file:
+            try:
+                self._log_file.close()
+            except Exception as e:
+                logger.debug('failed_to_close_renode_log_file_e', e=e)
+            self._log_file = None
 
     def _wait_for_port(self, port: int, timeout: float) -> bool:
         """Polls a TCP port until it accepts connections."""

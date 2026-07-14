@@ -3,6 +3,7 @@ import structlog
 import os
 import logging
 import subprocess
+import sys
 import time
 from typing import Any, Optional
 from pytest_mes_core.config import UsbSdMuxConfig
@@ -75,24 +76,6 @@ class HostUsbSdMuxAdapter(BaseHostAdapter):
                 return path
         # Fallback — no udev entry found; let the caller raise the usual error.
         return f'/dev/usb-sd-mux/id-{serial_id}'
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-        # ==========================================
-        # HARDWARE INTELLIGENCE: Auto-pad to 12 digits
-        # ==========================================
-        # The Linux Automation Mux always exposes a 12-digit USB Serial (e.g. 000000001781).
-        # zfill(12) allows the operator's TOML to simply say "1781" and it will still work perfectly.
-
-        if self.cfg.serial_id.startswith("/dev/"):
-            # Operator explicitly provided a path (e.g., "/dev/sg2")
-            self.device_path = self.cfg.serial_id
-        else:
-            # Automatically resolve to the udev symlink
-            normalized_serial = self.cfg.serial_id.zfill(12)
-            self.device_path = f"/dev/usb-sd-mux/id-{normalized_serial}"
 
     def _set_mux_state(self, state: str) -> None:
         """Helper to invoke the usbsdmux CLI."""
@@ -331,7 +314,13 @@ class HostUsbSdMuxAdapter(BaseHostAdapter):
         logger.debug('acquiring_hardware_lock_for_mux_serial_id', serial_id=self.cfg.serial_id)
         try:
             self._mutex_context = hardware_mutex(resource_name=f'sdmux_{self.cfg.serial_id}', timeout_s=self.mutex_timeout_s)
-            self._mutex_context.__enter__()
+        except HostMutexTimeoutError as e:
+            err_msg = f'Failed to acquire SD-Mux {self.cfg.serial_id}: {e}'
+            logger.critical('fatal_err_msg', err_msg=err_msg)
+            raise HostAdapterError(err_msg)
+
+        self._mutex_context.__enter__()
+        try:
             # 2. Toggle physical hardware to HOST
             logger.info('hardware_locked_toggling_device_path_to_host_pc', device_path=self.device_path)
             self._set_mux_state('host')
@@ -341,10 +330,10 @@ class HostUsbSdMuxAdapter(BaseHostAdapter):
             logger.debug('[SD-Mux] Delaying 2.0s for Linux Kernel block device enumeration...')
             time.sleep(2.0)
             return self
-        except HostMutexTimeoutError as e:
-            err_msg = f'Failed to acquire SD-Mux {self.cfg.serial_id}: {e}'
-            logger.critical('fatal_err_msg', err_msg=err_msg)
-            raise HostAdapterError(err_msg)
+        except BaseException:
+            self._mutex_context.__exit__(*sys.exc_info())
+            self._mutex_context = None
+            raise
 
     def __exit__(self, _exc_type: Any, _exc_val: Any, _exc_tb: Any) -> None:
         """ZERO-LEAKAGE: Flip the SD card back to the DUT and release the lock."""
