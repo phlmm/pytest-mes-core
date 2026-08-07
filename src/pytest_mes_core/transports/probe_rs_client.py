@@ -1,3 +1,4 @@
+from __future__ import annotations
 """
 probe_rs_client.py
 ==================
@@ -16,7 +17,6 @@ Design decisions:
       intermittent SWD bus errors from CI logs alone.
 """
 
-from __future__ import annotations
 
 import re
 import shutil
@@ -25,7 +25,6 @@ import subprocess
 import time
 from typing import Optional
 
-import anyio
 import structlog
 
 from pytest_mes_core.transports.mcu_base import McuTransport
@@ -328,164 +327,11 @@ class ProbeRsTransport(McuTransport):
     # Async wrappers
     # ------------------------------------------------------------------
 
-    async def async_connect(self) -> None:
-        # Use retries to handle delayed USB interface release from previous tests
-        stdout = await self._async_run_cli(["info"], retries=3, context="connect")
-        if self.cfg.chip and self.cfg.chip.upper() not in stdout.upper():
-            logger.warning("probe_rs_chip_mismatch", expected=self.cfg.chip, info_output=stdout[:150])
 
-    async def async_disconnect(self) -> None:
-        pass # probe-rs is stateless, no background process to disconnect
-
-    async def _async_run_cli(self, args: list[str], *, retries: int = 1, timeout_s: int = _CLI_TIMEOUT_S, context: str = "") -> str:
-        """Cancel-safe async version of _run_cli using anyio.run_process."""
-        await self._async_resolve_binary()
-        cmd = self._build_cmd(args)
-        
-        last_error: Optional[Exception] = None
-        for attempt in range(1, retries + 1):
-            t0 = time.monotonic()
-            try:
-                logger.debug("probe_rs_cli_exec_async", context=context, attempt=f"{attempt}/{retries}", cmd=" ".join(cmd))
-                
-                with anyio.fail_after(timeout_s):
-                    result = await anyio.run_process(
-                        cmd,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                    )
-                    
-                elapsed_ms = (time.monotonic() - t0) * 1000
-                stdout_str = result.stdout.decode(errors="replace")
-                stderr_str = result.stderr.decode(errors="replace")
-                
-                stderr_clean = stderr_str.strip()
-                if stderr_clean:
-                    for line in stderr_clean.splitlines():
-                        line = line.strip()
-                        if not line: continue
-                        if "WARN" in line or "warn" in line:
-                            logger.warning("probe_rs_stderr_warn", context=context, line=line)
-                        elif "ERROR" in line or "Error" in line:
-                            logger.error("probe_rs_stderr_error", context=context, line=line)
-                        else:
-                            logger.debug("probe_rs_stderr", context=context, line=line)
-
-                if result.returncode == 0:
-                    logger.debug("probe_rs_cli_ok", context=context, elapsed_ms=round(elapsed_ms, 1), stdout_len=len(stdout_str))
-                    return stdout_str
-
-                logger.warning("probe_rs_cli_failed", context=context, attempt=f"{attempt}/{retries}", returncode=result.returncode, stdout=stdout_str[:200], stderr=stderr_str[:200])
-                last_error = ProbeRsError(f"probe-rs {context} failed (rc={result.returncode}): {stderr_str[:500]}", cmd=cmd, returncode=result.returncode, stdout=stdout_str, stderr=stderr_str)
-                
-            except TimeoutError:
-                elapsed_ms = (time.monotonic() - t0) * 1000
-                logger.warning("probe_rs_cli_timeout", context=context, attempt=f"{attempt}/{retries}", elapsed_ms=round(elapsed_ms, 1))
-                last_error = ProbeRsError(f"probe-rs {context} timed out after {timeout_s}s", cmd=cmd, returncode=-1, stdout="", stderr="")
-
-            if attempt < retries:
-                await anyio.sleep(1.0)
-
-        logger.error("probe_rs_cli_all_retries_exhausted", context=context, retries=retries)
-        raise last_error
-
-    async def async_halt(self) -> None:
-        await self._async_run_cli(["reset"], context="halt")
-
-    async def async_resume(self) -> None:
-        await self._async_run_cli(["reset"], context="resume")
-
-    async def async_reset(self) -> None:
-        logger.info("probe_rs_resetting", chip=self.cfg.chip)
-        t0 = time.monotonic()
-        await self._async_run_cli(["reset"], retries=_DEFAULT_RETRIES, context="reset")
-        elapsed_ms = (time.monotonic() - t0) * 1000
-        logger.info("probe_rs_reset_ok", chip=self.cfg.chip, elapsed_ms=round(elapsed_ms, 1))
-
-    async def async_read_memory(self, address: int, size: int) -> bytes:
-        """Cancel-safe async variant of ``read_memory()``."""
-        if size <= 0:
-            return b""
-        if size > 4096:
-            raise ValueError(f"read_memory: size {size} exceeds 4096-byte limit")
-
-        logger.debug("probe_rs_read", address=f"0x{address:08X}", size=size)
-
-        stdout = await self._async_run_cli(
-            ["read", "b8", f"0x{address:08x}", str(size)],
-            retries=_DEFAULT_RETRIES,
-            context="read_memory",
-        )
-
-        data = self._parse_hex_output(stdout)
-        if len(data) != size:
-            logger.warning("probe_rs_read_size_mismatch",
-                           expected=size, got=len(data),
-                           raw_output=stdout[:300])
-        logger.debug("probe_rs_read_ok",
-                     address=f"0x{address:08X}",
-                     size=len(data),
-                     first_bytes=data[:16].hex() if data else "")
-        return bytes(data)
-
-    async def async_read_u32(self, address: int) -> int:
-        stdout = await self._async_run_cli(["read", "b32", f"0x{address:08x}", "1"], retries=_DEFAULT_RETRIES, context="read_u32")
-        token = stdout.strip().split()[-1] if stdout.strip() else ""
-        try:
-            value = int(token, 16)
-        except (ValueError, IndexError):
-            raise ValueError(f"Cannot parse u32 from probe-rs output: {stdout!r}")
-        logger.debug("probe_rs_read_u32", address=f"0x{address:08X}", value=f"0x{value:08X}")
-        return value
-
-    async def async_download(self, firmware_path: str, *, binary_format: Optional[str] = None, base_address: Optional[int] = None, chip_erase: bool = False) -> str:
-        args = ["download", firmware_path]
-        if chip_erase:
-            args.append("--chip-erase")
-        if binary_format:
-            args.extend(["--binary-format", binary_format])
-        if base_address is not None:
-            args.extend(["--base-address", f"0x{base_address:08x}"])
-
-        logger.info("probe_rs_download_start", firmware=firmware_path, binary_format=binary_format, base_address=f"0x{base_address:08x}" if base_address else None, chip_erase=chip_erase)
-        t0 = time.monotonic()
-        stdout = await self._async_run_cli(args, retries=2, timeout_s=self.cfg.timeout_s, context="download")
-        elapsed = time.monotonic() - t0
-        logger.info("probe_rs_download_ok", firmware=firmware_path, elapsed_s=round(elapsed, 2))
-        return stdout
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
-
-    async def _async_resolve_binary(self) -> None:
-        """Async version of _resolve_binary using anyio.run_process."""
-        if self._probe_rs_path is not None:
-            return
-
-        import shutil
-        import anyio
-        path = shutil.which("probe-rs")
-        if path is None:
-            raise ProbeRsError(
-                "probe-rs binary not found in $PATH. "
-                "Install via: curl --proto '=https' --tlsv1.2 -LsSf "
-                "https://github.com/probe-rs/probe-rs/releases/latest/"
-                "download/probe-rs-tools-installer.sh | sh",
-                cmd=["probe-rs"], returncode=-1, stdout="", stderr="")
-        self._probe_rs_path = path
-
-        try:
-            with anyio.fail_after(5.0):
-                result = await anyio.run_process(
-                    [path, "--version"],
-                    stdout=anyio.subprocess.PIPE,
-                    stderr=anyio.subprocess.PIPE
-                )
-                if result.returncode == 0:
-                    self._probe_rs_version = result.stdout.decode().splitlines()[0]
-        except Exception:
-            pass
 
     def _resolve_binary(self) -> None:
         """Locate the ``probe-rs`` binary and cache its version string."""

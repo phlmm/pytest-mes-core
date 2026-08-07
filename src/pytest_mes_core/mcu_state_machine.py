@@ -2,7 +2,7 @@ import enum
 import structlog
 from typing import Optional, Any
 import time
-from transitions.extensions.asyncio import AsyncMachine
+from transitions import Machine
 
 logger = structlog.get_logger('mes_core.mcu_fsm')
 
@@ -45,7 +45,7 @@ class BareMetalStateMachine:
         self.ota_flag_addr = ota_flag_addr
         self.ota_flag_value = ota_flag_value
 
-        self.machine = AsyncMachine(
+        self.machine = Machine(
             model=self,
             states=[state.value for state in McuState],
             initial=McuState.POWER_OFF.value,
@@ -127,35 +127,31 @@ class BareMetalStateMachine:
 
     # --- Hardware Execution Callbacks ---
 
-    async def _hw_energize(self, event: Any) -> None:
+    def _hw_energize(self, event: Any) -> None:
         """Applies physical voltage to the MCU."""
-        import anyio
         logger.info("[MCU] Energizing VCC...")
         if self.psu:
-            await anyio.to_thread.run_sync(self.psu.enable_output)
+            self.psu.enable_output()
 
-    async def _hw_power_off(self, event: Any) -> None:
+    def _hw_power_off(self, event: Any) -> None:
         """Severs power to the MCU."""
-        import anyio
         logger.info("[MCU] Severing VCC...")
         if self.psu:
-            await anyio.to_thread.run_sync(self.psu.disable_output)
+            self.psu.disable_output()
 
-    async def _hw_halt_core(self, event: Any) -> None:
+    def _hw_halt_core(self, event: Any) -> None:
         """Issues SWD HALT command to pause the program counter."""
-        import anyio
         logger.info("[MCU] Halting CPU Core via Debug Probe...")
         if self.swd:
-            await anyio.to_thread.run_sync(self.swd.halt)
+            self.swd.halt()
 
-    async def _hw_resume_core(self, event: Any) -> None:
+    def _hw_resume_core(self, event: Any) -> None:
         """Issues SWD RESUME command to continue execution."""
-        import anyio
         logger.info("[MCU] Resuming CPU Core execution...")
         if self.swd:
-            await anyio.to_thread.run_sync(self.swd.resume)
+            self.swd.resume()
 
-    async def _hw_trigger_ota(self, event: Any) -> None:
+    def _hw_trigger_ota(self, event: Any) -> None:
         """Sets an OTA flag in RAM/RTC register and resets into the Bootloader.
 
         If ``ota_flag_addr``/``ota_flag_value`` were supplied at construction
@@ -166,7 +162,6 @@ class BareMetalStateMachine:
         responsibility to have set it via some other means (e.g. firmware
         pre-arming its own flag) before triggering this transition.
         """
-        import anyio
         logger.info("[MCU] Rebooting into OTA Bootloader mode...")
         if self.swd:
             if (
@@ -179,8 +174,6 @@ class BareMetalStateMachine:
                     addr=hex(self.ota_flag_addr),
                     value=self.ota_flag_value,
                 )
-                await anyio.to_thread.run_sync(
-                    self.swd.write_memory, self.ota_flag_addr, self.ota_flag_value
-                )
-            await anyio.to_thread.run_sync(self.swd.reset)
+                self.swd.write_memory(self.ota_flag_addr, self.ota_flag_value)
+            self.swd.reset()
 

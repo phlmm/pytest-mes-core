@@ -83,8 +83,8 @@ class McuRpcClient(RpcClientBase):
         self.rx_func = rx_func
         self.timeout_s = timeout_s
 
-    async def _async_call_raw(self, method_id: int, payload: bytes) -> Optional[bytes]:
-        import anyio
+    def _call_raw(self, method_id: int, payload: bytes) -> Optional[bytes]:
+        
         length = len(payload)
         header = struct.pack("<HH", method_id, length)
         packet = header + payload
@@ -92,20 +92,21 @@ class McuRpcClient(RpcClientBase):
         packet += struct.pack("<H", checksum)
         
         framed = CobsFramer.encode(packet)
-        await anyio.to_thread.run_sync(self.tx_func, framed)
+        self.tx_func(framed)
         
         response_buffer = bytearray()
-        with anyio.move_on_after(self.timeout_s) as cancel_scope:
-            while True:
-                chunk = await anyio.to_thread.run_sync(self.rx_func, 1)
+        import time
+        t0 = time.perf_counter()
+        while time.perf_counter() - t0 < self.timeout_s:
+                chunk = self.rx_func(1)
                 if not chunk:
-                    await anyio.sleep(0.01)
+                    import time; time.sleep(0.01)
                     continue
                 response_buffer.extend(chunk)
                 if chunk[0] == 0x00:
                     break
                     
-        if cancel_scope.cancel_called:
+        if time.perf_counter() - t0 >= self.timeout_s:
             logger.error("rpc_call_timed_out", method_id=method_id)
             return None
             
@@ -130,8 +131,8 @@ class McuRpcClient(RpcClientBase):
             logger.error("rpc_decode_failed", error=str(e))
             return None
 
-    async def async_invoke(self, request: McuRpcMessage, response_type: Type[TMessage]) -> Optional[TMessage]:
-        raw_response = await self._async_call_raw(request.METHOD_ID, request.to_bytes())
+    def invoke(self, request: McuRpcMessage, response_type: Type[TMessage]) -> Optional[TMessage]:
+        raw_response = self._call_raw(request.METHOD_ID, request.to_bytes())
         if raw_response is None:
             return None
         try:

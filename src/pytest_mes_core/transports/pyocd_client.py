@@ -91,22 +91,7 @@ class PyOcdTransport(McuTransport):
 
     # --- Async Endpoints for Parallel Jig Execution ---
 
-    async def async_connect(self) -> None:
-        import anyio
-        await anyio.to_thread.run_sync(self.connect)
 
-    async def async_disconnect(self) -> None:
-        import anyio
-        await anyio.to_thread.run_sync(self.disconnect)
 
-    async def async_halt(self) -> None:
-        import anyio
-        await anyio.to_thread.run_sync(self.halt)
 
-    async def async_resume(self) -> None:
-        import anyio
-        await anyio.to_thread.run_sync(self.resume)
 
-    async def async_reset(self) -> None:
-        import anyio
-        await anyio.to_thread.run_sync(self.reset)

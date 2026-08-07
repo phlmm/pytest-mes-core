@@ -76,24 +76,8 @@ class DutTransport(Protocol):
         """
         ...
 
-    async def async_connect(self) -> None:
-        """Async variant of connect."""
-        ...
 
-    async def async_disconnect(self) -> None:
-        """Async variant of disconnect."""
-        ...
 
-    async def async_safe_run(
-        self,
-        cmd: str,
-        timeout_s: float = 30.0,
-        check_exit_code: bool = False,
-        auto_retry: bool = False,
-        **kwargs: Any
-    ) -> CommandResult:
-        """Async variant of safe_run."""
-        ...
 
     # ==========================================
     # PUB/SUB MULTIPLEXER INTERFACE
@@ -135,25 +119,16 @@ class DutTransport(Protocol):
         """Transmit raw bytes without framing or newline injection."""
         ...
 
-    async def async_raw_write(self, data: bytes) -> None:
-        """Async variant of raw_write."""
-        ...
 
     def raw_read_chunk(self) -> bytes:
         """Reads a chunk of raw bytes."""
         ...
 
-    async def async_raw_read_chunk(self) -> bytes:
-        """Async variant of raw_read_chunk."""
-        ...
 
     def raw_read(self, size: int) -> bytes:
         """Reads exactly 'size' raw bytes."""
         ...
 
-    async def async_raw_read(self, size: int) -> bytes:
-        """Async variant of raw_read."""
-        ...
 
     def flush_buffers(self) -> None:
         """Flush hardware RX/TX buffers and drain all subscriber queues.
@@ -163,9 +138,6 @@ class DutTransport(Protocol):
         """
         ...
 
-    async def async_flush_buffers(self) -> None:
-        """Async variant of flush_buffers."""
-        ...
 
     def expect(self, pattern: str, timeout_s: float = 5.0, blast_char: str = '', active_redraw: bool = True) -> str:
         """Wait for ``pattern`` to appear as a plain substring on the stream.
@@ -175,7 +147,4 @@ class DutTransport(Protocol):
         """
         ...
 
-    async def async_expect(self, pattern: str, timeout_s: float = 5.0, blast_char: str = '', active_redraw: bool = True) -> str:
-        """Async variant of expect. Also plain substring matching, not regex."""
-        ...
 

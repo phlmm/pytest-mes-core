@@ -148,8 +148,3 @@ class HeadlessBarcodeScanner(BaseHostAdapter):
         except OSError as e:
             logger.critical('hardware_disconnect_mid_scan_e', e=e)
             raise HostHardwareDisconnectError(f'Scanner physically disconnected during read operation: {e}')
-
-    async def async_wait_for_scan(self) -> str:
-        """Async wrapper for wait_for_scan()."""
-        import anyio
-        return await anyio.to_thread.run_sync(self.wait_for_scan)

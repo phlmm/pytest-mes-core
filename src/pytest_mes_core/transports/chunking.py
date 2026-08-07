@@ -65,15 +65,7 @@ class HostSideBuffer:
             logger.info('vacuum_disarmed_extracted_val_lines_over_duration_s', val=len(survived_data), duration=duration)
             return survived_data
 
-    async def async_start(self) -> None:
-        """Async variant of start using anyio threads."""
-        import anyio
-        await anyio.to_thread.run_sync(self.start)
 
-    async def async_stop(self) -> List[str]:
-        """Async variant of stop using anyio threads."""
-        import anyio
-        return await anyio.to_thread.run_sync(self.stop)
 
     def _poll_loop(self) -> None:
         while not self._stop_event.is_set():

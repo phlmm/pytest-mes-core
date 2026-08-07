@@ -3,7 +3,7 @@ from typing import Any
 import anyio
 
 # Mocks or hypothetical imports from pytest-mes-core for the purpose of the pipeline iteration
-from unittest.mock import AsyncMock
+from unittest.mock import MagicMock
 
 class HardwareReadError(Exception):
     pass

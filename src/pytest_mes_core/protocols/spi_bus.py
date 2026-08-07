@@ -20,11 +20,6 @@ class SpiBus:
         cmd = f"spi-config -d {device} -m {mode} -b {bits} -s {speed_hz}"
         self.dut.safe_run(cmd, timeout_s=2.0, check_exit_code=True)
 
-    async def async_config(self, device: str, mode: int = 0, bits: int = 8, speed_hz: int = 1000000) -> None:
-        """Async variant of config."""
-        logger.debug("configuring_spi_async", device=device, mode=mode, bits=bits, speed_hz=speed_hz)
-        cmd = f"spi-config -d {device} -m {mode} -b {bits} -s {speed_hz}"
-        await self.dut.async_safe_run(cmd, timeout_s=2.0, check_exit_code=True)
 
     def transfer(self, device: str, tx_hex_bytes: List[str]) -> List[str]:
         """
@@ -43,16 +38,6 @@ class SpiBus:
         
         return self._parse_od_output(res.stdout)
 
-    async def async_transfer(self, device: str, tx_hex_bytes: List[str]) -> List[str]:
-        """Async variant of transfer."""
-        if not tx_hex_bytes:
-            return []
-            
-        hex_str = "".join(f"\\x{b}" for b in tx_hex_bytes)
-        cmd = f"echo -ne '{hex_str}' | spi-pipe -d {device} | od -An -v -t x1"
-        res = await self.dut.async_safe_run(cmd, timeout_s=3.0, check_exit_code=True)
-        
-        return self._parse_od_output(res.stdout)
 
     def _parse_od_output(self, stdout: str) -> List[str]:
         rx_bytes = []

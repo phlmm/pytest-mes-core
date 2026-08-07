@@ -36,13 +36,12 @@ class UuuTeziProvisioner(BaseProvisioner):
         custom FSMs) are invoked directly.
         """
         import inspect
-        import anyio
         fn = fsm.release_recovery
         if inspect.iscoroutinefunction(fn):
             try:
-                anyio.from_thread.run(fn)      # inside an anyio worker thread
+                fn()      # inside an anyio worker thread
             except RuntimeError:
-                anyio.run(fn)                  # plain sync caller, no loop
+                fn()                  # plain sync caller, no loop
         else:
             fn()
 
@@ -76,9 +75,6 @@ class UuuTeziProvisioner(BaseProvisioner):
             logger.critical('err_msg', err_msg=err_msg)
             raise ProvisioningError(err_msg)
 
-    async def async_provision(self, image_path: Path, serial_client: Optional['EphemeralSerialClient'] = None, success_prompt: str = "login:", fsm: Optional[Any] = None) -> bool:
-        import anyio
-        return await anyio.to_thread.run_sync(self.provision, image_path, serial_client, success_prompt, fsm)
 
     def provision(
         self,

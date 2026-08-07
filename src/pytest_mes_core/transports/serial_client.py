@@ -8,7 +8,6 @@ import threading
 import queue
 from contextlib import contextmanager
 from typing import Generator, Optional, Any, AsyncGenerator
-import anyio
 from pytest_mes_core.config import HostSerialConfig
 from pytest_mes_core.transports.base import CommandResult, TransportConnectionError, TransportTimeoutError
 from pytest_mes_core.utils.uart_parser import UartStreamParser
@@ -165,13 +164,7 @@ class EphemeralSerialClient:
             except Exception:
                 pass
 
-    async def async_connect(self) -> None:
-        import anyio
-        await anyio.to_thread.run_sync(self.connect)
 
-    async def async_disconnect(self) -> None:
-        import anyio
-        await anyio.to_thread.run_sync(self.disconnect)
 
     @property
     def is_connected(self) -> bool:
@@ -246,12 +239,6 @@ class EphemeralSerialClient:
         logger.error('timeout_expecting_pattern_buffer_yielded_dump', pattern=pattern, dump=dump)
         raise TransportTimeoutError(f"UART Expect Timeout: '{pattern}' not found.")
 
-    async def async_expect(self, pattern: str, timeout_s: float=5.0, blast_char: str='', active_redraw: bool=True) -> str:
-        import anyio
-        from functools import partial
-        return await anyio.to_thread.run_sync(
-            partial(self.expect, pattern, timeout_s=timeout_s, blast_char=blast_char, active_redraw=active_redraw)
-        )
 
     def write_line(self, cmd: str, sensitive: bool=False) -> None:
         if self.ser is None:
@@ -352,12 +339,6 @@ class EphemeralSerialClient:
                     raise RuntimeError(f"UART Command '{cmd}' timed out after {timeout_s}s")
                 return result
 
-    async def async_safe_run(self, cmd: str, timeout_s: float=30.0, check_exit_code: bool=False, auto_retry: bool=False, **kwargs: Any) -> CommandResult:
-        import anyio
-        from functools import partial
-        return await anyio.to_thread.run_sync(
-            partial(self.safe_run, cmd, timeout_s=timeout_s, check_exit_code=check_exit_code, auto_retry=auto_retry, **kwargs)
-        )
 
     def flush_buffers(self) -> None:
         with self._sub_lock:
@@ -378,9 +359,6 @@ class EphemeralSerialClient:
                     except queue.Empty:
                         break
 
-    async def async_flush_buffers(self) -> None:
-        import anyio
-        await anyio.to_thread.run_sync(self.flush_buffers)
 
     def raw_write(self, data: bytes) -> None:
         with self._tx_lock:
@@ -414,17 +392,8 @@ class EphemeralSerialClient:
         finally:
             self.unsubscribe(q)
 
-    async def async_raw_read_chunk(self) -> bytes:
-        import anyio
-        return await anyio.to_thread.run_sync(self.raw_read_chunk)
 
-    async def async_raw_read(self, size: int) -> bytes:
-        import anyio
-        return await anyio.to_thread.run_sync(self.raw_read, size)
 
-    async def async_raw_write(self, data: bytes) -> None:
-        import anyio
-        await anyio.to_thread.run_sync(self.raw_write, data)
 
     def raw_set_timeout(self, timeout: float) -> None:
         if self.ser and self.ser.is_open:
@@ -545,7 +514,3 @@ class EphemeralSerialClient:
             logger.info("reconnecting_after_usb_reset", port=self.cfg.port)
             self.connect()
 
-    async def async_reset_hardware(self) -> None:
-        """Asynchronously performs a driver-level reset on the underlying USB-to-serial device."""
-        import anyio
-        await anyio.to_thread.run_sync(self.reset_hardware)

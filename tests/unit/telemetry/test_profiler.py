@@ -1,75 +1,49 @@
 import pytest
-import anyio
-from unittest.mock import MagicMock, AsyncMock
-from pytest_mes_core.telemetry.profiler import AsyncHardwareProfiler
+import time
+from unittest.mock import MagicMock, MagicMock
+from pytest_mes_core.telemetry.profiler import HardwareProfiler
 from pytest_mes_core.transports.base import CommandResult
 
-@pytest.mark.anyio
-async def test_async_hardware_profiler():
-    # Mock DUT
+def test_async_hardware_profiler():
     dut = MagicMock()
     dut.is_connected = True
-    # Simulate a fast-polling temperature output
-    dut.async_safe_run = AsyncMock(return_value=CommandResult(command="", stdout="85000\n", stderr="", exited=0, ok=True, duration_s=0.1))
-
-    # Mock PSU
+    dut.safe_run = MagicMock(return_value=CommandResult(command='', stdout='85000\n', stderr='', exited=0, ok=True, duration_s=0.1))
     psu = MagicMock()
     psu.measure_current = MagicMock(return_value=1.5)
     psu.measure_voltage = MagicMock(return_value=12.0)
-
-    profiler = AsyncHardwareProfiler(dut=dut, psu=psu, interval_s=0.1)
-
-    async with profiler:
-        # Sleep to let the background poll loop run a few times
-        await anyio.sleep(0.35)
-
-    # Validate that it stopped automatically via context manager
+    profiler = HardwareProfiler(dut=dut, psu=psu, interval_s=0.1)
+    with profiler:
+        time.sleep(0.35)
     assert not profiler.is_running
-    
-    # Validate metrics were gathered without blocking
-    assert len(profiler.metrics["temp_c"]) >= 2
-    assert len(profiler.metrics["psu_current_a"]) >= 2
-    
-    # Check averages and peaks
+    assert len(profiler.metrics['temp_c']) >= 2
+    assert len(profiler.metrics['psu_current_a']) >= 2
     summary = profiler.summarize()
-    assert summary["peak_temp_c"] == 85.0
-    assert summary["avg_temp_c"] == 85.0
-    assert summary["peak_current_a"] == 1.5
-    assert summary["avg_voltage_v"] == 12.0
+    assert summary['peak_temp_c'] == 85.0
+    assert summary['avg_temp_c'] == 85.0
+    assert summary['peak_current_a'] == 1.5
+    assert summary['avg_voltage_v'] == 12.0
 
-
-@pytest.mark.anyio
-async def test_async_hardware_profiler_negative_temperature():
-    # Cold-chamber / HALT testing: thermal_zone temps can be sub-zero millidegrees.
+def test_async_hardware_profiler_negative_temperature():
     dut = MagicMock()
     dut.is_connected = True
-    dut.async_safe_run = AsyncMock(return_value=CommandResult(command="", stdout="-5000\n", stderr="", exited=0, ok=True, duration_s=0.1))
-
-    profiler = AsyncHardwareProfiler(dut=dut, interval_s=0.1)
-
-    async with profiler:
-        await anyio.sleep(0.25)
-
-    assert len(profiler.metrics["temp_c"]) >= 1
-    assert all(t == -5.0 for t in profiler.metrics["temp_c"])
+    dut.safe_run = MagicMock(return_value=CommandResult(command='', stdout='-5000\n', stderr='', exited=0, ok=True, duration_s=0.1))
+    profiler = HardwareProfiler(dut=dut, interval_s=0.1)
+    with profiler:
+        time.sleep(0.25)
+    assert len(profiler.metrics['temp_c']) >= 1
+    assert all((t == -5.0 for t in profiler.metrics['temp_c']))
     summary = profiler.summarize()
-    assert summary["peak_temp_c"] == -5.0
-    assert summary["avg_temp_c"] == -5.0
+    assert summary['peak_temp_c'] == -5.0
+    assert summary['avg_temp_c'] == -5.0
 
-
-@pytest.mark.anyio
-async def test_async_hardware_profiler_garbage_console_noise():
-    # Non-numeric console noise on the thermal_zone read must be skipped, not raise.
+def test_async_hardware_profiler_garbage_console_noise():
     dut = MagicMock()
     dut.is_connected = True
-    dut.async_safe_run = AsyncMock(return_value=CommandResult(command="", stdout="garbage\n", stderr="", exited=0, ok=True, duration_s=0.1))
-
-    profiler = AsyncHardwareProfiler(dut=dut, interval_s=0.1)
-
-    async with profiler:
-        await anyio.sleep(0.25)
-
-    assert profiler.metrics["temp_c"] == []
+    dut.safe_run = MagicMock(return_value=CommandResult(command='', stdout='garbage\n', stderr='', exited=0, ok=True, duration_s=0.1))
+    profiler = HardwareProfiler(dut=dut, interval_s=0.1)
+    with profiler:
+        time.sleep(0.25)
+    assert profiler.metrics['temp_c'] == []
     summary = profiler.summarize()
-    assert "peak_temp_c" not in summary
-    assert "avg_temp_c" not in summary
+    assert 'peak_temp_c' not in summary
+    assert 'avg_temp_c' not in summary

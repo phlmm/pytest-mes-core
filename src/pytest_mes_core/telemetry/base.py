@@ -1,4 +1,3 @@
-import anyio
 # src/pytest_mes_core/telemetry/base.py
 import time
 from datetime import datetime, timezone
@@ -123,8 +122,6 @@ class TestRecord(BaseModel):
         if not validator_res.passed and validator_res.error_msg:
             self.context[f"{pfx}error"] = validator_res.error_msg
 
-    async def async_absorb(self, validator_res: ValidatorResult, prefix: str = "") -> None:
-        return await anyio.to_thread.run_sync(self.absorb, validator_res, prefix)
 
 # ==========================================
 # EXPORTER PROTOCOL
@@ -143,7 +140,6 @@ class TelemetryExporter(Protocol):
         """
         ...
 
-    async def async_start_session(self, context: StationContext) -> None: ...
 
     def emit_record(self, record: TestRecord) -> None:
         """
@@ -152,7 +148,6 @@ class TelemetryExporter(Protocol):
         """
         ...
 
-    async def async_emit_record(self, record: TestRecord) -> None: ...
 
     def end_session(self, session_passed: bool) -> None:
         """
@@ -161,4 +156,3 @@ class TelemetryExporter(Protocol):
         """
         ...
 
-    async def async_end_session(self, session_passed: bool) -> None: ...

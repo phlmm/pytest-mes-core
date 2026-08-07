@@ -1,5 +1,4 @@
 import structlog
-import anyio
 import logging
 from typing import Any, Callable, List, Optional
 
@@ -46,7 +45,7 @@ class UartKernelWatchdog:
         logger.debug('[Watchdog] Kernel panic background watchdog started.')
 
     def _run_async_in_thread(self):
-        anyio.run(self._monitor_loop)
+        self._monitor_loop()
 
     def stop(self) -> None:
         """Safely stops the watchdog task."""
@@ -63,15 +62,7 @@ class UartKernelWatchdog:
         """
         self._panic_callbacks.append(callback)
 
-    async def async_start(self) -> None:
-        """Async variant of start."""
-        import anyio
-        await anyio.to_thread.run_sync(self.start)
 
-    async def async_stop(self) -> None:
-        """Async variant of stop."""
-        import anyio
-        await anyio.to_thread.run_sync(self.stop)
 
     def mute(self) -> None:
         """Suppress panic detection. Use around known-noisy windows (e.g. USB recovery boot)."""
@@ -91,20 +82,20 @@ class UartKernelWatchdog:
     def get_panic_message(self) -> str:
         return self._panic_msg
 
-    async def _monitor_loop(self) -> None:
+    def _monitor_loop(self) -> None:
         import queue
         import time
         self._t0 = time.monotonic()
         while not self._stop_event.is_set():
             if not self.serial_client.is_connected:
-                await anyio.sleep(0.5)
+                time.sleep(0.5)
                 continue
                 
             q = self.serial_client.subscribe(maxsize=0)
             try:
                 while not self._stop_event.is_set() and self.serial_client.is_connected:
                     try:
-                        chunk = await anyio.to_thread.run_sync(q.get, True, 0.1)
+                        chunk = q.get(True, 0.1)
                         # Use the shared ANSI_ESCAPE_B constant — do NOT reach into
                         # self.serial_client for the pattern (breaks FailoverTransport).
                         clean_chunk = ANSI_ESCAPE_B.sub(b'', chunk)
@@ -136,11 +127,11 @@ class UartKernelWatchdog:
                             bus.emit_uart_event(PanicDetected(elapsed_s=elapsed_s, raw_output=self._panic_msg))
                             break
                     except queue.Empty:
-                        await anyio.sleep(0.05)
+                        time.sleep(0.05)
                     except Exception as e:
                         logger.error(f"Unexpected error in watchdog monitor loop: {e}")
-                        await anyio.sleep(0.5)
+                        time.sleep(0.5)
             finally:
                 self.serial_client.unsubscribe(q)
             
-            await anyio.sleep(0.5)
+            time.sleep(0.5)

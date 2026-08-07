@@ -27,11 +27,6 @@ class I2cBus:
         res = self.dut.safe_run(f"i2cdetect -y {bus}", timeout_s=5.0, check_exit_code=True)
         return self._parse_i2cdetect(res.stdout)
 
-    async def async_detect(self, bus: int) -> List[int]:
-        """Async variant of detect."""
-        logger.debug("scanning_i2c_bus_async", bus=bus)
-        res = await self.dut.async_safe_run(f"i2cdetect -y {bus}", timeout_s=5.0, check_exit_code=True)
-        return self._parse_i2cdetect(res.stdout)
 
     def _parse_i2cdetect(self, stdout: str) -> List[int]:
         addresses = []
@@ -54,12 +49,6 @@ class I2cBus:
         res = self.dut.safe_run(f"i2cget -y {bus} {c_addr} {d_addr}", timeout_s=2.0, check_exit_code=True)
         return int(res.stdout.strip(), 16)
 
-    async def async_get_byte(self, bus: int, chip_addr: Union[int, str], data_addr: Union[int, str]) -> int:
-        """Async variant of get_byte."""
-        c_addr = _format_hex(chip_addr)
-        d_addr = _format_hex(data_addr)
-        res = await self.dut.async_safe_run(f"i2cget -y {bus} {c_addr} {d_addr}", timeout_s=2.0, check_exit_code=True)
-        return int(res.stdout.strip(), 16)
 
     def set_byte(self, bus: int, chip_addr: Union[int, str], data_addr: Union[int, str], value: Union[int, str]) -> None:
         """Writes a single byte to a specific register on an I2C device."""
@@ -68,12 +57,6 @@ class I2cBus:
         val = _format_hex(value)
         self.dut.safe_run(f"i2cset -y {bus} {c_addr} {d_addr} {val}", timeout_s=2.0, check_exit_code=True)
 
-    async def async_set_byte(self, bus: int, chip_addr: Union[int, str], data_addr: Union[int, str], value: Union[int, str]) -> None:
-        """Async variant of set_byte."""
-        c_addr = _format_hex(chip_addr)
-        d_addr = _format_hex(data_addr)
-        val = _format_hex(value)
-        await self.dut.async_safe_run(f"i2cset -y {bus} {c_addr} {d_addr} {val}", timeout_s=2.0, check_exit_code=True)
 
     def dump(self, bus: int, chip_addr: Union[int, str]) -> str:
         """Dumps all registers of an I2C device."""
@@ -81,8 +64,3 @@ class I2cBus:
         res = self.dut.safe_run(f"i2cdump -y {bus} {c_addr}", timeout_s=3.0, check_exit_code=True)
         return res.stdout
 
-    async def async_dump(self, bus: int, chip_addr: Union[int, str]) -> str:
-        """Async variant of dump."""
-        c_addr = _format_hex(chip_addr)
-        res = await self.dut.async_safe_run(f"i2cdump -y {bus} {c_addr}", timeout_s=3.0, check_exit_code=True)
-        return res.stdout

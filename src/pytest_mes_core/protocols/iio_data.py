@@ -82,9 +82,6 @@ class IioAdcValidator:
             logger.critical('fatal_transport_pipe_shattered_during_adc_read_e', e=e)
             return ValidatorResult(passed=False, error_msg=f'Transport pipe shattered during ADC read: {e}', context=context_data)
 
-    @staticmethod
-    async def async_measure_voltage(dut, iio_device_name, channel, samples, delay_s, min_v, max_v, *args, **kwargs):
-        return await anyio.to_thread.run_sync(IioAdcValidator.measure_voltage, dut, iio_device_name, channel, samples, delay_s, min_v, max_v, *args, **kwargs)
 
 class IioDacActuator:
     """Controls physical Digital-to-Analog hardware outputs via Linux IIO."""
@@ -139,6 +136,3 @@ class IioDacActuator:
         except TransportConnectionError as e:
             logger.critical('fatal_transport_dropped_during_dac_write_e', e=e)
             return ValidatorResult(passed=False, error_msg=f'Transport dropped during DAC write: {e}', context=context_data)
-    @staticmethod
-    async def async_set_voltage(dut, iio_device_name, channel, target_v, *args, **kwargs):
-        return await anyio.to_thread.run_sync(IioDacActuator.set_voltage, dut, iio_device_name, channel, target_v, *args, **kwargs)

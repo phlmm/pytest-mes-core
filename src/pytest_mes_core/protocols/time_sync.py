@@ -117,9 +117,6 @@ class RtcTimeValidator:
             logger.critical('fatal_transport_pipe_shattered_during_time_sync_e', e=e)
             return ValidatorResult(passed=False, error_msg=f'Transport pipe shattered during time sync: {e}', context=context_data)
 
-    @classmethod
-    async def async_verify_and_sync_time(cls, dut, cfg, *args, **kwargs):
-        return await anyio.to_thread.run_sync(cls.verify_and_sync_time, dut, cfg, *args, **kwargs)
 
     @classmethod
     def _audit_time_daemon(cls, dut: DutTransport, daemon: TimeDaemonType, ctx: Dict[str, Any]) -> None:

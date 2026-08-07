@@ -1,3 +1,4 @@
+from __future__ import annotations
 """
 pytest_mes_core.utils.device_crypto
 ====================================
@@ -30,7 +31,6 @@ raises :class:`DeviceCryptoError` instead of being silently returned as
 raw envelope JSON.
 """
 
-from __future__ import annotations
 
 import base64
 import json

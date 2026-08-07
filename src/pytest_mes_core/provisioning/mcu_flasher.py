@@ -1,3 +1,4 @@
+from __future__ import annotations
 """
 mcu_flasher.py
 ==============
@@ -17,7 +18,6 @@ Design decisions:
       compatibility but is always True on success.
 """
 
-from __future__ import annotations
 
 import hashlib
 import os
@@ -169,134 +169,8 @@ class McuProvisioner:
     # Async wrappers
     # ------------------------------------------------------------------
 
-    async def async_verify_flash(self, firmware_path: Path, base_address: int) -> None:
-        """Async verify flash."""
-        if not hasattr(self.swd, "async_read_memory"):
-            logger.debug("flash_verify_skipped", reason="transport lacks async_read_memory")
-            return
 
-        verify_size = min(256, firmware_path.stat().st_size)
-        if verify_size == 0:
-            return
 
-        logger.info("flash_verify_start", address=f"0x{base_address:08X}", size=verify_size)
-
-        try:
-            device_data = await self.swd.async_read_memory(base_address, verify_size)
-            with open(firmware_path, "rb") as f:
-                fw_data = f.read(verify_size)
-
-            if len(device_data) != len(fw_data):
-                raise ImageVerificationError(
-                    f"Flash readback length mismatch: expected {len(fw_data)} bytes, "
-                    f"got {len(device_data)}")
-
-            if device_data != fw_data:
-                logger.error("flash_verify_failed",
-                             address=f"0x{base_address:08X}",
-                             device_data=device_data.hex(),
-                             fw_data=fw_data.hex())
-                raise ImageVerificationError(
-                    f"Flash verification failed at 0x{base_address:08X}")
-            logger.info("flash_verify_ok")
-        except ImageVerificationError:
-            raise
-        except Exception as exc:
-            # Verification failure is non-fatal -- log and continue (mirrors the
-            # sync _verify_flash warn-and-continue behaviour for transient SWD
-            # read hiccups).
-            logger.warning("flash_verify_error",
-                           error=str(exc),
-                           hint="Verification failed but flash may be OK")
-
-    async def async_flash_firmware(self, firmware_path: Path,
-                                   base_address: int = 0x0800_0000,
-                                   *, verify: bool = True,
-                                   chip_erase: bool = False) -> bool:
-        """Async variant of ``flash_firmware()``."""
-        import anyio
-
-        if not hasattr(self.swd, "async_download"):
-            return await anyio.to_thread.run_sync(
-                lambda: self.flash_firmware(
-                    firmware_path, base_address, verify=verify,
-                    chip_erase=chip_erase))
-
-        firmware_path = Path(firmware_path)
-        self._validate_firmware_file(firmware_path)
-
-        file_size = firmware_path.stat().st_size
-        file_hash = self._sha256(firmware_path)
-        transport_name = type(self.swd).__name__
-
-        logger.info("flash_start",
-                     firmware=firmware_path.name,
-                     size_bytes=file_size,
-                     sha256=file_hash[:16] + "...",
-                     base_address=f"0x{base_address:08X}",
-                     transport=transport_name)
-
-        t0 = time.monotonic()
-        try:
-            suffix = firmware_path.suffix.lower()
-            kwargs = {}
-            if chip_erase:
-                kwargs["chip_erase"] = True
-            if suffix not in (".hex", ".elf"):
-                kwargs["binary_format"] = "bin"
-                kwargs["base_address"] = base_address
-            
-            await self.swd.async_download(str(firmware_path), **kwargs)
-
-            if verify and firmware_path.suffix.lower() == ".bin":
-                await self.async_verify_flash(firmware_path, base_address)
-
-        except Exception as exc:
-            logger.error("flash_failed",
-                         transport=transport_name,
-                         error=str(exc),
-                         error_type=type(exc).__name__)
-            raise ProvisioningError(f"Flash failed ({transport_name}): {exc}") from exc
-
-        elapsed = time.monotonic() - t0
-        speed_kbs = (file_size / 1024) / elapsed if elapsed > 0 else 0
-
-        logger.info("flash_complete",
-                     transport=transport_name,
-                     elapsed_s=round(elapsed, 2),
-                     speed_kb_s=round(speed_kbs, 1))
-
-        logger.info("mcu_reset_start", transport=transport_name)
-        t0 = time.monotonic()
-        try:
-            if hasattr(self.swd, "async_reset"):
-                await self.swd.async_reset()
-            else:
-                await anyio.to_thread.run_sync(self.swd.reset)
-        except Exception as exc:
-            logger.error("mcu_reset_failed",
-                         transport=transport_name,
-                         error=str(exc))
-            raise ProvisioningError(f"MCU reset failed ({transport_name}): {exc}") from exc
-            
-        elapsed_ms = (time.monotonic() - t0) * 1000
-        logger.info("mcu_reset_complete",
-                     transport=transport_name,
-                     elapsed_ms=round(elapsed_ms, 1))
-        return True
-
-    async def async_reset(self) -> bool:
-        """Async variant of ``reset()``."""
-        import anyio
-        from .base import ProvisioningError
-        
-        if hasattr(self.swd, "async_reset"):
-            try:
-                await self.swd.async_reset()
-                return True
-            except Exception as exc:
-                raise ProvisioningError(f"MCU reset failed: {exc}") from exc
-        return await anyio.to_thread.run_sync(self.reset)
 
     # ------------------------------------------------------------------
     # Backend dispatch

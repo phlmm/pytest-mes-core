@@ -1,4 +1,3 @@
-import anyio
 import time
 import queue
 import logging
@@ -65,8 +64,6 @@ class DaemonProcess:
         self.logger.info(f'[Daemon] Process online and backgrounded (PID: {self.proc.pid}).')
         return self
 
-    async def async_start(self, timeout_s: float = 5.0) -> 'DaemonProcess':
-        return await anyio.to_thread.run_sync(self.start, timeout_s)
 
     def stop(self) -> None:
         """ZERO-LEAKAGE: Terminates the daemon and reaps the worker thread."""
@@ -84,8 +81,6 @@ class DaemonProcess:
             self._thread.join(timeout=1.0)
         self.proc = None
 
-    async def async_stop(self) -> None:
-        return await anyio.to_thread.run_sync(self.stop)
 
     def _io_consumer(self) -> None:
         """Background thread that consumes the subprocess pipe."""
@@ -118,5 +113,3 @@ class DaemonProcess:
             f.write('-' * 40 + '\n')
             f.writelines(self.stdout_log)
         return filepath
-    async def async_export_log(self, export_dir: Path) -> Path:
-        return await anyio.to_thread.run_sync(self.export_log, export_dir)

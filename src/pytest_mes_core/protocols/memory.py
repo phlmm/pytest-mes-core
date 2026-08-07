@@ -100,9 +100,6 @@ class NativeMemoryValidator:
                 except Exception:
                     pass
 
-    @staticmethod
-    async def async_verify_full_capacity(dut, device_path, total_size_bytes, restore_backup, *args, **kwargs):
-        return await anyio.to_thread.run_sync(NativeMemoryValidator.verify_full_capacity, dut, device_path, total_size_bytes, restore_backup, *args, **kwargs)
 
 class RamValidator:
     """
@@ -171,6 +168,3 @@ class RamValidator:
         except TransportConnectionError as e:
             logger.critical('fatal_transport_shattered_during_ram_stress_e', e=e)
             return ValidatorResult(passed=False, error_msg=f'Transport dropped (OOM reboot?): {e}', context=context_data)
-    @staticmethod
-    async def async_verify_ram_health(dut, size_mb, loops, *args, **kwargs):
-        return await anyio.to_thread.run_sync(RamValidator.verify_ram_health, dut, size_mb, loops, *args, **kwargs)

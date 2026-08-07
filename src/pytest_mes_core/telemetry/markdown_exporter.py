@@ -1,4 +1,3 @@
-import anyio
 import structlog
 import json
 import logging
@@ -42,8 +41,6 @@ class DeveloperMarkdownExporter:
         with open(self.filepath, 'w', encoding='utf-8') as f:
             f.write(header)
 
-    async def async_start_session(self, context: StationContext) -> None:
-        return await anyio.to_thread.run_sync(self.start_session, context)
 
     def emit_record(self, record: TestRecord) -> None:
         """Serializes and flushes a single payload to the active markdown file.
@@ -87,8 +84,6 @@ class DeveloperMarkdownExporter:
         with open(self.filepath, 'a', encoding='utf-8') as f:
             f.write(md)
 
-    async def async_emit_record(self, record: TestRecord) -> None:
-        return await anyio.to_thread.run_sync(self.emit_record, record)
 
     def end_session(self, session_passed: bool) -> None:
         """Finalizes the session and renames the file with the final status.
@@ -147,5 +142,3 @@ class DeveloperMarkdownExporter:
             logger.debug('bringup_report_finalized_and_renamed_to_final_name', final_name=final_name)
         except Exception as e:
             logger.error('failed_to_rename_bringup_report_e', e=e)
-    async def async_end_session(self, session_passed: bool) -> None:
-        return await anyio.to_thread.run_sync(self.end_session, session_passed)

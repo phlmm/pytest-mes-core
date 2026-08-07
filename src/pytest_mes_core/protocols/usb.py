@@ -126,5 +126,3 @@ class UsbMassStorageValidator:
                     self.transport.safe_run(f'rm -rf {self.mount_point} >/dev/null 2>&1', timeout_s=5.0)
                 except Exception as cleanup_err:
                     logger.debug('teardown_skipped_transport_likely_dead_cleanup_err', cleanup_err=cleanup_err)
-    async def async_verify_throughput_and_integrity(self, *args, **kwargs):
-        return await anyio.to_thread.run_sync(self.verify_throughput_and_integrity, *args, **kwargs)

@@ -1,4 +1,3 @@
-import anyio
 import structlog
 import os
 import stat
@@ -110,5 +109,3 @@ class BmapBlockDeviceProvisioner(BaseProvisioner):
             logger.critical('fatal_err_msg', err_msg=err_msg)
             raise ProvisioningError(err_msg)
         return True
-    async def async_provision(self, image_path: Path) -> bool:
-        return await anyio.to_thread.run_sync(self.provision, image_path)

@@ -1,3 +1,4 @@
+from __future__ import annotations
 """
 pytest_mes_core.mcu_log_parser
 ================================
@@ -32,7 +33,6 @@ is useful for forensic data (reset counters, PHY IDs, etc.) that tests
 read after the boot sequence completes.
 """
 
-from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field

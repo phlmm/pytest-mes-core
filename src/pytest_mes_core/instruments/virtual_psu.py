@@ -4,7 +4,6 @@ import logging
 import time
 from typing import Optional
 from functools import partial
-import anyio
 
 logger = structlog.get_logger('mes_core.instruments.virtual_psu')
 
@@ -98,20 +97,7 @@ class VirtualRenodePsu:
     # Async API (anyio-compatible)
     # ------------------------------------------------------------------
 
-    async def async_connect(self) -> None:
-        await anyio.to_thread.run_sync(self.connect)
 
-    async def async_set_voltage(self, volts: float) -> None:
-        await anyio.to_thread.run_sync(partial(self.set_voltage, volts))
 
-    async def async_set_current_limit(self, amps: float) -> None:
-        await anyio.to_thread.run_sync(partial(self.set_current_limit, amps))
 
-    async def async_enable_output(self) -> None:
-        await anyio.to_thread.run_sync(self.enable_output)
 
-    async def async_disable_output(self) -> None:
-        await anyio.to_thread.run_sync(self.disable_output)
-
-    async def async_measure_current(self) -> float:
-        return await anyio.to_thread.run_sync(self.measure_current)

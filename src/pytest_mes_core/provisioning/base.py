@@ -30,8 +30,3 @@ class BaseProvisioner(ABC):
             bool: True if successful, raises ProvisioningError or returns False on failure.
         """
         pass
-
-    @abstractmethod
-    async def async_provision(self, image_path: Path) -> bool:
-        """Async variant of provision."""
-        pass

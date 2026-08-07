@@ -55,9 +55,6 @@ class EnvironmentValidator:
         logger.info('[Pre-Flight] All required binaries found. Userland environment is pristine.')
         return ValidatorResult(passed=True, context=context_data)
 
-    @classmethod
-    async def async_verify_target_dependencies(cls, dut, extra_binaries, *args, **kwargs):
-        return await anyio.to_thread.run_sync(cls.verify_target_dependencies, dut, extra_binaries, *args, **kwargs)
 
     @classmethod
     def verify_system_health(cls, dut: DutTransport) -> ValidatorResult:
@@ -117,6 +114,3 @@ class EnvironmentValidator:
             return ValidatorResult(passed=False, error_msg=' | '.join(errors), metrics=metrics, context=context_data)
         logger.info('[Pre-Flight] Kernel health sweep passed. No early-boot panics detected.')
         return ValidatorResult(passed=True, metrics=metrics, context=context_data)
-    @classmethod
-    async def async_verify_system_health(cls, dut, *args, **kwargs):
-        return await anyio.to_thread.run_sync(cls.verify_system_health, dut, *args, **kwargs)

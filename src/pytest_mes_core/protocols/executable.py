@@ -113,6 +113,3 @@ class CustomPayloadValidator:
                         dut.safe_run(f'rm -f {cfg.log_file_path} >/dev/null 2>&1 || true', timeout_s=5.0)
                 except Exception as teardown_err:
                     logger.debug('cleanup_failed_transport_likely_dying_teardown_err', teardown_err=teardown_err)
-    @staticmethod
-    async def async_run_binary(dut, cfg, *args, **kwargs):
-        return await anyio.to_thread.run_sync(CustomPayloadValidator.run_binary, dut, cfg, *args, **kwargs)

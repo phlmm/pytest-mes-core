@@ -1,4 +1,5 @@
-import anyio
+import threading
+import functools
 import time
 import structlog
 from typing import Dict, List, Optional
@@ -7,7 +8,7 @@ from pytest_mes_core.instruments.power_supplies import ScpiPowerSupply
 
 logger = structlog.get_logger('mes_core.telemetry.profiler')
 
-class AsyncHardwareProfiler:
+class HardwareProfiler:
     """
     Continuous telemetry profiler that non-blockingly samples hardware metrics
     (PSU current/voltage, DUT temperatures, and CPU load) using the AnyIO event loop.
@@ -27,33 +28,35 @@ class AsyncHardwareProfiler:
             "psu_voltage_v": []
         }
         self._t0: float = 0.0
-        self._task_group: Optional[anyio.abc.TaskGroup] = None
+        self._thread = None
+        self._stop_event = threading.Event()
 
-    async def __aenter__(self):
+    def __enter__(self):
         self.is_running = True
         self._t0 = time.perf_counter()
-        self._task_group = anyio.create_task_group()
-        await self._task_group.__aenter__()
-        self._task_group.start_soon(self._poll_loop)
+        self._stop_event.clear()
+        self._thread = threading.Thread(target=self._poll_loop, daemon=True)
+        self._thread.start()
         return self
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(self, exc_type, exc_val, exc_tb):
         self.is_running = False
-        if self._task_group:
-            self._task_group.cancel_scope.cancel()
-            await self._task_group.__aexit__(exc_type, exc_val, exc_tb)
+        self._stop_event.set()
+        if self._thread:
+            self._thread.join(timeout=2.0)
+            
         samples = len(self.metrics["timestamps_s"])
         logger.info("async_profiling_complete", samples=samples, summary=self.summarize())
 
-    async def _poll_loop(self):
-        while self.is_running:
+    def _poll_loop(self):
+        while not self._stop_event.is_set():
             start_poll = time.perf_counter()
             self.metrics["timestamps_s"].append(round(start_poll - self._t0, 3))
 
             if self.psu:
                 try:
-                    v = await anyio.to_thread.run_sync(self.psu.measure_voltage)
-                    c = await anyio.to_thread.run_sync(self.psu.measure_current)
+                    v = self.psu.measure_voltage()
+                    c = self.psu.measure_current()
                     self.metrics["psu_voltage_v"].append(v)
                     self.metrics["psu_current_a"].append(c)
                 except Exception as e:
@@ -62,7 +65,7 @@ class AsyncHardwareProfiler:
             if self.dut and getattr(self.dut, 'is_connected', True):
                 try:
                     # Fast-poll the thermal zone via FSM transport
-                    res = await self.dut.async_safe_run("cat /sys/class/thermal/thermal_zone0/temp", timeout_s=1.0, check_exit_code=False)
+                    res = self.dut.safe_run("cat /sys/class/thermal/thermal_zone0/temp", timeout_s=1.0, check_exit_code=False)
                     raw = res.stdout.strip()
                     if res.ok and raw:
                         try:
@@ -76,7 +79,7 @@ class AsyncHardwareProfiler:
             sleep_time = max(0.01, self.interval_s - elapsed)
             
             # Explicit yield to prevent tight-loop lockup if interval is aggressively low
-            await anyio.sleep(sleep_time)
+            self._stop_event.wait(sleep_time)
 
     def summarize(self) -> Dict[str, float]:
         """Returns peak/avg metrics suitable for JSONL telemetry injection."""

@@ -1,7 +1,7 @@
+import functools
 import pytest
 import anyio
-from unittest.mock import MagicMock, AsyncMock
-
+from unittest.mock import MagicMock, MagicMock
 from pytest_mes_core.transports.base import CommandResult
 from pytest_mes_core.transports.failover import FailoverTransport
 from pytest_mes_core.transports.chunking import HostSideBuffer
@@ -13,45 +13,31 @@ async def test_failover_transport_async_methods():
     fallback = MagicMock()
     primary.is_connected = False
     fallback.is_connected = False
-    
-    # Mock the async methods directly
-    primary.async_connect = AsyncMock()
-    fallback.async_connect = AsyncMock()
-    primary.async_disconnect = AsyncMock()
-    fallback.async_disconnect = AsyncMock()
-    
-    mock_res = CommandResult(command="test", stdout="ok", stderr="", exited=0, ok=True, duration_s=0.1)
-    primary.async_safe_run = AsyncMock(return_value=mock_res)
-    fallback.async_safe_run = AsyncMock(return_value=mock_res)
-    
+    primary.connect = MagicMock()
+    fallback.connect = MagicMock()
+    primary.disconnect = MagicMock()
+    fallback.disconnect = MagicMock()
+    mock_res = CommandResult(command='test', stdout='ok', stderr='', exited=0, ok=True, duration_s=0.1)
+    primary.safe_run = MagicMock(return_value=mock_res)
+    fallback.safe_run = MagicMock(return_value=mock_res)
     router = FailoverTransport(primary, fallback)
-    
-    # Test connect
-    await router.async_connect()
-    primary.async_connect.assert_awaited_once()
-    fallback.async_connect.assert_awaited_once()
-    
-    # Test safe_run (primary)
-    res = await router.async_safe_run("test")
+    router.connect()
+    primary.connect.assert_called_once()
+    fallback.connect.assert_called_once()
+    res = router.safe_run('test')
     assert res.ok
-    primary.async_safe_run.assert_awaited_once_with("test", 30.0, False, False)
-    
-    # Test disconnect
-    await router.async_disconnect()
-    primary.async_disconnect.assert_awaited_once()
-    fallback.async_disconnect.assert_awaited_once()
+    primary.safe_run.assert_called_once_with('test', 30.0, False, False)
+    router.disconnect()
+    primary.disconnect.assert_called_once()
+    fallback.disconnect.assert_called_once()
 
 @pytest.mark.anyio
 async def test_host_side_buffer_async_methods():
     transport = MagicMock()
-    buffer = HostSideBuffer(transport, "/var/log/syslog", poll_interval_s=0.5)
-    
-    await buffer.async_start()
-    
-    # Since start() spins a thread, wait a tiny bit and then stop
+    buffer = HostSideBuffer(transport, '/var/log/syslog', poll_interval_s=0.5)
+    buffer.start()
     await anyio.sleep(0.1)
-    
-    data = await buffer.async_stop()
+    data = buffer.stop()
     assert isinstance(data, list)
 
 @pytest.mark.anyio
@@ -61,12 +47,9 @@ async def test_watchdog_async_methods():
     serial.is_connected = True
     test_q = queue.Queue()
     serial.subscribe.return_value = test_q
-    serial.ANSI_ESCAPE_B = re.compile(rb'\x1b\[[0-9;]*[a-zA-Z]')
+    serial.ANSI_ESCAPE_B = re.compile(b'\\x1b\\[[0-9;]*[a-zA-Z]')
     watchdog = UartKernelWatchdog(serial)
-    
-    await watchdog.async_start()
-    
+    watchdog.start()
     await anyio.sleep(0.1)
-    
-    await watchdog.async_stop()
+    watchdog.stop()
     assert not watchdog.is_panicked()

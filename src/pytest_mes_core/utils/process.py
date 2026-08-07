@@ -1,4 +1,3 @@
-import anyio
 import sys
 import time
 import json
@@ -89,8 +88,6 @@ class LiveProcess:
             self.executed = True
         return self
 
-    async def async_execute(self) -> 'LiveProcess':
-        return await anyio.to_thread.run_sync(self.execute)
 
     def export_log(self, export_dir: Path) -> Path:
         """Dumps the raw unedited output to a discrete text file for CI/CD artifacts.
@@ -118,8 +115,6 @@ class LiveProcess:
         self.logger.debug(f'[OS] Process trace exported to {filepath}')
         return filepath
 
-    async def async_export_log(self, export_dir: Path) -> Path:
-        return await anyio.to_thread.run_sync(self.export_log, export_dir)
 
     def to_dict(self) -> dict:
         """Serializes the telemetry for injection into Pytest JSON reports.

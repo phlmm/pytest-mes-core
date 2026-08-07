@@ -146,12 +146,4 @@ class HostPeripheralSerialAdapter(BaseHostAdapter):
             time.sleep(0.01)
         return False
 
-    async def async_send(self, payload: bytes) -> None:
-        """Async wrapper for send()."""
-        import anyio
-        await anyio.to_thread.run_sync(self.send, payload)
 
-    async def async_expect(self, payload: bytes, timeout_s: float=2.0) -> bool:
-        """Async wrapper for expect()."""
-        import anyio
-        return await anyio.to_thread.run_sync(self.expect, payload, timeout_s)

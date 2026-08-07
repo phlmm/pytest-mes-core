@@ -18,31 +18,15 @@ async def test_fsm_panic_watchdog_catches_hab_events():
     """
     mock_serial = MagicMock(spec=EphemeralSerialClient)
     mock_serial.is_connected = True
-
     from pytest_mes_core.utils.uart_parser import UartStreamParser
     mock_serial.parser = UartStreamParser()
-
-    # Build a real queue with the simulated UART stream.
     rx_q = queue.Queue()
-    rx_q.put(b"U-Boot 2022.04\r\nLoading Kernel...\r\nHAB Events: SEC_ERR Signature Verification Failed")
-    # Sentinel: the queue.Empty exception from the next get() will naturally
-    # end the iteration loop, but the PanicDetected will already have been yielded.
-
+    rx_q.put(b'U-Boot 2022.04\r\nLoading Kernel...\r\nHAB Events: SEC_ERR Signature Verification Failed')
     mock_serial.subscribe.return_value = rx_q
     mock_serial.unsubscribe = MagicMock()
-
     mock_ssh = MagicMock(spec=EphemeralSSHClient)
     cfg = StateMachineConfig(enabled=True)
-
-    fsm = EmbeddedLinuxStateMachine(
-        psu=None,
-        serial=mock_serial,
-        ssh=mock_ssh,
-        cfg=cfg
-    )
-
-    with pytest.raises(KernelPanicError, match="Device kernel panicked during OS boot sequence"):
-        await fsm.event_wait_for_os_shell()
-
-    # Verify the subscriber was properly cleaned up (zero-leakage)
+    fsm = EmbeddedLinuxStateMachine(psu=None, serial=mock_serial, ssh=mock_ssh, cfg=cfg)
+    with pytest.raises(KernelPanicError, match='Device kernel panicked during OS boot sequence'):
+        fsm.event_wait_for_os_shell()
     mock_serial.unsubscribe.assert_called_once_with(rx_q)

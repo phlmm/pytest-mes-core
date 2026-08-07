@@ -1,3 +1,5 @@
+from __future__ import annotations
+import functools
 """
 pytest_mes_core.mcu_app_state
 ==============================
@@ -45,10 +47,9 @@ The FSM is **observation-driven**: test fixtures feed it events
 (MQTT messages, UDP log lines, ARP replies) and it transitions
 automatically.  Tests can then gate on a target state::
 
-    await app_fsm.async_wait_for("APP_READY", timeout_s=30.0)
+    app_fsm.wait_for("APP_READY", timeout_s=30.0)
 """
 
-from __future__ import annotations
 
 import enum
 import time
@@ -160,7 +161,7 @@ class McuAppStateMachine:
     # Waiting for states (async only)
     # ------------------------------------------------------------------
 
-    async def async_wait_for(
+    def wait_for(
         self, target_state: str, timeout_s: float = 30.0, poll_interval_s: float = 0.05
     ) -> bool:
         """Wait for ``target_state`` to have been entered.
@@ -176,16 +177,14 @@ class McuAppStateMachine:
         and also catches states that were entered and exited transiently
         between polls (e.g. a fast boot chain) via the timestamp check.
         """
-        import anyio
         t_start = time.monotonic()
         if self.state == target_state:
             return True
 
-        with anyio.move_on_after(timeout_s):
-            while True:
-                if self.state == target_state or self._state_timestamps.get(target_state, -1.0) >= t_start:
-                    return True
-                await anyio.sleep(poll_interval_s)
+        while time.monotonic() - t_start < timeout_s:
+            if self.state == target_state or self._state_timestamps.get(target_state, -1.0) >= t_start:
+                return True
+            time.sleep(poll_interval_s)
         return False
 
     # ------------------------------------------------------------------

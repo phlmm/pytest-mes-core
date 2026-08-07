@@ -461,31 +461,11 @@ class DPS150:
             return state['output_voltage'], state['output_current'], state['output_power']
         return 0.0, 0.0, 0.0
 
-    async def async_set_voltage(self, volts: float) -> None:
-        import anyio
-        from functools import partial
-        await anyio.to_thread.run_sync(partial(self.set_voltage, volts))
 
-    async def async_set_current_limit(self, amps: float) -> None:
-        import anyio
-        from functools import partial
-        await anyio.to_thread.run_sync(partial(self.set_current_limit, amps))
 
-    async def async_enable_output(self) -> None:
-        import anyio
-        await anyio.to_thread.run_sync(self.enable_output)
 
-    async def async_disable_output(self) -> None:
-        import anyio
-        await anyio.to_thread.run_sync(self.disable_output)
 
-    async def async_measure_current(self) -> float:
-        import anyio
-        return await anyio.to_thread.run_sync(self.measure_current)
 
-    async def async_measure_voltage(self) -> float:
-        import anyio
-        return await anyio.to_thread.run_sync(self.measure_voltage)
     # --------------------------------------------------------
 
     def set_output(self, volts: float, amps: float):

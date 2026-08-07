@@ -2,7 +2,6 @@ import structlog
 import threading
 from functools import partial
 from typing import Any
-import anyio
 from pytest_mes_core.transports.base import DutTransport, CommandResult, TransportConnectionError
 logger = structlog.get_logger('mes_core.transports.failover')
 
@@ -120,41 +119,7 @@ class FailoverTransport(DutTransport):
         self.primary.disconnect()
         self.fallback.disconnect()
 
-    async def async_connect(self) -> None:
-        """Async variant of connect. Mirrors the same connect-lock semantics as the sync version."""
-        # Acquire lock synchronously (it's very brief — just checking and setting state).
-        with self._connect_lock:
-            already_connected = self.is_connected
-        if not already_connected:
-            logger.info('[Router] Arming dual-transport failover matrix (Async)...')
 
-            # Always ensure fallback is connected
-            await self.fallback.async_connect()
-
-            try:
-                await self.primary.async_connect()
-                self.is_failed_over = False
-            except TransportConnectionError:
-                logger.warning('[Router] Primary transport offline during async setup. Matrix starting in FAILOVER mode.')
-                self.is_failed_over = True
-
-            # _start_recovery_thread() serializes concurrent arming attempts on
-            # _connect_lock, preventing the double-thread-spawn race that existed
-            # when this method built the Thread inline outside any lock.
-            self._start_recovery_thread()
-            logger.debug('[Router] Dual-transport routing matrix armed.')
-
-    async def async_disconnect(self) -> None:
-        """Async variant of disconnect."""
-        self._stop_recovery.set()
-        if self._recovery_thread and self._recovery_thread.is_alive():
-            # partial() is required: anyio.to_thread.run_sync takes a zero-arg callable.
-            # Passing 1.0 directly would be interpreted as the `cancellable` kwarg (a bool).
-            await anyio.to_thread.run_sync(partial(self._recovery_thread.join, 1.0))
-        logger.debug('[Router] ZERO-LEAKAGE: Tearing down dual-transport matrix.')
-        async with anyio.create_task_group() as tg:
-            tg.start_soon(self.primary.async_disconnect)
-            tg.start_soon(self.fallback.async_disconnect)
 
     def safe_run(self, cmd: str, timeout_s: float=30.0, check_exit_code: bool=False, auto_retry: bool=False, **kwargs: Any) -> CommandResult:
         """Executes a command on the target, failing over to the fallback transport if necessary.
@@ -192,27 +157,6 @@ class FailoverTransport(DutTransport):
                 logger.warning('failover_successful_but_command_cmd_lacks_auto_retry_true_escalating_failure_to_fsm', cmd=cmd)
                 raise
 
-    async def async_safe_run(self, cmd: str, timeout_s: float=30.0, check_exit_code: bool=False, auto_retry: bool=False, **kwargs: Any) -> CommandResult:
-        """Async variant of safe_run."""
-        if self.is_failed_over:
-            logger.debug('[Router] Routing via Fallback Transport...')
-            return await self.fallback.async_safe_run(cmd, timeout_s, check_exit_code, auto_retry, **kwargs)
-        try:
-            return await self.primary.async_safe_run(cmd, timeout_s, check_exit_code, auto_retry, **kwargs)
-        except TransportConnectionError as e:
-            logger.critical('=' * 60)
-            logger.critical('fatal_primary_transport_severed_e', e=e)
-            logger.critical('[Router] ENGAGING OUT-OF-BAND HARDWARE FALLBACK...')
-            logger.critical('=' * 60)
-            self.is_failed_over = True
-            logger.debug('[Router] Transmitting wake-up pulse to fallback console...')
-            await self.fallback.async_safe_run('\n', timeout_s=1.0, check_exit_code=False)
-            if auto_retry:
-                logger.info('hardware_failover_successful_retrying_idempotent_command_cmd', cmd=cmd)
-                return await self.fallback.async_safe_run(cmd, timeout_s, check_exit_code, auto_retry, **kwargs)
-            else:
-                logger.warning('failover_successful_but_command_cmd_lacks_auto_retry_true_escalating_failure_to_fsm', cmd=cmd)
-                raise
 
     # ==========================================
     # PUB/SUB & OUT-OF-BAND UART PASSTHROUGH
@@ -238,11 +182,6 @@ class FailoverTransport(DutTransport):
             return self.fallback.expect(pattern, timeout_s=timeout_s, blast_char=blast_char, active_redraw=active_redraw)
         raise NotImplementedError("Fallback transport does not support expect().")
 
-    async def async_expect(self, pattern: str, timeout_s: float = 5.0, blast_char: str = '', active_redraw: bool = True) -> str:
-        """Pass-through to Fallback Transport's async_expect()."""
-        if hasattr(self.fallback, 'async_expect'):
-            return await self.fallback.async_expect(pattern, timeout_s=timeout_s, blast_char=blast_char, active_redraw=active_redraw)
-        raise NotImplementedError("Fallback transport does not support async_expect().")
 
     def write_line(self, cmd: str, sensitive: bool = False) -> None:
         """Pass-through to Fallback Transport's write_line()."""
@@ -287,35 +226,10 @@ class FailoverTransport(DutTransport):
             return self.fallback.flush_buffers()
         raise NotImplementedError("Fallback transport does not support flush_buffers().")
 
-    async def async_write_line(self, cmd: str, sensitive: bool = False) -> None:
-        """Pass-through to Fallback Transport's async_write_line()."""
-        if hasattr(self.fallback, 'async_write_line'):
-            return await self.fallback.async_write_line(cmd, sensitive=sensitive)
-        raise NotImplementedError("Fallback transport does not support async_write_line().")
 
-    async def async_raw_write(self, data: bytes) -> None:
-        """Pass-through to Fallback Transport's async_raw_write()."""
-        if hasattr(self.fallback, 'async_raw_write'):
-            return await self.fallback.async_raw_write(data)
-        raise NotImplementedError("Fallback transport does not support async_raw_write().")
 
-    async def async_raw_read_chunk(self) -> bytes:
-        """Pass-through to Fallback Transport's async_raw_read_chunk()."""
-        if hasattr(self.fallback, 'async_raw_read_chunk'):
-            return await self.fallback.async_raw_read_chunk()
-        raise NotImplementedError("Fallback transport does not support async_raw_read_chunk().")
 
-    async def async_raw_read(self, size: int) -> bytes:
-        """Pass-through to Fallback Transport's async_raw_read()."""
-        if hasattr(self.fallback, 'async_raw_read'):
-            return await self.fallback.async_raw_read(size)
-        raise NotImplementedError("Fallback transport does not support async_raw_read().")
 
-    async def async_flush_buffers(self) -> None:
-        """Pass-through to Fallback Transport's async_flush_buffers()."""
-        if hasattr(self.fallback, 'async_flush_buffers'):
-            return await self.fallback.async_flush_buffers()
-        raise NotImplementedError("Fallback transport does not support async_flush_buffers().")
 
 
     def read_clean_stream(self):

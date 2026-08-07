@@ -85,11 +85,3 @@ class RenodeRunner:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.stop()
-
-    async def __aenter__(self):
-        import anyio
-        return await anyio.to_thread.run_sync(self.__enter__)
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        import anyio
-        await anyio.to_thread.run_sync(self.__exit__, exc_type, exc_val, exc_tb)

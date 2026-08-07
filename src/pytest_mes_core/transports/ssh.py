@@ -74,15 +74,7 @@ class EphemeralSSHClient:
             except Exception as e:
                 logger.debug('teardown_exception_safe_to_ignore_e', e=e)
 
-    async def async_connect(self) -> None:
-        """Async variant of connect."""
-        import anyio
-        await anyio.to_thread.run_sync(self.connect)
 
-    async def async_disconnect(self) -> None:
-        """Async variant of disconnect."""
-        import anyio
-        await anyio.to_thread.run_sync(self.disconnect)
 
     def safe_run(self, cmd: str, timeout_s: float=30.0, check_exit_code: bool=False, auto_retry: bool=False, **kwargs: Any) -> CommandResult:
         """Synchronous execution mapped to exact Domain Exceptions.
@@ -150,11 +142,3 @@ class EphemeralSSHClient:
             err_msg = f"Physical TCP/SSH link severed during execution of '{log_cmd}': {e}"
             logger.critical('fatal_err_msg', err_msg=err_msg)
             raise TransportConnectionError(err_msg) from e
-
-    async def async_safe_run(self, cmd: str, timeout_s: float=30.0, check_exit_code: bool=False, auto_retry: bool=False, **kwargs: Any) -> CommandResult:
-        """Async variant of safe_run using thread offloading."""
-        import anyio
-        from functools import partial
-        return await anyio.to_thread.run_sync(
-            partial(self.safe_run, cmd, timeout_s=timeout_s, check_exit_code=check_exit_code, auto_retry=auto_retry, **kwargs)
-        )

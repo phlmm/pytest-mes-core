@@ -103,9 +103,6 @@ class BlockDeviceValidator:
                 except Exception as cleanup_err:
                     logger.warning('cleanup_failed_transport_likely_destabilized_cleanup_err', cleanup_err=cleanup_err)
 
-    @staticmethod
-    async def async_measure_throughput(dut, mount_point, test_file_size_mb, min_write_mbps, *args, **kwargs):
-        return await anyio.to_thread.run_sync(BlockDeviceValidator.measure_throughput, dut, mount_point, test_file_size_mb, min_write_mbps, *args, **kwargs)
 
     @staticmethod
     def verify_emmc_health(dut: DutTransport, device_path: str='/dev/mmcblk0') -> ValidatorResult:
@@ -152,6 +149,3 @@ class BlockDeviceValidator:
             return ValidatorResult(passed=False, error_msg='DUT hung during EXTCSD read.', context=context_data)
         except TransportConnectionError as e:
             return ValidatorResult(passed=False, error_msg=f'Transport dropped during EXTCSD read: {e}', context=context_data)
-    @staticmethod
-    async def async_verify_emmc_health(dut, device_path, *args, **kwargs):
-        return await anyio.to_thread.run_sync(BlockDeviceValidator.verify_emmc_health, dut, device_path, *args, **kwargs)

@@ -1,3 +1,4 @@
+import functools
 import structlog
 import time
 import pyvisa
@@ -6,7 +7,6 @@ from pathlib import Path
 from tenacity import retry, stop_after_attempt, wait_fixed
 from typing import Optional, Any
 from functools import partial
-import anyio
 from pytest_mes_core.config import PsuVendorConfig, RigolPsuConfig, KeysightPsuConfig
 logger = structlog.get_logger('mes_core.instruments.psu')
 
@@ -174,35 +174,15 @@ class ScpiPowerSupply:
     # Async API (anyio-compatible)
     # ------------------------------------------------------------------
 
-    async def async_connect(self) -> None:
-        await anyio.to_thread.run_sync(self.connect)
 
-    async def async_set_voltage(self, volts: float) -> None:
-        await anyio.to_thread.run_sync(partial(self.set_voltage, volts))
 
-    async def async_set_current_limit(self, amps: float) -> None:
-        await anyio.to_thread.run_sync(partial(self.set_current_limit, amps))
 
-    async def async_enable_output(self) -> None:
-        await anyio.to_thread.run_sync(self.enable_output)
 
-    async def async_disable_output(self) -> None:
-        await anyio.to_thread.run_sync(self.disable_output)
 
-    async def async_measure_current(self) -> float:
-        return await anyio.to_thread.run_sync(self.measure_current)
 
-    async def async_measure_voltage(self) -> float:
-        return await anyio.to_thread.run_sync(self.measure_voltage)
 
-    async def async_start_data_logger(self) -> None:
-        await anyio.to_thread.run_sync(self.start_data_logger)
 
-    async def async_download_data_log(self, export_dir: Path) -> Optional[Path]:
-        return await anyio.to_thread.run_sync(partial(self.download_data_log, export_dir))
 
-    async def async_close(self) -> None:
-        await anyio.to_thread.run_sync(self.close)
 
 class SafePowerController:
     """
@@ -243,36 +223,3 @@ class SafePowerController:
         """ZERO-LEAKAGE: Always kill the power, no exceptions."""
         logger.info('[PSU Control] Test context exiting. De-energizing board.')
         self.psu.disable_output()
-
-    # ------------------------------------------------------------------
-    # Async API (anyio-compatible)
-    # ------------------------------------------------------------------
-
-    async def __aenter__(self) -> ScpiPowerSupply:
-        logger.info('initiating_safe_power_ramp_to_target_v_v_current_limit_a_a_limit', target_v=self.target_v, current_limit_a=self.current_limit_a)
-        await self.psu.async_set_current_limit(self.current_limit_a)
-        await self.psu.async_set_voltage(0.0)
-        await self.psu.async_enable_output()
-        logger.debug('[PSU Control] Ramping voltage to pre-charge DUT decoupling capacitors...')
-        steps = int(self.target_v)
-        for v in range(1, steps + 1):
-            await self.psu.async_set_voltage(float(v))
-            await anyio.sleep(0.05)
-        await self.psu.async_set_voltage(self.target_v)
-        await anyio.sleep(0.2)
-        idle_current = await self.psu.async_measure_current()
-        logger.info('ramp_complete_idle_current_draw_idle_current_a', idle_current=idle_current)
-        if idle_current >= self.current_limit_a * 0.95:
-            await self.psu.async_disable_output()
-            logger.critical('=' * 60)
-            logger.critical('fatal_hardware_short_circuit_detected')
-            logger.critical('board_pulled_idle_current_a_at_idle_limit_current_limit_a_a', idle_current=idle_current, current_limit_a=self.current_limit_a)
-            logger.critical('power_severed_check_pcb_for_solder_bridges_or_reversed_polarity_components')
-            logger.critical('=' * 60)
-            raise InstrumentShortCircuitError(f'FATAL: Board acting as a short circuit! Drew {idle_current}A at idle.')
-        return self.psu
-
-    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
-        """ZERO-LEAKAGE: Always kill the power, no exceptions."""
-        logger.info('[PSU Control] Test context exiting. De-energizing board.')
-        await self.psu.async_disable_output()

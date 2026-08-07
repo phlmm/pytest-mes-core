@@ -1,4 +1,3 @@
-import anyio
 import functools
 import structlog
 import hashlib
@@ -87,10 +86,6 @@ class PkiProvisioner:
             raise ProvisioningError('Cryptographic transit failure. Corrupted payload destroyed on target.')
         logger.info('injection_successful_and_cryptographically_verified_remote_dest', remote_dest=remote_dest)
 
-    @staticmethod
-    async def async_provision_credential(transport: DutTransport, local_filepath: Path, remote_dest: str, permissions: str = '400') -> None:
-        return await anyio.to_thread.run_sync(
-            functools.partial(PkiProvisioner.provision_credential, transport, local_filepath, remote_dest, permissions))
 
 class PkiPairingValidator:
     """
@@ -135,7 +130,3 @@ class PkiPairingValidator:
             return ValidatorResult(passed=False, error_msg='x509 Certificate and Private Key mismatch. Files destroyed.')
         logger.info('[PKI] Cryptographic pairing mathematically proven.')
         return ValidatorResult(passed=True)
-    @staticmethod
-    async def async_verify_x509_pairing(transport: DutTransport, remote_cert_path: str, remote_key_path: str) -> ValidatorResult:
-        return await anyio.to_thread.run_sync(
-            functools.partial(PkiPairingValidator.verify_x509_pairing, transport, remote_cert_path, remote_key_path))

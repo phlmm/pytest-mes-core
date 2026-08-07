@@ -9,7 +9,7 @@ class RpcClientBase(Protocol):
     Regardless of the target (MCU vs ELinux) or transport (UART vs TCP), the
     developer API remains strictly-typed using Pydantic models.
     """
-    async def async_invoke(self, request: BaseModel, response_type: Type[TResponse]) -> Optional[TResponse]:
+    def invoke(self, request: BaseModel, response_type: Type[TResponse]) -> Optional[TResponse]:
         """
         Executes a remote procedure call.
         

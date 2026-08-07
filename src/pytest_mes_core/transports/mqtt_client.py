@@ -4,7 +4,6 @@ import threading
 import uuid
 import json
 import structlog
-import anyio
 import paho.mqtt.client as mqtt
 
 from pytest_mes_core.config.protocols import HostMqttConfig
@@ -106,11 +105,7 @@ class MqttClient:
         self._client.loop_stop()
         self._connected_event.clear()
 
-    async def async_connect(self) -> None:
-        await anyio.to_thread.run_sync(self.connect)
 
-    async def async_disconnect(self) -> None:
-        await anyio.to_thread.run_sync(self.disconnect)
 
     def subscribe(self, maxsize: int = 0) -> queue.Queue:
         q = queue.Queue(maxsize=maxsize)
@@ -189,19 +184,11 @@ class MqttClient:
         finally:
             self.unsubscribe(q)
 
-    async def async_safe_run(self, cmd: str, timeout_s: float = 30.0, check_exit_code: bool = False, auto_retry: bool = False, **kwargs) -> CommandResult:
-        from functools import partial
-        return await anyio.to_thread.run_sync(
-            partial(self.safe_run, cmd, timeout_s=timeout_s, check_exit_code=check_exit_code, auto_retry=auto_retry, **kwargs)
-        )
 
     def publish_json(self, payload: dict, retain: bool = False, qos: int = 1) -> None:
         """Fire-and-forget JSON publish."""
         self.write_line(json.dumps(payload), retain=retain, qos=qos)
 
-    async def async_publish_json(self, payload: dict, retain: bool = False, qos: int = 1) -> None:
-        from functools import partial
-        await anyio.to_thread.run_sync(partial(self.publish_json, payload, retain=retain, qos=qos))
 
     def wait_for_event(self, event_code: str, timeout_s: float = 10.0) -> dict:
         """Waits for a specific JSON event from the subscribed topic."""
@@ -224,11 +211,6 @@ class MqttClient:
         finally:
             self.unsubscribe(q)
 
-    async def async_wait_for_event(self, event_code: str, timeout_s: float = 10.0) -> dict:
-        from functools import partial
-        return await anyio.to_thread.run_sync(
-            partial(self.wait_for_event, event_code, timeout_s)
-        )
 
     def clear_retained_messages(self, topic: str) -> None:
         if not self.is_connected:

@@ -1,3 +1,4 @@
+from __future__ import annotations
 """
 pytest_mes_core.instruments.sntp_server
 ========================================
@@ -32,7 +33,6 @@ Usage::
     is dispatched.
 """
 
-from __future__ import annotations
 
 import select
 import socket
@@ -199,13 +199,3 @@ class SntpServer:
     # Async API (anyio-compatible)
     # ------------------------------------------------------------------
 
-    async def async_run(
-        self,
-        timeout_s: float = 20.0,
-        modify_response_fn: Optional[ModifyFn] = None,
-        wait_for_pattern: Optional[str] = None,
-    ) -> bool:
-        """Async variant of :meth:`run`. Runs the blocking socket loop in a thread."""
-        return await anyio.to_thread.run_sync(
-            partial(self.run, timeout_s, modify_response_fn, wait_for_pattern)
-        )

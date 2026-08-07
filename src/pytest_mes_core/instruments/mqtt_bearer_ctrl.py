@@ -1,3 +1,5 @@
+from __future__ import annotations
+import functools
 """
 pytest_mes_core.instruments.mqtt_bearer_ctrl
 ============================================
@@ -12,20 +14,18 @@ The DUT firmware exposes two commands (handled by app_debug_cmd_thread.c):
 
 Usage in tests::
 
-    async def test_eth_bearer(mqtt_transport, mqtt_bearer_ctrl):
-        await mqtt_bearer_ctrl.async_force("eth")
-        event = await mqtt_transport.async_wait_for_event("DEVICE_INFO", timeout_s=30)
+    def test_eth_bearer(mqtt_transport, mqtt_bearer_ctrl):
+        mqtt_bearer_ctrl.force("eth")
+        event = mqtt_transport.wait_for_event, "DEVICE_INFO", timeout_s=30
         assert event["telemetry"]["bearer"] == 1
 """
 
-from __future__ import annotations
 
 import re
 import time
 from functools import partial
 from typing import Optional
 
-import anyio
 import structlog
 
 from pytest_mes_core.transports.serial_client import EphemeralSerialClient
@@ -147,29 +147,9 @@ class MqttBearerController:
     # Async API (anyio-compatible)
     # ------------------------------------------------------------------
 
-    async def async_force(self, bearer: str, ack_timeout_s: float = 5.0) -> None:
-        """Async variant of :meth:`force`."""
-        await anyio.to_thread.run_sync(
-            partial(self.force, bearer, ack_timeout_s)
-        )
 
-    async def async_query(self, timeout_s: float = 5.0) -> tuple[str, str]:
-        """Async variant of :meth:`query`."""
-        return await anyio.to_thread.run_sync(
-            partial(self.query, timeout_s)
-        )
 
-    async def async_eth_link_down(self, timeout_s: float = 10.0) -> None:
-        """Async variant of :meth:`eth_link_down`."""
-        await anyio.to_thread.run_sync(
-            partial(self.eth_link_down, timeout_s)
-        )
 
-    async def async_eth_link_up(self, timeout_s: float = 10.0) -> None:
-        """Async variant of :meth:`eth_link_up`."""
-        await anyio.to_thread.run_sync(
-            partial(self.eth_link_up, timeout_s)
-        )
 
     # ------------------------------------------------------------------
     # Helpers

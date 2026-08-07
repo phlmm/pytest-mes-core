@@ -21,30 +21,31 @@ class ELinuxJsonRpcClient(RpcClientBase):
         self.rx_func = rx_func
         self.timeout_s = timeout_s
 
-    async def async_invoke(self, request: BaseModel, response_type: Type[TMessage]) -> Optional[TMessage]:
-        import anyio
+    def invoke(self, request: BaseModel, response_type: Type[TMessage]) -> Optional[TMessage]:
+        
         
         # Serialize Pydantic model to JSON and append newline delimiter
         payload_str = request.model_dump_json() + "\n"
         
         # Transmit over the socket
-        await anyio.to_thread.run_sync(self.tx_func, payload_str.encode('utf-8'))
+        self.tx_func(payload_str.encode('utf-8'))
         
         response_buffer = bytearray()
         
-        with anyio.move_on_after(self.timeout_s) as cancel_scope:
-            while True:
+        import time
+        t0 = time.perf_counter()
+        while time.perf_counter() - t0 < self.timeout_s:
                 # Read until newline
-                chunk = await anyio.to_thread.run_sync(self.rx_func, 1)
+                chunk = self.rx_func(1)
                 if not chunk:
-                    await anyio.sleep(0.01)
+                    import time; time.sleep(0.01)
                     continue
                     
                 response_buffer.extend(chunk)
                 if chunk == b'\n':
                     break
                     
-        if cancel_scope.cancel_called:
+        if time.perf_counter() - t0 >= self.timeout_s:
             logger.error("elinux_json_rpc_timed_out")
             return None
             
