@@ -449,7 +449,7 @@ class DefaultSWUpdateStrategy(ContextValidationStrategy):
             fsm.context.active_rootfs = 'UNKNOWN'
             return
         logger.info('validating_ab_partitions_via_swupdate')
-        res_sw = fsm.serial.async_safe_run('swupdate -g', timeout_s=3.0, check_exit_code=False)
+        res_sw = fsm.serial.safe_run('swupdate -g', timeout_s=3.0, check_exit_code=False)
         if res_sw.ok:
             output = res_sw.stdout.strip()
             shell_prompt = fsm.cfg.os_shell_prompt
@@ -460,7 +460,7 @@ class DefaultSWUpdateStrategy(ContextValidationStrategy):
             fsm.context.active_rootfs = 'UNKNOWN'
         crypto_part = fsm.cfg.storage_data_encrypted
         if crypto_part:
-            mount_res = fsm.serial.async_safe_run('mount | grep /data', timeout_s=3.0, check_exit_code=False)
+            mount_res = fsm.serial.safe_run('mount | grep /data', timeout_s=3.0, check_exit_code=False)
             fsm.context.crypto_data_mounted = crypto_part in mount_res.stdout
 
 class BaseDutStateMachine(ABC):
@@ -1111,7 +1111,7 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
         logger.debug('verifying_ssh_heartbeat_existing_os')
         try:
             self._connect_ssh_with_retry()
-            res = self.ssh.async_safe_run('echo MES_HEARTBEAT', timeout_s=2.0)
+            res = self.ssh.safe_run('echo MES_HEARTBEAT', timeout_s=2.0)
             if 'MES_HEARTBEAT' in res.stdout:
                 return True
         except Exception as e:
@@ -1119,7 +1119,7 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
         logger.debug('verifying_uart_heartbeat_existing_os')
         if self.serial.is_connected:
             try:
-                res = self.serial.async_safe_run('echo MES_HEARTBEAT', timeout_s=2.0, check_exit_code=False)
+                res = self.serial.safe_run('echo MES_HEARTBEAT', timeout_s=2.0, check_exit_code=False)
             except TransportConnectionError:
                 logger.warning('uart_heartbeat_failed', reason='serial_port_closed_mid_run', action='marking_dirty')
                 return False

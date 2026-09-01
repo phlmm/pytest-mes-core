@@ -16,7 +16,7 @@ class UuuTeziProvisioner(BaseProvisioner):
     Pushes TEZI images into SoC RAM via USB Serial Downloader mode.
     Enforces USB port isolation for parallel multi-jig environments.
     """
-    _LSUSB_NXP_RE = re.compile('(1fc9|15a2):[0-9a-f]{4}', re.IGNORECASE)
+    _LSUSB_NXP_RE = re.compile('(1fc9:01[0-9a-f]{2}|1fc9:00[0-9a-f]{2}|15a2:00[0-9a-f]{2}|0451:6165)', re.IGNORECASE)
     _UUU_RECOVERY_RE = re.compile('(SE Blank|SDP:)', re.IGNORECASE)
     _UUU_SUCCESS_RE = re.compile('(\\[\\s*Done|\\]\\s*Done\\b|Success\\s+[1-9]\\d*\\s+Failure\\s+0)', re.IGNORECASE)
     _UUU_FAIL_RE = re.compile('([\\[\\]]\\s*Fail\\b|uuu Failed)', re.IGNORECASE)
@@ -75,6 +75,80 @@ class UuuTeziProvisioner(BaseProvisioner):
             logger.critical('err_msg', err_msg=err_msg)
             raise ProvisioningError(err_msg)
 
+
+
+    def _run_ti_dfu_sequence(self, tezi_dir):
+        from pathlib import Path
+        import tempfile
+        import time
+        import subprocess
+        
+        dfu_bin = tezi_dir / "recovery" / "dfu-util"
+        if not dfu_bin.exists():
+            dfu_bin = Path("dfu-util")
+            
+        def wait_for_usb(vid_pid, timeout=15):
+            start = time.time()
+            while time.time() - start < timeout:
+                res = subprocess.run(["lsusb", "-d", vid_pid], capture_output=True, text=True)
+                if res.returncode == 0 and res.stdout.strip():
+                    time.sleep(1.0)
+                    return True
+                time.sleep(0.5)
+            from pytest_mes_core.provisioning.base import ProvisioningError
+            raise ProvisioningError(f"Timeout waiting for USB device {vid_pid} to enumerate!")
+            
+        def run_dfu(vid_pid, alt_setting, file_path, read=False):
+            wait_for_usb(vid_pid)
+            cmd = [str(dfu_bin), "-d", vid_pid, "-R", "-a", alt_setting]
+            if read:
+                cmd.extend(["-U", str(file_path)])
+            else:
+                cmd.extend(["-D", str(file_path)])
+                
+            from structlog import get_logger
+            logger = get_logger()
+            logger.debug(f"[TEZI] Executing DFU: {' '.join(cmd)}")
+            res = subprocess.run(cmd, capture_output=True, text=True)
+            
+        with tempfile.TemporaryDirectory() as tmpdir:
+            soc_id_bin = Path(tmpdir) / "SocId.bin"
+            run_dfu("0451:6165", "SocId", soc_id_bin, read=True)
+            
+            from pytest_mes_core.provisioning.base import ProvisioningError
+            if not soc_id_bin.exists() or soc_id_bin.stat().st_size < 24:
+                raise ProvisioningError("Failed to read SocId from AM62x BootROM. Is dfu-util working?")
+                
+            with open(soc_id_bin, "rb") as f:
+                f.seek(20)
+                soc_type = f.read(4).decode('ascii', errors='ignore')
+                
+        from structlog import get_logger
+        logger = get_logger()
+        logger.info(f"AM62x SoC Type detected: {soc_type}")
+        time.sleep(2.0)
+        
+        if "GP" in soc_type:
+            tiboot3 = tezi_dir.parent / "tiboot3-am62x-gp-verdin.bin"
+        else:
+            tiboot3 = tezi_dir.parent / "tiboot3-am62x-hs-fs-verdin.bin"
+            
+        tispl = tezi_dir.parent / "tispl.bin"
+        uboot = tezi_dir.parent / "u-boot.img-recoverytezi"
+        
+        logger.info(f"Injecting {tiboot3.name} into AM62x BootROM...")
+        run_dfu("0451:6165", "bootloader", tiboot3)
+        time.sleep(2.0)
+        
+        logger.info(f"Injecting tispl.bin into R5 SPL...")
+        run_dfu("1b67:4000", "tispl.bin", tispl)
+        time.sleep(2.0)
+        
+        logger.info(f"Injecting u-boot.img into A53 SPL...")
+        run_dfu("1b67:4000", "u-boot.img", uboot)
+        time.sleep(2.0)
+        
+        logger.info("[TEZI] TI DFU Sequence complete! Handing over to uuu for FIT image injection...")
 
     def provision(
         self,
@@ -138,6 +212,11 @@ class UuuTeziProvisioner(BaseProvisioner):
             
         logger.info('dut_detected_injecting_tezi_payload_from_name', name=tezi_dir.name)
         
+        import subprocess
+        res_lsusb = subprocess.run(['lsusb'], capture_output=True, text=True)
+        if "0451:6165" in res_lsusb.stdout:
+            self._run_ti_dfu_sequence(tezi_dir)
+            
         # 2. Execute uuu securely
         # Note: If the host lacks NXP udev rules, uuu will fail here with a libusb permission error.
         # The operator must either run Pytest with sudo, or install the udev rules.
@@ -146,9 +225,11 @@ class UuuTeziProvisioner(BaseProvisioner):
             cmd.extend(['-m', self.usb_path])
         cmd.append(str(tezi_dir.absolute()))
         try:
-            process = LiveProcess(cmd, self.flash_timeout_s, logger).execute()
-            # Strip ANSI escape sequences from stdout to handle colored terminal text
-            clean_stdout = re.sub(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])', '', process.stdout)
+            logger.info("Executing UUU via subprocess.run...")
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=self.flash_timeout_s)
+            clean_stdout = re.sub(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])', '', res.stdout + res.stderr)
+            logger.critical(f"UUU Output:\n{clean_stdout}")
+            process = type("Obj", (object,), {"returncode": res.returncode, "stdout": clean_stdout, "duration_s": 0, "export_log": lambda x: "inline_log"})()
             
             # 3. Analyze output physics
             if process.returncode != 0:
