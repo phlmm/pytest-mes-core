@@ -77,14 +77,19 @@ gui-test = [
 local-gui = [
     "customtkinter>=5.2.0"
 ]
+# MCP Server for AI Agent Access
+mcp = [
+    "mcp[cli]>=1.0.0",
+]
 # Install everything: pip install pytest-mes-core[all]
 all = [
-    "pytest-mes-core[linux-hardware,instruments,dev,docs,gui,gui-test,local-gui]"
+    "pytest-mes-core[linux-hardware,instruments,dev,docs,gui,gui-test,local-gui,mcp]"
 ]
 
 [project.scripts]
 mes-gui = "pytest_mes_core.gui.server:main"
 mes-gui-desktop = "pytest_mes_core.gui.desktop_app:main"
+pytest-mes-mcp = "pytest_mes_core.mcp.server:main"
 
 [project.entry-points.pytest11]
 # Magically injects the framework into any pytest run on the Host PC
