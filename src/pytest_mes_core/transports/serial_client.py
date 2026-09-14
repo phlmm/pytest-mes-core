@@ -103,7 +103,16 @@ class EphemeralSerialClient:
         if self.is_connected:
             return
         try:
-            self.ser = serial.Serial(port=self.cfg.port, baudrate=self.cfg.baudrate, timeout=0.1, exclusive=True)
+            self.ser = serial.Serial()
+            self.ser.port = self.cfg.port
+            self.ser.baudrate = self.cfg.baudrate
+            self.ser.timeout = 0.1
+            self.ser.exclusive = True
+            self.ser.dtr = False
+            self.ser.rts = False
+            self.ser.dsrdtr = False
+            self.ser.rtscts = False
+            self.ser.open()
             self.ser.reset_output_buffer()
             
             # Interactive hardware flush: write a newline to force the USB-serial chip
