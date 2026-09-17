@@ -4,7 +4,7 @@ import json
 import logging
 import subprocess
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Union
 
 class ProcessExecutionError(Exception):
     pass
@@ -18,11 +18,18 @@ class LiveProcess:
     Handles live terminal streaming, telemetry capture, and artifact exporting.
     """
 
-    def __init__(self, cmd: List[str], timeout_s: float, logger: logging.Logger):
+    def __init__(
+        self,
+        cmd: List[str],
+        timeout_s: float,
+        logger: logging.Logger,
+        cwd: Optional[Union[Path, str]] = None
+    ):
         self.cmd = cmd
         self.cmd_str = ' '.join(cmd)
         self.timeout_s = timeout_s
         self.logger = logger
+        self.cwd = Path(cwd) if cwd is not None else None
         self.stdout: str = ''
         self.returncode: Optional[int] = None
         self.duration_s: float = 0.0
@@ -41,9 +48,19 @@ class LiveProcess:
         """
         if self.executed:
             raise RuntimeError(f"Process '{self.cmd[0]}' has already been executed.")
-        self.logger.debug(f'[OS] Executing: {self.cmd_str}')
+        if self.cwd:
+            self.logger.debug(f'[OS] Executing in {self.cwd}: {self.cmd_str}')
+        else:
+            self.logger.debug(f'[OS] Executing: {self.cmd_str}')
         t0 = time.perf_counter()
-        proc = subprocess.Popen(self.cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+        proc = subprocess.Popen(
+            self.cmd,
+            cwd=str(self.cwd) if self.cwd else None,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1
+        )
         _stdout_chunks: list = []
         try:
             import os
@@ -108,6 +125,8 @@ class LiveProcess:
         filepath = export_dir / filename
         with open(filepath, 'w') as f:
             f.write(f'COMMAND: {self.cmd_str}\n')
+            if self.cwd:
+                f.write(f'CWD: {self.cwd}\n')
             f.write(f'EXIT CODE: {self.returncode}\n')
             f.write(f'DURATION: {self.duration_s}s\n')
             f.write('-' * 40 + '\n')
@@ -122,4 +141,12 @@ class LiveProcess:
         Returns:
             dict: Telemetry data containing cmd, returncode, duration, and output size.
         """
-        return {'cmd': self.cmd_str, 'returncode': self.returncode, 'duration_s': self.duration_s, 'output_length_bytes': len(self.stdout)}
+        data = {
+            'cmd': self.cmd_str,
+            'returncode': self.returncode,
+            'duration_s': self.duration_s,
+            'output_length_bytes': len(self.stdout)
+        }
+        if self.cwd:
+            data['cwd'] = str(self.cwd)
+        return data

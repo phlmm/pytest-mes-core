@@ -225,11 +225,9 @@ class UuuTeziProvisioner(BaseProvisioner):
             cmd.extend(['-m', self.usb_path])
         cmd.append(str(tezi_dir.absolute()))
         try:
-            logger.info("Executing UUU via subprocess.run...")
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=self.flash_timeout_s)
-            clean_stdout = re.sub(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])', '', res.stdout + res.stderr)
-            logger.critical(f"UUU Output:\n{clean_stdout}")
-            process = type("Obj", (object,), {"returncode": res.returncode, "stdout": clean_stdout, "duration_s": 0, "export_log": lambda x: "inline_log"})()
+            process = LiveProcess(cmd, self.flash_timeout_s, logger).execute()
+            clean_stdout = re.sub(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])', '', process.stdout)
+            logger.debug(f"UUU Output:\n{clean_stdout}")
             
             # 3. Analyze output physics
             if process.returncode != 0:

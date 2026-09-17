@@ -695,6 +695,8 @@ class EmbeddedLinuxStateMachine(BaseDutStateMachine):
         """
         if not medium:
             medium = 'default'
+        if medium == 'default' and self.context.active_boot_medium == 'default':
+            return
         straps = self.cfg.boot_straps_gpio_map.get(medium)
         if self.gpio:
             if straps:

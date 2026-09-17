@@ -43,3 +43,13 @@ def test_live_process_stdout_preserved_on_timeout():
         proc.execute()
     assert proc.executed is True
     assert 'hello' in proc.stdout
+
+def test_live_process_cwd(tmp_path):
+    logger = logging.getLogger('test')
+    test_subdir = tmp_path / "subdir"
+    test_subdir.mkdir()
+    proc = LiveProcess(cmd=['pwd'], timeout_s=5.0, logger=logger, cwd=test_subdir)
+    proc.execute()
+    assert proc.returncode == 0
+    assert str(test_subdir) in proc.stdout
+    assert proc.to_dict()['cwd'] == str(test_subdir)
